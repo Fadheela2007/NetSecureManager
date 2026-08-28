@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <title>NetSecureManager</title>
+
+  <!--
+    Favicon — même marque que NetworkMark.jsx, avec deux différences
+    imposées par le contexte.
+
+    1. COULEUR EN DUR. Un favicon vit hors de l'application : il ne peut
+       pas hériter de `currentColor` ni lire une variable CSS. On fige
+       donc le bleu acier de l'accent.
+
+    2. `prefers-color-scheme`. Sur un onglet de navigateur en thème
+       sombre, le bleu foncé disparaîtrait. La règle ci-dessous éclaircit
+       la marque dans ce cas — c'est la seule adaptation qu'un favicon
+       SVG sait faire tout seul.
+
+    Pas d'animation : les navigateurs l'ignorent dans un favicon, et
+    l'inclure alourdirait le fichier sans rien apporter.
+  -->
+  <style>
+    .m { fill: #2f5f8f; stroke: #2f5f8f; }
+    @media (prefers-color-scheme: dark) {
+      .m { fill: #6b9bd1; stroke: #6b9bd1; }
+    }
+  </style>
+
+  <circle class="m" cx="24" cy="24" r="19" fill="none" stroke-width="3" stroke-opacity="0.3"/>
+  <path class="m" d="M24 5 A19 19 0 0 1 40.5 14.5" fill="none" stroke-width="3" stroke-linecap="round"/>
+  <circle class="m" cx="24" cy="5" r="4" stroke="none"/>
+  <circle class="m" cx="42" cy="36" r="4" stroke="none"/>
+  <circle class="m" cx="6" cy="36" r="4" stroke="none"/>
+  <circle class="m" cx="24" cy="24" r="6.5" stroke="none"/>
+</svg>

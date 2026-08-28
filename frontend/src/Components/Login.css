@@ -1,0 +1,147 @@
+.login-screen {
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(ellipse 80% 60% at 50% 0%, var(--lueur-login) 0%, var(--ink-950) 60%);
+  overflow: hidden;
+  padding: 24px;
+}
+
+.login-topology {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0.55;
+}
+
+.topology-edge {
+  stroke: var(--border);
+  stroke-width: 0.12;
+}
+
+.topology-node {
+  fill: var(--brass-dim);
+  animation: node-pulse 4.5s ease-in-out infinite;
+}
+
+@keyframes node-pulse {
+  0%, 100% { opacity: 0.5; r: 0.6; }
+  50% { opacity: 1; r: 0.9; }
+}
+
+.login-card {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 380px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 40px 36px 32px;
+  box-shadow: var(--ombre-carte);
+}
+
+.login-mark {
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 20px;
+}
+
+.login-title {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.login-subtitle {
+  margin: 6px 0 28px;
+  color: var(--text-dim);
+  font-size: 13.5px;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+}
+
+.login-field input {
+  background: var(--ink-900);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 11px 12px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  transition: border-color 0.15s ease;
+}
+
+.login-field input:focus {
+  border-color: var(--brass-dim);
+}
+
+.login-field input::placeholder {
+  color: var(--text-faint);
+}
+
+.login-error {
+  margin: 0;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--color-crit) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-crit) 35%, transparent);
+  border-radius: 6px;
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.login-submit {
+  margin-top: 4px;
+  padding: 12px;
+  background: var(--brass);
+  /* Le texte du bouton suit le thème : sur le bleu foncé du thème clair,
+     un texte sombre serait illisible. */
+  color: var(--color-sur-accent);
+  border: none;
+  border-radius: 6px;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: 0.01em;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.login-submit:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+.login-submit:active:not(:disabled) {
+  transform: scale(0.99);
+}
+
+.login-submit:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.login-footnote {
+  margin: 24px 0 0;
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}

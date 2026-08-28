@@ -1,0 +1,46 @@
+/* =====================================================================
+   Styles applicatifs.
+
+   Ce fichier contenait jusqu'ici le CSS de démonstration livré par
+   `npm create vite` (.hero, .counter, #next-steps, .ticks...) — aucune
+   de ces classes n'était utilisée par NetSecureManager, et elles
+   référençaient des variables inexistantes. Remplacé par ce qui sert
+   réellement à l'application.
+   ===================================================================== */
+
+/* Tiroir latéral mobile : la barre de navigation sort du flux sous 768 px
+   et se superpose au contenu, plutôt que de le comprimer. */
+.voile-menu {
+  position: fixed;
+  inset: 0;
+  background: var(--voile-modale);
+  z-index: 40;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+@media (min-width: 768px) {
+  .voile-menu { display: none; }
+}
+
+/* Zone de contenu principale : le `min-width: 0` est indispensable pour
+   qu'un tableau large puisse défiler au lieu d'élargir toute la page. */
+.zone-contenu {
+  min-width: 0;
+}
+
+/* Cible tactile confortable : 44 px est le minimum recommandé. */
+@media (max-width: 768px) {
+  .cible-tactile {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+/* Les graphiques Recharts se redimensionnent via ResponsiveContainer, mais
+   leur conteneur doit pouvoir rétrécir. */
+.recharts-wrapper,
+.recharts-surface {
+  max-width: 100%;
+}

@@ -1,0 +1,64 @@
+# Dépendances
+node_modules/
+*/node_modules/
+
+# Secrets — NE JAMAIS COMMITER
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+
+# Build
+dist/
+dist-ssr/
+build/
+*.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Éditeurs / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Rapports et exports générés
+rapport_netsecuremanager.pdf
+rapport_netsecuremanager.xlsx
+
+# ---------------------------------------------------------------------
+# Sauvegardes de base — NE JAMAIS COMMITER
+#
+# Un export de la base contient les données RÉELLES du réseau supervisé :
+# adresses IP, noms de machines, adresses matérielles. Publier ce fichier
+# revient à publier la cartographie réseau du client — de quoi préparer
+# une attaque, et une faute contractuelle vis-à-vis de lui.
+#
+# sauvegarde_alertes.sql, présent à la racine, contient 120 adresses d'un
+# réseau d'entreprise réel. C'est un fichier de travail légitime : il doit
+# rester sur le poste, jamais dans le dépôt.
+# ---------------------------------------------------------------------
+*.sql
+!backend/schema.sql
+!backend/migrations/*.sql
+sauvegarde*.sql
+dump*.sql
+*.dump
+
+# Sorties de diagnostic pouvant contenir des adresses réelles
+diagnostic-*.txt
+sortie-*.txt
