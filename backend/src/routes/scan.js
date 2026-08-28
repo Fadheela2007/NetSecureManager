@@ -29,6 +29,8 @@ const {
   nettoyerNomPersonnalise,
   validerNomPersonnalise,
 } = require("../services/nomPersonnaliseService");
+const { detecterConflits, decrireConflit } = require("../services/conflitIpService");
+const { creerAlerte } = require("../services/monitoringService");
 
 /**
  * Vrai si l'erreur MySQL est « colonne inconnue » (ER_BAD_FIELD_ERROR, 1054).
@@ -187,6 +189,48 @@ async function attribuerPorts(idSwitch, ip, communaute) {
     }
   }
   return n;
+}
+
+/**
+ * Cherche les conflits d'adresses d'un site et crée une alerte par
+ * conflit trouvé.
+ *
+ * Le code de cause `conflit_ip` correspond aux pistes de résolution
+ * déjà rédigées dans services/suggestions.js — elles n'étaient jusqu'ici
+ * jamais atteintes, aucun code n'émettant ce code.
+ *
+ * Le dédoublonnage de creerAlerte() fait le reste : un conflit qui
+ * persiste incrémente un compteur au lieu de produire une alerte par
+ * scan.
+ */
+async function signalerConflitsIp(idSite) {
+  const [equipements] = await db.query(
+    `SELECT id_equipement, adresse_ip, adresse_mac
+     FROM EQUIPEMENT
+     WHERE id_site = ? AND adresse_mac IS NOT NULL AND statut <> 'down'`,
+    [idSite]
+  );
+
+  const conflits = detecterConflits(equipements);
+
+  for (const conflit of conflits) {
+    // L'alerte est portée par le PREMIER équipement du groupe, choisi
+    // par ordre d'adresse. Ce choix est arbitraire mais STABLE : la même
+    // situation produit toujours la même alerte, donc le dédoublonnage
+    // fonctionne au lieu d'en créer une nouvelle à chaque scan.
+    const porteur = conflit.equipements[0];
+    await creerAlerte(
+      porteur,
+      "conflit_ip",
+      // 'warning' et non 'critical' : les machines répondent. Le risque
+      // est une communication qui aboutit à la mauvaise, pas une panne.
+      "warning",
+      decrireConflit(conflit),
+      "conflit_ip"
+    ).catch((e) => console.error("Alerte de conflit non créée:", e.message));
+  }
+
+  return conflits;
 }
 
 async function logActivite(req, action, description) {
@@ -354,7 +398,26 @@ router.post("/scan", requireRole("admin", "operateur"), async (req, res) => {
       }
     }
 
-    res.json({ message: "Scan terminé", nb_equipements: equipements.length, equipements });
+    // ── CONFLITS D'ADRESSES ──
+    //
+    // Cherché sur l'ensemble du SITE, et non sur les seuls équipements
+    // de ce scan : un conflit peut opposer une machine découverte
+    // aujourd'hui à une autre découverte la semaine dernière, et scanner
+    // une demi-plage ne doit pas faire disparaître le signal.
+    //
+    // N'interrompt jamais le scan : c'est une information
+    // supplémentaire, pas une étape.
+    const conflits = await signalerConflitsIp(id_site).catch((e) => {
+      console.error("Détection des conflits d'adresses ignorée:", e.message);
+      return [];
+    });
+
+    res.json({
+      message: "Scan terminé",
+      nb_equipements: equipements.length,
+      equipements,
+      conflits_ip: conflits.length,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Erreur pendant le scan", details: err.message });
@@ -753,11 +816,41 @@ router.get("/oui/etat", async (req, res) => {
   res.json(await etatRegistre());
 });
 
+/**
+ * GET /api/equipements
+ *
+ * Renvoie le parc entier, sans pagination — et c'est délibéré.
+ *
+ * La page Équipements filtre, trie et compte côté navigateur : c'est ce
+ * qui rend les compteurs de statut et le tri par colonne instantanés.
+ * Paginer côté serveur imposerait une requête par clic, et rendrait les
+ * compteurs faux ou coûteux. À l'échelle visée — quelques centaines
+ * d'équipements — le parc entier tient largement dans une réponse.
+ *
+ * En revanche, les COLONNES sont désormais énumérées au lieu de `e.*`.
+ * Deux raisons :
+ *
+ *   • `sys_descr` est un texte de description SNMP qui atteint
+ *     couramment 300 caractères. La liste ne l'affiche jamais : elle
+ *     vérifie seulement s'il existe. On envoie donc le booléen plutôt
+ *     que le texte — sur un parc de 500 équipements bavards, c'est la
+ *     différence entre une réponse de 350 ko et une de 200 ko.
+ *
+ *   • `e.*` renvoie tout ce qu'on ajoutera plus tard à la table, y
+ *     compris ce qui n'a pas vocation à sortir du serveur. Énumérer les
+ *     colonnes fait de cette sortie une décision, et non un effet de
+ *     bord de la structure de la base.
+ */
 router.get("/equipements", async (req, res) => {
   const { id_site } = req.query;
   const portee = clauseSite(req, "e.id_site");
   const [rows] = await db.query(
-    `SELECT e.*, t.libelle AS type_libelle
+    `SELECT e.id_equipement, e.id_site, e.nom, e.nom_personnalise, e.nom_source,
+            e.adresse_ip, e.adresse_mac, e.statut,
+            e.fabricant, e.fabricant_source, e.type_source,
+            e.os_detecte, e.derniere_decouverte,
+            e.sys_descr IS NOT NULL AS expose_snmp,
+            t.libelle AS type_libelle
      FROM EQUIPEMENT e
      LEFT JOIN TYPE_EQUIPEMENT t ON t.id_type = e.id_type
      WHERE (? IS NULL OR e.id_site = ?) AND ${portee.clause}`,

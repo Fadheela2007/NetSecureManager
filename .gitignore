@@ -62,3 +62,23 @@ dump*.sql
 # Sorties de diagnostic pouvant contenir des adresses réelles
 diagnostic-*.txt
 sortie-*.txt
+
+# ---------------------------------------------------------------------
+# Documents de travail — à garder sur le poste, hors du dépôt.
+#
+# Ces fichiers racontent un processus de débogage, pas le produit. Ils
+# décrivent des défauts DEPUIS CORRIGÉS, parfois avec leur mode
+# opératoire : sur un dépôt public, ils donnent une liste de choses à
+# essayer contre les installations existantes, et font douter tout
+# acheteur qui les lit sans savoir qu'ils sont périmés.
+#
+# La documentation destinée aux lecteurs reste versionnée : README.md,
+# TESTER-LA-PLATEFORME.md, INSTALLATION_SITE_DISTANT.md.
+# ---------------------------------------------------------------------
+RAPPORT_*.md
+RAPPORT-*.md
+A-FAIRE.md
+RESTE_A_FAIRE*.md
+OU-EN-SUIS-JE.md
+SUITE-DES-TESTS.md
+CLAUDE.md

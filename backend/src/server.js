@@ -36,7 +36,60 @@ const {
 } = require("./routes/accesWeb");
 
 const app = express();
-app.use(cors());
+
+/* ---------------------------------------------------------------------
+   CORS — quelles pages web ont le droit d'appeler cette API.
+
+   CE QUI N'ALLAIT PAS. `cors()` sans argument autorise TOUTE origine.
+   Concrètement : n'importe quel site visité par un utilisateur connecté
+   pouvait faire appeler cette API par son navigateur. La cible n'est pas
+   le serveur mais la session de la personne — elle consulte une page
+   quelconque, celle-ci interroge la plateforme en son nom.
+
+   CE QUI CHANGE. Seules les origines déclarées sont acceptées.
+   `FRONTEND_URL` accepte plusieurs adresses séparées par des virgules,
+   ce qu'exige tout déploiement réel : le poste de développement et le
+   serveur de production ne portent jamais la même adresse.
+
+   POURQUOI UN REPLI PERMISSIF EN DÉVELOPPEMENT. Sans `FRONTEND_URL`
+   défini, on autorise les adresses locales habituelles de Vite. Refuser
+   tout par défaut casserait l'installation de quiconque suit le README
+   sans avoir lu ce paragraphe — et la première réaction devant une
+   interface qui ne charge pas est de désactiver la protection, pas de
+   la configurer.
+   --------------------------------------------------------------------- */
+const ORIGINES_DEV = ["http://localhost:5173", "http://127.0.0.1:5173"];
+
+const originesAutorisees = (process.env.FRONTEND_URL || "")
+  .split(",")
+  .map((o) => o.trim().replace(/\/$/, ""))
+  .filter(Boolean);
+
+if (originesAutorisees.length === 0) {
+  originesAutorisees.push(...ORIGINES_DEV);
+  console.warn(
+    "\n⚠  FRONTEND_URL non défini : seules les adresses locales de développement\n" +
+      "   sont autorisées à appeler l'API. À renseigner avant toute mise en service.\n"
+  );
+}
+
+app.use(
+  cors({
+    origin(origine, rappel) {
+      // Origine absente = requête hors navigateur (agent distant, outil
+      // en ligne de commande, sonde de supervision). Le contrôle CORS ne
+      // les concerne pas : ils s'authentifient par jeton, et les
+      // refuser ici couperait les agents des sites distants.
+      if (!origine) return rappel(null, true);
+      if (originesAutorisees.includes(origine.replace(/\/$/, ""))) {
+        return rappel(null, true);
+      }
+      return rappel(new Error(`Origine non autorisée : ${origine}`));
+    },
+    credentials: true,
+  })
+);
+
 app.use(express.json());
 app.use("/api/auth", authRoutes);
 

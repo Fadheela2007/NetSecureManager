@@ -588,16 +588,23 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
           // La cause est presque toujours l'absence de SNMP sur la
           // machine — ce n'est pas un défaut de la plateforme, et le dire
           // évite d'aller creuser ailleurs.
+          /* `expose_snmp` remplace `sys_descr`, dont seule l'EXISTENCE
+             importait ici. La liste transportait un texte de plusieurs
+             centaines de caractères par équipement pour un simple oui/non.
+
+             MySQL renvoie 1 ou 0 pour un booléen, jamais true/false :
+             `Boolean()` évite qu'un 0 soit lu comme vrai le jour où la
+             condition serait écrite autrement. */
           <EtatVide
             titre="Aucun relevé sur les dernières 24 heures"
-            ton={equipement.sys_descr ? "neutre" : "etape"}
+            ton={Boolean(equipement.expose_snmp) ? "neutre" : "etape"}
             explication={
-              equipement.sys_descr
+              equipement.expose_snmp
                 ? "Cet équipement répond en SNMP mais n'a pas encore été mesuré. Les relevés arrivent au prochain cycle de supervision, dans une minute."
                 : "Cet équipement n'expose pas SNMP. Processeur, mémoire et débit ne peuvent donc pas être lus — un poste Windows ne l'active pas par défaut."
             }
             aide={
-              equipement.sys_descr
+              equipement.expose_snmp
                 ? undefined
                 : "Sa disponibilité reste surveillée par ping : seules les mesures de charge manquent."
             }

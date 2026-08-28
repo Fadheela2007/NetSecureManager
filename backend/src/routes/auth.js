@@ -8,12 +8,31 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const router = express.Router();
 const db = require("../db");
+const limiteur = require("../services/limiteurConnexion");
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
   throw new Error("JWT_SECRET est absent de backend/.env — démarrage refusé.");
 }
 const JWT_EXPIRES_IN = "8h";
+
+/**
+ * Empreinte factice, comparée quand le compte n'existe pas.
+ *
+ * POURQUOI. La version précédente renvoyait immédiatement si l'e-mail
+ * était inconnu, mais prenait ~100 ms à vérifier le mot de passe si le
+ * compte existait. Cet écart est mesurable : en chronométrant les
+ * réponses, on distingue un e-mail enregistré d'un e-mail inconnu, et on
+ * peut ainsi dresser la liste des comptes réels avant même d'essayer un
+ * seul mot de passe.
+ *
+ * Comparer contre une empreinte factice fait passer les deux chemins par
+ * le même calcul coûteux. Le temps de réponse cesse de renseigner.
+ */
+const EMPREINTE_FACTICE = bcrypt.hashSync("empreinte-de-comparaison-constante", 10);
+
+/** Attente non bloquante, pour le ralentissement progressif. */
+const attendre = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * POST /api/auth/login
@@ -25,17 +44,49 @@ router.post("/login", async (req, res) => {
     return res.status(400).json({ error: "Email et mot de passe requis" });
   }
 
+  const limite = limiteur.verifier(req.ip, email);
+  if (!limite.autorise) {
+    const minutes = Math.ceil(limite.resteMs / 60000);
+    // 429 et non 401 : le client doit pouvoir distinguer « mauvais mot de
+    // passe » de « trop de tentatives », sinon l'utilisateur légitime
+    // ressaisit indéfiniment un mot de passe pourtant correct.
+    return res.status(429).json({
+      error: `Trop de tentatives de connexion. Réessayez dans ${minutes} minute(s).`,
+    });
+  }
+
+  // Ralentissement progressif après plusieurs échecs sur ce compte.
+  if (limite.delaiMs > 0) await attendre(limite.delaiMs);
+
   try {
     const [rows] = await db.query("SELECT * FROM UTILISATEUR WHERE email = ?", [email]);
     const user = rows[0];
-    if (!user) {
+
+    // La comparaison a lieu DANS TOUS LES CAS, y compris quand le compte
+    // n'existe pas : voir EMPREINTE_FACTICE ci-dessus.
+    const valide = await bcrypt.compare(
+      mot_de_passe,
+      user ? user.mot_de_passe_hash : EMPREINTE_FACTICE
+    );
+
+    if (!user || !valide) {
+      limiteur.enregistrerEchec(req.ip, email);
+
+      // Journalisé, mais SANS le mot de passe essayé ni distinction
+      // entre compte inconnu et mot de passe faux : un journal ne doit
+      // pas devenir lui-même la source de la fuite qu'il documente.
+      db.query(
+        `INSERT INTO LOG_ACTIVITE (action, description, adresse_ip_utilisateur)
+         VALUES ('connexion_echouee', ?, ?)`,
+        [`Tentative de connexion échouée pour ${email}`, req.ip]
+      ).catch(() => {});
+
+      // Message identique dans les deux cas, pour la même raison que
+      // l'empreinte factice : ne rien dire de l'existence du compte.
       return res.status(401).json({ error: "Identifiants invalides" });
     }
 
-    const valide = await bcrypt.compare(mot_de_passe, user.mot_de_passe_hash);
-    if (!valide) {
-      return res.status(401).json({ error: "Identifiants invalides" });
-    }
+    limiteur.enregistrerSucces(req.ip, email);
 
     const token = jwt.sign(
       { id: user.id_utilisateur, role: user.role, id_site: user.id_site },

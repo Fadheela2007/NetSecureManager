@@ -943,6 +943,11 @@ module.exports = {
   purgerReleves,
   verifierAgents,
   evaluerChargeDepuisPush,
+  // Création d'alerte, avec dédoublonnage et compteur d'occurrences.
+  // Exportée sans préfixe car appelée depuis les routes — le scan crée
+  // les alertes de conflit d'adresses. Le préfixe « _ » est réservé à ce
+  // qui n'existe que pour les tests.
+  creerAlerte,
   // Exportés pour les tests et le diagnostic.
   _evaluerSeuilsCharge: evaluerSeuilsCharge,
   _chargerConfigCycle: chargerConfigCycle,
