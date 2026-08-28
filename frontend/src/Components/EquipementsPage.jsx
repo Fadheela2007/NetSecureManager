@@ -3,6 +3,7 @@ import axios from "axios";
 import StatusDot from "./StatusDot";
 import Fabricant from "./Fabricant";
 import EtatVide from "./EtatVide";
+import { decrireErreur } from "../utils/erreurReseau";
 import EquipementDetail from "./EquipementDetail";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
@@ -68,13 +69,32 @@ export default function EquipementsPage({ idSite }) {
   const [selection, setSelection] = useState(null);
   const [resolution, setResolution] = useState({ enCours: false, message: null });
 
+  /**
+   * Échec de chargement.
+   *
+   * Sans cet état, `charger().catch(() => {})` laissait la liste vide et
+   * l'écran affichait « Aucun équipement — lancez un scan ». Un serveur
+   * arrêté produisait donc le même message qu'un parc jamais scanné, et
+   * l'utilisateur partait lancer un scan qui ne pouvait pas aboutir.
+   */
+  const [erreur, setErreur] = useState(null);
+  const [chargement, setChargement] = useState(true);
+
   async function charger() {
     const { data } = await axios.get(`${API_URL}/equipements`, { params: { id_site: idSite } });
     setEquipements(data);
   }
 
+  function rafraichir() {
+    setChargement(true);
+    setErreur(null);
+    charger()
+      .catch((err) => setErreur(decrireErreur(err, "La liste des équipements")))
+      .finally(() => setChargement(false));
+  }
+
   useEffect(() => {
-    charger().catch(() => {});
+    rafraichir();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [idSite]);
 
@@ -281,7 +301,20 @@ export default function EquipementsPage({ idSite }) {
       </div>
 
       <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl p-5">
-        {visibles.length === 0 ? (
+        {chargement ? (
+          <p className="text-sm text-[var(--color-mute)]">Chargement…</p>
+        ) : erreur ? (
+          /* TROISIÈME vide, celui qui manquait : « je ne sais pas ».
+             Sans lui, un serveur arrêté affichait « Le parc est vide —
+             lancez un scan », et l'utilisateur allait lancer un scan qui
+             ne pouvait pas aboutir. */
+          <EtatVide
+            titre={erreur.titre}
+            ton="etape"
+            explication={erreur.detail}
+            action={{ libelle: "Réessayer", onClick: rafraichir }}
+          />
+        ) : visibles.length === 0 ? (
           // Deux vides très différents : « le filtre ne rend rien » se
           // corrige en effaçant le filtre, « le parc est vide » demande
           // un scan. Les confondre envoyait l'utilisateur au mauvais

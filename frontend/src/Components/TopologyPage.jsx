@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
 
+import { decrireErreur } from "../utils/erreurReseau";
+
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
 // Rattachées aux variables de thème : ces trois couleurs étaient codées en
@@ -15,11 +17,13 @@ const COULEUR_STATUT = {
 export default function TopologyPage({ idSite }) {
   const [equipements, setEquipements] = useState([]);
   const [survole, setSurvole] = useState(null);
+  const [erreur, setErreur] = useState(null);
 
   useEffect(() => {
+    setErreur(null);
     axios.get(`${API_URL}/equipements`, { params: { id_site: idSite } })
       .then(({ data }) => setEquipements(data))
-      .catch(() => {});
+      .catch((err) => setErreur(decrireErreur(err, "La topologie")));
   }, [idSite]);
 
   // Le nœud central : l'équipement dont l'IP se termine par .1, .254 ou .155
@@ -51,6 +55,21 @@ export default function TopologyPage({ idSite }) {
       y: centreY + rayon * Math.sin(angle),
     };
   });
+
+  // L'échec passe avant le test de liste vide : « aucun équipement à
+  // afficher — lancez un scan » envoyait lancer un scan qui, serveur
+  // arrêté, ne pouvait pas aboutir.
+  if (erreur) {
+    return (
+      <div className="space-y-5">
+        <div>
+          <h1 className="font-[var(--font-display)] text-xl font-semibold">Topologie réseau</h1>
+          <p className="text-sm text-[var(--color-crit)] mt-0.5">{erreur.titre}</p>
+          <p className="text-sm text-[var(--color-mute)] mt-1">{erreur.detail}</p>
+        </div>
+      </div>
+    );
+  }
 
   if (equipements.length === 0) {
     return (

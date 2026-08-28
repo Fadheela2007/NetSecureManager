@@ -112,7 +112,21 @@ export default function AccesWebPage({ idSite }) {
   }
 
   async function supprimerDomaine(idRegle) {
-    await axios.delete(`${API_URL}/acces-web/domaine/${idRegle}`).catch(() => {});
+    // L'échec était avalé, puis `charger()` réaffichait la règle
+    // toujours présente. L'utilisateur voyait sa suppression annulée
+    // sans un mot, cliquait à nouveau, et concluait que le bouton ne
+    // marchait pas. Sur une règle de blocage web, croire une règle
+    // supprimée alors qu'elle est active n'est pas un détail.
+    try {
+      await axios.delete(`${API_URL}/acces-web/domaine/${idRegle}`);
+    } catch (err) {
+      setMessage({
+        type: "erreur",
+        texte:
+          err.response?.data?.error ||
+          "Suppression impossible — la règle est toujours active.",
+      });
+    }
     charger();
   }
 

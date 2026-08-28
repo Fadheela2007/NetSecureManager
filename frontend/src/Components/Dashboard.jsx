@@ -2,6 +2,7 @@ import { useEffect, useState, useMemo } from "react";
 import axios from "axios";
 import ScanLauncher from "./ScanLauncher";
 import StatusDot from "./StatusDot";
+import { decrireErreur } from "../utils/erreurReseau";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
@@ -89,8 +90,25 @@ export default function Dashboard({ idSite = 1 }) {
   const [chargement, setChargement] = useState(true);
   const [exportEnCours, setExportEnCours] = useState(null);
 
+  /**
+   * Échec de chargement.
+   *
+   * LE DÉFAUT QUE CET ÉTAT CORRIGE — le plus grave de l'interface.
+   *
+   * Sans lui, une requête échouée laissait les listes vides et le
+   * chargement terminé. Le tableau de bord affichait alors « Tout le
+   * parc répond », EN VERT, alors qu'il ne voyait plus rien du tout.
+   *
+   * Backend arrêté, session expirée, réseau coupé : dans les trois cas,
+   * l'outil dont le métier est de signaler les pannes annonçait que tout
+   * allait bien. Un écran vide doit dire « je ne sais pas », jamais
+   * « tout va bien ».
+   */
+  const [erreur, setErreur] = useState(null);
+
   async function chargerDonnees() {
     setChargement(true);
+    setErreur(null);
     try {
       // Le jeton est porté par axios.defaults (défini dans App.jsx).
       const [eqRes, alRes, bpRes] = await Promise.all([
@@ -111,6 +129,7 @@ export default function Dashboard({ idSite = 1 }) {
       setCouverture(bpRes.data?.couverture ?? null);
     } catch (err) {
       console.error("Chargement du tableau de bord impossible", err);
+      setErreur(decrireErreur(err, "Les données du tableau de bord"));
     } finally {
       setChargement(false);
     }
@@ -183,6 +202,13 @@ export default function Dashboard({ idSite = 1 }) {
   const verdict = useMemo(() => {
     if (chargement) return null;
 
+    // L'échec passe AVANT tout le reste. C'est ce qui empêche le
+    // verdict de conclure « tout va bien » à partir de listes vides
+    // qu'aucune requête n'a jamais remplies.
+    if (erreur) {
+      return { ton: "critique", titre: erreur.titre, detail: erreur.detail };
+    }
+
     if (bilan.total === 0) {
       return {
         ton: "neutre",
@@ -221,7 +247,7 @@ export default function Dashboard({ idSite = 1 }) {
       titre: "Tout le parc répond",
       detail: `${bilan.up} équipement${bilan.up > 1 ? "s" : ""} en ligne, aucune alerte à traiter.`,
     };
-  }, [bilan, chargement]);
+  }, [bilan, chargement, erreur]);
 
   const couleurVerdict = {
     ok: "var(--color-ok)",
@@ -300,7 +326,14 @@ export default function Dashboard({ idSite = 1 }) {
         </div>
       )}
 
-      {/* ── LES SIGNAUX ── */}
+      {/* ── LES SIGNAUX ──
+          Masqués quand le chargement a échoué. Le verdict a déjà dit ce
+          qui ne va pas ; afficher en dessous « Hors ligne : 0 » et
+          « Disponibilité : — » à partir de listes qu'aucune requête n'a
+          remplies reviendrait à présenter l'absence de données comme une
+          mesure. C'est ce que fait un compteur cassé, et c'est ce qu'on
+          reproche à tout outil de supervision. */}
+      {!erreur && (
       <div className="flex flex-wrap gap-4">
         <Signal
           libelle="Disponibilité"
@@ -356,9 +389,22 @@ export default function Dashboard({ idSite = 1 }) {
           />
         )}
       </div>
+      )}
 
-      <ScanLauncher idSite={idSite} />
+      {/* Bouton de reprise : sur une coupure passagère, recharger la
+          page entière ferait perdre le site sélectionné et le contexte. */}
+      {erreur && (
+        <button
+          onClick={chargerDonnees}
+          className="text-sm px-4 py-2 rounded-lg border border-[var(--color-line)] text-[var(--color-mute)] hover:border-[var(--color-signal)] hover:text-[var(--color-signal)] transition"
+        >
+          Réessayer
+        </button>
+      )}
 
+      {!erreur && <ScanLauncher idSite={idSite} />}
+
+      {!erreur && (
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* ── CE QUI DEMANDE UNE ACTION ── */}
         <section className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl p-5">
@@ -462,6 +508,7 @@ export default function Dashboard({ idSite = 1 }) {
           )}
         </section>
       </div>
+      )}
     </div>
   );
 }

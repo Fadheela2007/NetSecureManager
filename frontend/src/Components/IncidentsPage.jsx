@@ -1,6 +1,7 @@
 import { useEffect, useState, useMemo } from "react";
 import axios from "axios";
 import EtatVide from "./EtatVide";
+import { decrireErreur } from "../utils/erreurReseau";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
@@ -49,7 +50,13 @@ function tonAnciennete(date, statut) {
 export default function IncidentsPage() {
   const [statut, setStatut] = useState("ouvert");
   const [incidents, setIncidents] = useState([]);
+  // `erreur` porte les échecs d'ACTION (assigner, changer de statut) :
+  // la liste reste affichée, seul le message s'ajoute au-dessus.
   const [erreur, setErreur] = useState(null);
+  // `erreurChargement` porte l'échec de LECTURE : la page ne sait rien,
+  // et doit le dire au lieu d'annoncer « aucun incident » — ce qui, sur
+  // cette page, se lit comme une bonne nouvelle.
+  const [erreurChargement, setErreurChargement] = useState(null);
   const [utilisateurs, setUtilisateurs] = useState([]);
   const [recherche, setRecherche] = useState("");
   const [chargement, setChargement] = useState(true);
@@ -67,11 +74,16 @@ export default function IncidentsPage() {
     setIncidents(data);
   }
 
-  useEffect(() => {
+  function rafraichir() {
     setChargement(true);
+    setErreurChargement(null);
     charger()
-      .catch(() => setIncidents([]))
+      .catch((err) => setErreurChargement(decrireErreur(err, "Les incidents")))
       .finally(() => setChargement(false));
+  }
+
+  useEffect(() => {
+    rafraichir();
   }, []);
 
   // Liste réservée aux rôles admin/opérateur : un lecteur reçoit un 403 et
@@ -185,6 +197,16 @@ export default function IncidentsPage() {
       <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl p-5">
         {chargement ? (
           <p className="text-sm text-[var(--color-mute)]">Chargement…</p>
+        ) : erreurChargement ? (
+          /* Avant tout test de liste vide : « aucun incident ouvert »
+             s'affiche en vert, et serait donc rassurant alors que la
+             page n'a rien pu lire. */
+          <EtatVide
+            titre={erreurChargement.titre}
+            ton="etape"
+            explication={erreurChargement.detail}
+            action={{ libelle: "Réessayer", onClick: rafraichir }}
+          />
         ) : visibles.length === 0 ? (
           /* Un filtre qui ne renvoie rien n'est PAS une bonne nouvelle :
              sans cette distinction, « Aucun incident ouvert » s'afficherait
@@ -195,14 +217,11 @@ export default function IncidentsPage() {
               titre="Aucun incident ne correspond"
               ton="neutre"
               explication={`${compteurs[statut]} incident(s) ${libelleStatut} existent, mais aucun ne correspond à « ${recherche.trim()} ».`}
-              action={
-                <button
-                  onClick={() => setRecherche("")}
-                  className="text-sm text-[var(--color-signal)] hover:underline"
-                >
-                  Effacer la recherche
-                </button>
-              }
+              /* EtatVide attend un objet { libelle, onClick }, pas du
+                 JSX : lui passer un bouton tout fait produisait un
+                 bouton VIDE et sans effet, puisque le composant lit
+                 `action.libelle` et `action.onClick`. */
+              action={{ libelle: "Effacer la recherche", onClick: () => setRecherche("") }}
             />
           ) : (
             <EtatVide

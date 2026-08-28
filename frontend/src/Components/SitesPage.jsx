@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import axios from "axios";
 import MiseEnServiceAgent from "./MiseEnServiceAgent";
 
+import { decrireErreur } from "../utils/erreurReseau";
+
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
 export default function SitesPage() {
@@ -10,13 +12,22 @@ export default function SitesPage() {
   const [ville, setVille] = useState("");
   const [erreur, setErreur] = useState(null);
   const [miseEnService, setMiseEnService] = useState(null);
+  // Échec de LECTURE, distinct de `erreur` qui porte les échecs de
+  // création. Sans lui, un serveur injoignable affichait « aucun site »,
+  // et l'utilisateur en créait un second alors que le premier existait.
+  const [erreurChargement, setErreurChargement] = useState(null);
 
   async function charger() {
     const { data } = await axios.get(`${API_URL}/sites`);
     setSites(data);
   }
 
-  useEffect(() => { charger().catch(() => {}); }, []);
+  function rafraichir() {
+    setErreurChargement(null);
+    charger().catch((err) => setErreurChargement(decrireErreur(err, "Les sites")));
+  }
+
+  useEffect(() => { rafraichir(); }, []);
 
   async function ajouter(e) {
     e.preventDefault();
@@ -37,6 +48,22 @@ export default function SitesPage() {
         <h1 className="font-[var(--font-display)] text-xl font-semibold">Sites</h1>
         <p className="text-sm text-[var(--color-mute)] mt-0.5">Agences supervisées</p>
       </div>
+
+      {erreurChargement && (
+        <div className="bg-[var(--color-surface)] border rounded-xl p-4"
+             style={{ borderColor: "var(--color-crit)" }}>
+          <p className="text-sm font-medium" style={{ color: "var(--color-crit)" }}>
+            {erreurChargement.titre}
+          </p>
+          <p className="text-sm text-[var(--color-mute)] mt-1">{erreurChargement.detail}</p>
+          <button
+            onClick={rafraichir}
+            className="mt-3 text-xs px-3 py-1.5 rounded-lg border border-[var(--color-line)] text-[var(--color-mute)] hover:border-[var(--color-signal)] hover:text-[var(--color-signal)] transition"
+          >
+            Réessayer
+          </button>
+        </div>
+      )}
 
       <form onSubmit={ajouter} className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl p-5 flex flex-wrap items-end gap-3">
         <div>
@@ -61,7 +88,7 @@ export default function SitesPage() {
           idSite={miseEnService}
           onFermer={() => {
             setMiseEnService(null);
-            charger().catch(() => {});
+            rafraichir();
           }}
         />
       )}

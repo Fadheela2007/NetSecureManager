@@ -56,6 +56,7 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
   const [reveilEnCours, setReveilEnCours] = useState(false);
   const [reveilMessage, setReveilMessage] = useState(null);
   const [vulnerabilites, setVulnerabilites] = useState([]);
+  const [vulnErreur, setVulnErreur] = useState(false);
   const [interfaces, setInterfaces] = useState([]);
   const [services, setServices] = useState([]);
   const [dispo, setDispo] = useState(null);
@@ -118,10 +119,21 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
       .finally(() => setLoading(false));
   }, [equipement.id_equipement]);
 
+  // Vulnérabilités connues.
+  //
+  // L'échec était muet, et la section disparaissait simplement. Sur un
+  // produit de sécurité, « aucune vulnérabilité affichée » se lit comme
+  // « aucune vulnérabilité » — alors que la vérification n'avait pas eu
+  // lieu. Silence et absence de risque ne sont pas la même chose, et
+  // c'est le genre de confusion qui se paie devant un client.
   useEffect(() => {
+    setVulnErreur(false);
     axios.get(`${API_URL}/equipements/${equipement.id_equipement}/vulnerabilites`)
       .then(({ data }) => setVulnerabilites(data))
-      .catch(() => {});
+      .catch(() => {
+        setVulnerabilites([]);
+        setVulnErreur(true);
+      });
   }, [equipement.id_equipement]);
 
   useEffect(() => {
@@ -362,6 +374,17 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
             </dd>
           </div>
         </dl>
+
+        {/* Dit explicitement que le contrôle n'a pas eu lieu, plutôt que
+            de laisser une absence passer pour un feu vert. */}
+        {vulnErreur && (
+          <div className="mb-5 border border-[var(--color-warn)]/40 rounded-lg p-3">
+            <p className="text-xs text-[var(--color-warn)]">
+              Vulnérabilités connues : vérification impossible. L'absence
+              d'anomalie affichée ne signifie pas qu'il n'y en a pas.
+            </p>
+          </div>
+        )}
 
         {vulnerabilites.length > 0 && (
           <div className="mb-5 bg-[var(--color-crit)]/5 border border-[var(--color-crit)]/30 rounded-lg p-4">

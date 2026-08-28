@@ -1,6 +1,6 @@
 # Tester NetSecureManager
 
-Parcours complet de vérification. Comptez **30 minutes**.
+Parcours complet de vérification. Comptez **40 minutes**.
 
 Chaque test indique ce que vous devez voir, et quoi faire sinon. Faites-les
 dans l'ordre : un test qui échoue rend les suivants inexploitables.
@@ -32,14 +32,19 @@ trois cents.
 
 ```powershell
 cd C:\Users\LENOVO\Documents\NetSecureManager\backend
+node tools\appliquer-migrations.js
 node tools\verifier-tout.js
 ```
+
+Les migrations d'abord : deux d'entre elles sont récentes (origine du nom,
+nom personnalisé). Sans elles, la liste d'équipements renvoie une erreur
+de colonne inconnue, et vous chercheriez la panne ailleurs.
 
 **Attendu :** aucune ligne rouge. Une ligne jaune est un point d'attention,
 pas un échec — le texte dit quoi faire.
 
 Il contrôle la configuration, les 21 tables, les colonnes dont l'absence
-casse une fonction entière, la cohérence des données et les 107 tests
+casse une fonction entière, la cohérence des données et les 190 tests
 unitaires.
 
 **Ne passez à la suite que si cette commande est propre.** Tout ce qui suit
@@ -106,6 +111,56 @@ que la colonne reste vide dans l'interface, c'est que les équipements ont
 **Nuance à connaître :** l'OUI identifie la **carte réseau**, pas la
 machine. Un serveur Dell avec une carte Intel remontera « Intel ». Ce
 n'est pas une erreur, et la colonne `fabricant_source` le dit.
+
+### T6b. Les noms d'équipements sont renseignés
+
+**Attendu :** la colonne « nom » n'est pas vide partout.
+
+Quatre sources sont interrogées en parallèle : SNMP, DNS inverse,
+NetBIOS et mDNS. Pour savoir laquelle répond sur ce réseau :
+
+```powershell
+node tools\diagnostic-noms.js
+```
+
+**Ce qui n'est PAS un défaut :** une caméra, un module industriel ou un
+capteur n'a pas de nom de machine. Sa case reste vide, et c'est correct —
+mieux vaut vide qu'un modèle déguisé en nom.
+
+**Si TOUT est vide alors que le parc compte des postes Windows :**
+
+```powershell
+node tools\sonde-mdns.js
+```
+
+Cette sonde interroge tout le réseau d'un coup et dit ce qui parle.
+
+### T6c. Renommer un équipement
+
+Ouvrez la fiche d'un équipement → bouton **Nommer** → saisissez
+« Imprimante comptabilité ».
+
+**Attendu :** le nom apparaît dans la liste, avec le nom réseau
+(`KMBFD6FC`) en sous-titre.
+
+**Le test qui compte — relancez un scan ensuite.** Votre nom doit
+SURVIVRE. S'il disparaît, signalez-le-moi immédiatement : cela voudrait
+dire que le scan écrase la saisie manuelle, et personne ne recommence
+un travail effacé sans explication.
+
+### T6d. Les conflits d'adresses
+
+**Attendu, après un scan :** aucune alerte de conflit sur un réseau sain.
+
+**Test volontaire, si vous pouvez :** attribuez à une machine l'adresse
+IP fixe d'une autre déjà présente, puis relancez un scan. Une alerte
+« conflit d'adresses probable » doit apparaître.
+
+**Ce qui serait un DÉFAUT :** des dizaines d'alertes de conflit après un
+scan normal. Cela signifierait que le routeur répond pour tout le
+sous-réseau et que le filtre ne joue pas. Signalez-le-moi avec le nombre
+d'alertes.
+
 
 ---
 
@@ -274,6 +329,27 @@ ensuite : n'importe qui sur le réseau pouvait se fabriquer un compte
 administrateur. Elle n'accepte plus que si la table des utilisateurs est
 **entièrement vide**, et le rôle n'est plus lu depuis la requête.
 
+### T18b. Les tentatives de connexion sont freinées
+
+Sur l'écran de connexion, saisissez **onze fois** un mauvais mot de passe
+pour un compte existant.
+
+**Attendu :** au bout d'une dizaine d'essais, le message change — « Trop
+de tentatives de connexion. Réessayez dans N minutes. »
+
+**Le point qui compte, et qui se teste :** depuis un AUTRE poste (ou un
+téléphone en 4G), connectez-vous avec le bon mot de passe **du même
+compte**. Cela doit fonctionner.
+
+Un compte n'est jamais bloqué, seulement ralenti. Bloquer un compte
+après cinq échecs permettrait à n'importe qui de verrouiller votre
+administrateur en saisissant de faux mots de passe : la protection
+deviendrait l'attaque.
+
+**Si le compte est inaccessible depuis l'autre poste :** c'est un défaut
+grave, signalez-le-moi.
+
+
 ### T19. La réinitialisation demande une confirmation
 
 Interface → **Configuration** → bas de page → **Ouvrir la
@@ -339,6 +415,34 @@ paraît délavé.
 
 Si une zone reste illisible dans l'un des deux, notez laquelle.
 
+### T23. L'interface dit quand elle ne sait pas
+
+**Le test le plus important de cette partie.**
+
+Dans la fenêtre du backend, appuyez sur **Ctrl + C** pour l'arrêter.
+Laissez l'interface ouverte, puis parcourez les pages : Tableau de bord,
+Équipements, Alertes, Incidents, Journal, Topologie, Sites,
+Configuration.
+
+**Attendu sur CHAQUE page :** un message disant que le serveur ne répond
+pas, et un bouton **Réessayer**.
+
+**Ce qui serait un DÉFAUT — et le plus grave du produit :** une page qui
+affiche « Tout le parc répond », « Aucun équipement », « Rien à traiter »
+ou tout autre message rassurant. Un outil de supervision qui annonce que
+tout va bien alors qu'il ne voit plus rien est pire qu'inutile : il est
+trompeur.
+
+Relancez ensuite le backend, cliquez sur **Réessayer** : les données
+doivent revenir sans avoir à recharger la page.
+
+**Deuxième volet — la session expirée.** Ouvrez les outils de
+développement (F12) → onglet **Application** → effacez le stockage local,
+puis naviguez. Le message doit dire « Session expirée », et non
+« Le serveur ne répond pas ». Trois causes, trois messages : les
+confondre oblige l'utilisateur à deviner laquelle.
+
+
 ---
 
 # Ce qu'il faut savoir avant une démonstration
@@ -371,6 +475,9 @@ que sur le réseau du client.
 | T4 scan | | |
 | T5 types | | |
 | T6 fabricants | | |
+| T6b noms | | |
+| T6c renommage | | |
+| T6d conflits IP | | |
 | T7 relevés | | |
 | T8 alertes | | |
 | T9 acquittement | | |
@@ -383,10 +490,12 @@ que sur le réseau du client.
 | T16 cloisonnement | | |
 | T17 dernier admin | | |
 | T18 création compte | | |
+| T18b force brute | | |
 | T19 réinitialisation | | |
 | T20 tableau de bord | | |
 | T21 listes | | |
 | T22 thèmes | | |
+| **T23 serveur arrêté** | | |
 
 Envoyez-moi la grille remplie, même partiellement. Les échecs
 m'intéressent plus que les réussites — et une case « pas compris » est

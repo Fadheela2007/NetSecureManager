@@ -1,6 +1,7 @@
 import { useEffect, useState, useMemo } from "react";
 import axios from "axios";
 import EtatVide from "./EtatVide";
+import { decrireErreur } from "../utils/erreurReseau";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
@@ -37,7 +38,18 @@ export default function AlertesPage() {
   const [statut, setStatut] = useState("active");
   const [alertes, setAlertes] = useState([]);
   const [chargement, setChargement] = useState(true);
+  // Deux échecs de nature différente, donc deux états.
+  //
+  //   `erreur`       — le chargement a échoué : la page ne sait rien.
+  //                    Elle remplace le contenu.
+  //   `erreurAction` — un acquittement a échoué : la page sait, mais
+  //                    l'opération n'est pas passée. Elle s'affiche
+  //                    au-dessus de la liste, qui reste utilisable.
+  //
+  // Les confondre faisait disparaître le contenu sur un simple échec
+  // d'acquittement, ou masquait l'échec d'action sous une liste intacte.
   const [erreur, setErreur] = useState(null);
+  const [erreurAction, setErreurAction] = useState(null);
   const [message, setMessage] = useState(null);
   const [selection, setSelection] = useState(new Set());
   const [deplies, setDeplies] = useState(new Set());
@@ -51,7 +63,10 @@ export default function AlertesPage() {
       setAlertes(data);
       setErreur(null);
     } catch (err) {
-      setErreur(err.response?.data?.error || "Impossible de charger les alertes");
+      // `decrireErreur` plutôt qu'un message unique : « Impossible de
+      // charger les alertes » ne dit pas s'il faut redémarrer le
+      // backend, se reconnecter, ou simplement réessayer.
+      setErreur(decrireErreur(err, "Les alertes"));
     } finally {
       setChargement(false);
     }
@@ -169,7 +184,7 @@ export default function AlertesPage() {
 
   async function agirEnMasse(action) {
     if (selection.size === 0) return;
-    setErreur(null);
+    setErreurAction(null);
     setMessage(null);
     try {
       const { data } = await axios.patch(`${API_URL}/alertes/${action}`, {
@@ -184,17 +199,17 @@ export default function AlertesPage() {
       setSelection(new Set());
       await charger();
     } catch (err) {
-      setErreur(err.response?.data?.error || "L'opération a échoué");
+      setErreurAction(err.response?.data?.error || "L'opération a échoué");
     }
   }
 
   async function resoudre(id) {
-    setErreur(null);
+    setErreurAction(null);
     try {
       await axios.patch(`${API_URL}/alertes/${id}/resoudre`);
       await charger();
     } catch (err) {
-      setErreur(err.response?.data?.error || "Impossible de résoudre cette alerte");
+      setErreurAction(err.response?.data?.error || "Impossible de résoudre cette alerte");
     }
   }
 
@@ -315,12 +330,27 @@ export default function AlertesPage() {
         </div>
       )}
 
-      {erreur && <p className="text-sm text-[var(--color-crit)]">{erreur}</p>}
+      {erreurAction && (
+        <p className="text-sm text-[var(--color-crit)]">{erreurAction}</p>
+      )}
       {message && <p className="text-sm text-[var(--color-ok)]">{message}</p>}
 
       {chargement ? (
         <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl p-5">
           <p className="text-sm text-[var(--color-mute)]">Chargement des alertes…</p>
+        </div>
+      ) : erreur ? (
+        /* L'échec passe AVANT le test « aucune alerte ». Sans cette
+           priorité, un serveur injoignable produisait « Rien à traiter »
+           EN VERT — la page dont le rôle est d'énumérer les problèmes
+           annonçait qu'il n'y en a aucun, faute d'avoir pu les lire. */
+        <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl">
+          <EtatVide
+            titre={erreur.titre}
+            ton="etape"
+            explication={erreur.detail}
+            action={{ libelle: "Réessayer", onClick: charger }}
+          />
         </div>
       ) : groupes.length === 0 ? (
         <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl">

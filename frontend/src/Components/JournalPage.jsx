@@ -1,6 +1,7 @@
 import { useEffect, useState, useMemo } from "react";
 import axios from "axios";
 import EtatVide from "./EtatVide";
+import { decrireErreur } from "../utils/erreurReseau";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
@@ -89,15 +90,22 @@ function titreDeJour(date) {
 export default function JournalPage() {
   const [logs, setLogs] = useState([]);
   const [chargement, setChargement] = useState(true);
+  const [erreur, setErreur] = useState(null);
   const [filtre, setFiltre] = useState("tout");
   const [recherche, setRecherche] = useState("");
 
-  useEffect(() => {
+  function rafraichir() {
+    setChargement(true);
+    setErreur(null);
     axios
       .get(`${API_URL}/logs`)
       .then(({ data }) => setLogs(data))
-      .catch(() => setLogs([]))
+      .catch((err) => setErreur(decrireErreur(err, "Le journal")))
       .finally(() => setChargement(false));
+  }
+
+  useEffect(() => {
+    rafraichir();
   }, []);
 
   // Compteurs sur la liste COMPLÈTE : un compteur qui change quand on
@@ -164,6 +172,16 @@ export default function JournalPage() {
       <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl p-5">
         {chargement ? (
           <p className="text-sm text-[var(--color-mute)]">Chargement…</p>
+        ) : erreur ? (
+          /* Un journal vide et un journal illisible ne s'expliquent pas
+             pareil : le premier attend une première action, le second
+             attend qu'on répare la liaison. */
+          <EtatVide
+            titre={erreur.titre}
+            ton="etape"
+            explication={erreur.detail}
+            action={{ libelle: "Réessayer", onClick: rafraichir }}
+          />
         ) : logs.length === 0 ? (
           <EtatVide
             titre="Aucune activité enregistrée"
@@ -176,17 +194,14 @@ export default function JournalPage() {
             titre="Aucune ligne ne correspond"
             ton="neutre"
             explication={`Le journal contient ${logs.length} ligne(s), mais aucune ne correspond aux critères en cours.`}
-            action={
-              <button
-                onClick={() => {
-                  setFiltre("tout");
-                  setRecherche("");
-                }}
-                className="text-sm text-[var(--color-signal)] hover:underline"
-              >
-                Réinitialiser les filtres
-              </button>
-            }
+            /* Objet { libelle, onClick } et non du JSX : voir EtatVide. */
+            action={{
+              libelle: "Réinitialiser les filtres",
+              onClick: () => {
+                setFiltre("tout");
+                setRecherche("");
+              },
+            }}
           />
         ) : (
           <>

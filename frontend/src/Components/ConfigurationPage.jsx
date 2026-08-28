@@ -2,12 +2,17 @@ import Reinitialisation from "./Reinitialisation";
 import { useEffect, useState } from "react";
 import axios from "axios";
 
+import { decrireErreur } from "../utils/erreurReseau";
+
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
 export default function ConfigurationPage() {
   const [config, setConfig] = useState([]);
   const [modifs, setModifs] = useState({});
   const [message, setMessage] = useState(null);
+  // Sans cet état, une lecture échouée affichait une page de
+  // configuration VIDE : l'utilisateur croyait ses réglages perdus.
+  const [erreurChargement, setErreurChargement] = useState(null);
 
   async function charger() {
     // Token porté par axios.defaults (App.jsx) — pas d'en-tête manuel.
@@ -15,7 +20,14 @@ export default function ConfigurationPage() {
     setConfig(data);
   }
 
-  useEffect(() => { charger().catch(() => {}); }, []);
+  function rafraichir() {
+    setErreurChargement(null);
+    charger().catch((err) =>
+      setErreurChargement(decrireErreur(err, "Les paramètres"))
+    );
+  }
+
+  useEffect(() => { rafraichir(); }, []);
 
   async function sauvegarder(cle) {
     const valeur = modifs[cle];
@@ -37,6 +49,22 @@ export default function ConfigurationPage() {
           Seuils de détection et d'escalade des alertes
         </p>
       </div>
+
+      {erreurChargement && (
+        <div className="bg-[var(--color-surface)] border rounded-xl p-4"
+             style={{ borderColor: "var(--color-crit)" }}>
+          <p className="text-sm font-medium" style={{ color: "var(--color-crit)" }}>
+            {erreurChargement.titre}
+          </p>
+          <p className="text-sm text-[var(--color-mute)] mt-1">{erreurChargement.detail}</p>
+          <button
+            onClick={rafraichir}
+            className="mt-3 text-xs px-3 py-1.5 rounded-lg border border-[var(--color-line)] text-[var(--color-mute)] hover:border-[var(--color-signal)] hover:text-[var(--color-signal)] transition"
+          >
+            Réessayer
+          </button>
+        </div>
+      )}
 
       {message && (
         <p className={`text-sm ${message.type === "ok" ? "text-[var(--color-ok)]" : "text-[var(--color-crit)]"}`}>
