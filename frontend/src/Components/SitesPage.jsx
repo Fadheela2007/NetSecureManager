@@ -76,7 +76,7 @@ export default function SitesPage() {
           <input value={ville} onChange={(e) => setVille(e.target.value)} required
             className="bg-[var(--color-surface-2)] border border-[var(--color-line)] rounded-lg px-3 py-2 text-sm outline-none focus:border-[var(--color-signal)] transition" />
         </div>
-        <button type="submit" className="bg-[var(--color-signal)] text-[var(--color-abyss)] font-semibold text-sm rounded-lg px-4 py-2 hover:brightness-110 transition">
+        <button type="submit" className="bg-[var(--color-signal)] text-[var(--color-sur-accent)] font-semibold text-sm rounded-lg px-4 py-2 hover:brightness-110 transition">
           Ajouter le site
         </button>
       </form>

@@ -1,6 +1,58 @@
 @import "tailwindcss";
 
 /* =====================================================================
+   TYPOGRAPHIE — IBM Plex, embarquée dans le projet.
+
+   POURQUOI DES FICHIERS LOCAUX ET NON GOOGLE FONTS.
+
+   Cette plateforme est installée sur des réseaux d'entreprise, souvent
+   coupés d'Internet ou derrière un filtrage strict. Une police chargée
+   depuis un serveur distant ne s'y afficherait pas : l'interface
+   retomberait sans bruit sur la police système, et le travail de mise
+   en forme serait invisible précisément là où il compte — chez le
+   client.
+
+   Les paquets @fontsource embarquent les fichiers dans la compilation.
+   Aucun appel réseau, aucune dépendance extérieure, et rien qui parte
+   vers un tiers depuis le poste d'un client — ce qu'un responsable
+   sécurité vérifiera.
+
+   POURQUOI IBM PLEX. Sa version à chasse fixe appartient à la MÊME
+   famille que la version courante. Les adresses IP s'affichent en
+   chasse fixe pour que les chiffres s'alignent en colonne ; avec une
+   police sans rapport, les deux se juxtaposaient au lieu de dialoguer.
+
+   Trois graisses seulement — 400, 500, 600. Vérifié dans les composants :
+   aucun texte ne dépasse 600. Chaque graisse est un fichier à charger,
+   en ajouter « au cas où » alourdit le premier affichage pour rien.
+
+   ALPHABETS LIMITÉS À latin ET latin-ext.
+
+   Importer « 400.css » embarque TOUS les alphabets fournis par IBM
+   Plex : grec, cyrillique, vietnamien. La compilation produisait 56
+   fichiers pour 780 ko, dont plus de la moitié ne sera jamais lue par
+   une interface en français.
+
+   Le navigateur, lui, ne télécharge que le sous-ensemble dont il a
+   besoin — le coût à l'exécution était donc déjà correct. Mais le
+   paquet à livrer, lui, transportait tout : sur une installation hors
+   ligne, chez un client, ce sont des fichiers copiés pour rien.
+
+   latin-ext est conservé : il porte les caractères des noms propres
+   européens, qu'un parc d'entreprise contient forcément.
+   ===================================================================== */
+@import "@fontsource/ibm-plex-sans/latin-400.css";
+@import "@fontsource/ibm-plex-sans/latin-500.css";
+@import "@fontsource/ibm-plex-sans/latin-600.css";
+@import "@fontsource/ibm-plex-sans/latin-ext-400.css";
+@import "@fontsource/ibm-plex-sans/latin-ext-500.css";
+@import "@fontsource/ibm-plex-sans/latin-ext-600.css";
+@import "@fontsource/ibm-plex-mono/latin-400.css";
+@import "@fontsource/ibm-plex-mono/latin-500.css";
+@import "@fontsource/ibm-plex-mono/latin-ext-400.css";
+@import "@fontsource/ibm-plex-mono/latin-ext-500.css";
+
+/* =====================================================================
    Thème — tout passe par ces variables.
    Aucune couleur n'est écrite en dur dans les composants : basculer de
    thème ne demande donc de toucher à aucun fichier JSX.
@@ -12,101 +64,124 @@
    ===================================================================== */
 
 /* =====================================================================
-   PALETTE — révision.
+   PALETTE — prune & or.
 
-   CE QUI N'ALLAIT PAS. Les couleurs d'état étaient des primaires quasi
-   pures : #35c759, #ff4d4d, #f5b942, #4da3ff. Prises une par une elles
-   sont correctes ; réunies sur un même écran, elles se disputent
-   l'attention et donnent l'aspect « feux de signalisation » qu'on
-   associe aux logiciels bon marché.
+   POURQUOI CHANGER. La version précédente reposait sur un bleu acier.
+   C'est la couleur par défaut de tous les cadres web : celle qu'on
+   obtient sans choisir. Un outil qu'on veut vendre ne peut pas
+   ressembler à un gabarit — l'acheteur voit l'interface avant de voir
+   la fonction.
 
-   Un outil de supervision affiche des dizaines de pastilles d'état à la
-   fois. Avec des couleurs à pleine saturation, tout crie — donc plus
-   rien ne ressort, et l'alerte critique se noie au milieu du reste.
+   CE QUI NE BOUGE PAS, ET POURQUOI C'EST UNE CONTRAINTE ET NON UN CHOIX.
+   Vert, ambre et rouge restent les couleurs des états : en ligne,
+   attention, panne. Ce vocabulaire est universel sur les outils de
+   supervision. Le déplacer rendrait la plateforme illisible pour
+   quiconque en a déjà utilisé un autre.
 
-   CE QUI CHANGE.
-   • Saturation réduite d'environ un tiers sur les quatre couleurs
-     d'état. Elles restent immédiatement identifiables, sans vibrer.
-   • Le rouge tire vers le brique plutôt que vers le fluo, l'ambre vers
-     le miel, le vert vers le sauge. Ce sont les teintes qu'emploient les
-     consoles d'infrastructure professionnelles, pour cette raison.
-   • Les fonds passent d'un bleu-noir profond à un gris ardoise très
-     légèrement chaud. Le contraste avec les cartes reste net, mais
-     l'ensemble cesse d'être « bleu ».
-   • L'accent devient un bleu acier, plus sobre que le bleu vif.
+   CE QUI CHANGE : le fond et l'accent — boutons, liens, onglet actif.
+   C'est là que se joue l'impression de « déjà vu ».
 
-   CE QUI NE CHANGE PAS : les rapports de contraste restent au-dessus du
-   seuil AA (4,5:1) pour le texte. Une palette élégante et illisible
-   serait un recul, pas une amélioration — les valeurs ci-dessous ont
-   été choisies en vérifiant ce ratio, pas à l'œil.
+   L'or a été choisi contre le bleu pour une raison mesurable autant
+   qu'esthétique : il n'entre en conflit avec AUCUNE des trois couleurs
+   d'état. Un accent vert se confondrait avec « tout va bien », un
+   accent rouge ou orange avec une alerte. L'or et la prune sont les
+   seules familles libres.
+
+   COMMENT CES VALEURS ONT ÉTÉ CHOISIES. Toutes les combinaisons
+   texte/fond ont été calculées, pas jugées à l'œil. Chaque couleur de
+   texte dépasse 4,5:1 (seuil AA) SUR LES DEUX fonds — carte et page.
+   Une palette élégante et illisible serait un recul, pas une
+   amélioration.
    ===================================================================== */
 
+/* =====================================================================
+   THÈME SOMBRE
+
+   La séparation entre le fond et les cartes se mesure en clarté
+   perceptuelle (ΔL*), et NON en rapport de contraste WCAG. Ce dernier
+   est conçu pour la lisibilité du texte ; sur des fonds très sombres il
+   sature autour de 1,1 et cesse de renseigner. Deux teintes peuvent
+   afficher le même rapport et se distinguer très différemment.
+
+   Séparation obtenue ici : ΔL* = 6,1 — contre 4,2 sur la version
+   précédente, que la mesure WCAG donnait pourtant équivalente.
+
+   Le fond descend plutôt que les cartes ne montent : sur un thème
+   sombre, des cartes claires fatiguent en session longue, et une
+   session de supervision dure la journée.
+   ===================================================================== */
 :root,
 [data-theme="dark"] {
-  --color-abyss: #0e1116;      /* fond de page — ardoise, plus neutre que bleu-noir */
-  --color-surface: #161a21;    /* cartes, panneaux */
-  --color-surface-2: #1e232b;  /* champs de saisie, fonds secondaires */
-  --color-line: #2b323d;       /* bordures, séparateurs */
-  --color-ink: #e8eaed;        /* texte principal — blanc cassé, moins dur que #f3f4f6 */
-  --color-mute: #949cab;       /* texte secondaire — 5.2:1 sur le fond */
-  --color-signal: #6b9bd1;     /* accent — bleu acier au lieu du bleu vif */
-  --color-ok: #6fa678;         /* vert sauge au lieu du vert pomme */
-  --color-crit: #d1706a;       /* brique au lieu du rouge pur */
-  --color-warn: #d4a45c;       /* miel au lieu de l'ambre saturé */
+  --color-abyss: #0b080e;      /* fond de page — prune très profonde */
+  --color-surface: #1c1624;    /* cartes, panneaux */
+  --color-surface-2: #272031;  /* champs de saisie, fonds secondaires */
+  --color-line: #3b2f49;       /* bordures, séparateurs */
+  --color-ink: #ece8f0;        /* texte principal — blanc légèrement prune */
+  --color-mute: #a094ad;       /* texte secondaire — 6,2:1 sur les cartes */
 
-  /* Contraste du texte posé SUR un aplat de couleur d'accent. */
-  --color-sur-accent: #0e1116;
+  /* Accent : or patiné. Ni jaune vif ni doré publicitaire — la teinte
+     du laiton, qui supporte d'être vue toute la journée. */
+  --color-signal: #c9a961;
 
-  --ombre-carte: 0 24px 48px -20px rgba(0, 0, 0, 0.55);
-  --voile-modale: rgba(0, 0, 0, 0.6);
-  --lueur-login: #1a2230;
+  /* États — inchangés, voir l'en-tête. */
+  --color-ok: #7fa886;
+  --color-crit: #d1706a;
+  --color-warn: #d4a45c;
+
+  /* Contraste du texte posé SUR un aplat d'accent : 8,8:1. */
+  --color-sur-accent: #0b080e;
+
+  --ombre-carte: 0 24px 48px -20px rgba(0, 0, 0, 0.6);
+  --voile-modale: rgba(11, 8, 14, 0.72);
+  --lueur-login: #241c2f;
 
   color-scheme: dark;
 }
 
 /* =====================================================================
-   THÈME CLAIR — révision.
+   THÈME CLAIR — parchemin, jamais blanc.
 
-   CE QUI N'ALLAIT PAS : du blanc partout. Le fond était à #f5f5f3 et les
-   cartes à #ffffff — deux valeurs si proches que les panneaux ne se
-   détachaient pas. L'écran devenait une grande surface blanche, sans
-   structure visible, et fatigante sur une longue session de supervision.
+   CE QUI N'ALLAIT PAS : « le blanc fait mal aux yeux ». C'est exact, et
+   mesurable. Un blanc pur (#ffffff) à côté d'un texte presque noir
+   produit le contraste le plus dur qu'un écran puisse afficher — sur
+   une journée de supervision, l'œil le paie.
 
-   CE QUI CHANGE :
-   • Le fond descend franchement, vers un gris-bleu doux. L'écart avec
-     les cartes devient net, et chaque panneau se lit comme un objet.
-   • Les cartes restent claires sans être blanc pur : un blanc absolu à
-     côté d'un texte presque noir produit le contraste le plus dur que
-     puisse afficher un écran.
-   • Les bordures sont assez marquées pour dessiner la structure toutes
-     seules, ce qui permet de se passer d'ombres portées.
+   Deux corrections distinctes :
 
-   Les couleurs d'état gagnent un peu de matière : sur fond clair, les
-   teintes désaturées du thème sombre paraissaient délavées.
+   1. AUCUNE surface n'est blanche. La carte la plus claire reste à
+      1,06 du blanc pur : assez pour que le blanc ne « brûle » plus,
+      trop peu pour paraître sale.
+
+   2. Le fond de page descend franchement vers un mauve grisé.
+      Séparation fond/carte : ΔL* = 11,3, contre 3,5 sur la version
+      d'origine où fond et cartes étaient presque identiques.
+
+   Les teintes sont légèrement chaudes — un gris parfaitement neutre
+   sur écran paraît bleuté et froid.
    ===================================================================== */
 [data-theme="light"] {
-  --color-abyss: #dce2eb;      /* fond de page — assez bas pour détacher les cartes */
-  --color-surface: #fbfcfd;    /* cartes — clair, jamais blanc pur */
-  --color-surface-2: #eef1f5;  /* champs de saisie, fonds secondaires */
-  --color-line: #bcc6d4;       /* bordures — visibles sur les DEUX fonds */
-  --color-ink: #1b2430;
-  --color-mute: #5a6472;       /* 6.4:1 sur les cartes — au-dessus du seuil AA */
+  --color-abyss: #ded5e1;      /* fond de page — mauve grisé */
+  --color-surface: #faf7fa;    /* cartes — jamais #ffffff */
+  --color-surface-2: #f0eaf2;  /* champs de saisie */
+  --color-line: #bcafc1;       /* bordures — visibles sur les DEUX fonds */
+  --color-ink: #241c2b;
+  --color-mute: #584d61;       /* 7,5:1 sur les cartes */
 
-  /* Même FAMILLE de couleur que le thème sombre, mais plus foncée : les
-     teintes claires deviendraient illisibles sur fond clair. */
-  --color-signal: #2c5d92;
-  --color-ok: #2f6b45;
-  --color-crit: #a03f36;
-  --color-warn: #7d5612;
+  /* Même FAMILLE que le thème sombre, mais nettement plus foncée : l'or
+     clair devient illisible sur fond clair. Ici 7,1:1 sur les cartes. */
+  --color-signal: #6b5010;
+  --color-ok: #275c3b;
+  --color-crit: #93362e;
+  --color-warn: #68470e;
 
   --color-sur-accent: #ffffff;
 
-  /* Ombre très discrète : la structure vient des bordures et du contraste
-     de fond. Des ombres marquées sur fond clair donnent l'aspect
-     « bulles » des interfaces bon marché. */
-  --ombre-carte: 0 8px 20px -12px rgba(27, 36, 48, 0.18);
-  --voile-modale: rgba(27, 36, 48, 0.38);
-  --lueur-login: #dde3ec;
+  /* Ombre discrète : la structure vient des bordures et de l'écart de
+     fond. Des ombres marquées donnent l'aspect « bulles » des
+     interfaces bon marché. */
+  --ombre-carte: 0 8px 20px -12px rgba(36, 28, 43, 0.22);
+  --voile-modale: rgba(36, 28, 43, 0.42);
+  --lueur-login: #e6dee9;
 
   color-scheme: light;
 }
@@ -135,8 +210,11 @@
 }
 
 :root {
-  --font-display: system-ui, "Segoe UI", sans-serif;
-  --font-mono: ui-monospace, Consolas, monospace;
+  /* Le repli système reste déclaré : si un fichier de police manque,
+     l'interface doit rester lisible plutôt que de tomber sur la police
+     par défaut du navigateur, qui est une serif. */
+  --font-display: "IBM Plex Sans", system-ui, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
 
   font-family: var(--font-display);
   color: var(--color-ink);

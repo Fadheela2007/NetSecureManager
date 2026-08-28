@@ -233,7 +233,7 @@ export default function PlagesPage({ idSite }) {
         <button
           type="submit"
           disabled={envoi}
-          className="bg-[var(--color-signal)] text-[var(--color-abyss)] font-semibold text-sm rounded-lg px-4 py-2 hover:brightness-110 transition disabled:opacity-50"
+          className="bg-[var(--color-signal)] text-[var(--color-sur-accent)] font-semibold text-sm rounded-lg px-4 py-2 hover:brightness-110 transition disabled:opacity-50"
         >
           {envoi ? "Enregistrement…" : "Ajouter la plage"}
         </button>
