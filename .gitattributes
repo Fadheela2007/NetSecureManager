@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------------
+# Normalisation des fins de ligne.
+#
+# LE PROBLÈME. Windows termine ses lignes par CR+LF, Linux et macOS par
+# LF seul. Sans règle, un fichier édité sur l'un puis sur l'autre
+# apparaît « entièrement modifié » : 96 lignes changées dans db.js sans
+# qu'un seul caractère ait bougé.
+#
+# La conséquence est plus grave qu'un affichage encombré : quand chaque
+# fichier touché ressort comme réécrit de bout en bout, on ne distingue
+# plus une vraie correction d'un changement d'invisible. L'historique
+# cesse de servir à ce pour quoi il existe.
+#
+# LA RÈGLE. `text=auto` fait stocker LF dans le dépôt et rend à chaque
+# poste la forme qui lui convient. Les fichiers binaires sont exclus
+# explicitement — les normaliser les corromprait.
+# ---------------------------------------------------------------------
+
+* text=auto
+
+# Scripts destinés à Linux : LF imposé quel que soit le poste d'édition.
+# Un fichier .sh en CR+LF échoue au lancement avec « bad interpreter »,
+# une erreur dont la cause est invisible à la lecture.
+*.sh text eol=lf
+backend/src/agent/*.sh text eol=lf
+
+# Fichiers Windows : CR+LF imposé, pour la raison symétrique.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binaires — ne jamais toucher.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.gz binary
+*.zip binary
+*.pdf binary
+*.xlsx binary
+*.woff binary
+*.woff2 binary
