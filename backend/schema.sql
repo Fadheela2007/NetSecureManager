@@ -99,7 +99,6 @@ CREATE TABLE IF NOT EXISTS UTILISATEUR (
   mot_de_passe_hash   VARCHAR(255) NOT NULL,
   role                ENUM('admin','operateur','lecteur') NOT NULL DEFAULT 'lecteur',
   id_site             INT DEFAULT NULL,
-  telephone_whatsapp  VARCHAR(30) DEFAULT NULL,
   date_creation       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uk_utilisateur_email (email),
   KEY idx_utilisateur_site (id_site),
@@ -422,9 +421,14 @@ CREATE TABLE IF NOT EXISTS PLAGE_SCAN (
 
 
 -- ---------------------------------------------------------------------
--- NOTIFICATION — trace des envois e-mail / WhatsApp.
+-- NOTIFICATION — trace des envois d'alertes.
 -- Statut : 'envoye' / 'echec' ('envoye', pas 'envoyee').
--- Aucune requête du code n'écrit dans cette table à ce jour.
+--
+-- La valeur 'whatsapp' de la colonne `canal` est CONSERVÉE bien que ce
+-- canal ait été retiré : des installations existantes en contiennent
+-- dans leur historique, et retirer la valeur de l'énumération rendrait
+-- ces lignes illisibles. Une trace passée reste vraie même quand la
+-- fonction qui l'a produite n'existe plus.
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS NOTIFICATION (
   id_notification  INT AUTO_INCREMENT PRIMARY KEY,
@@ -530,7 +534,10 @@ INSERT IGNORE INTO CONFIGURATION (cle, valeur, description) VALUES
 --
 -- ALTER TABLE SITE ADD COLUMN agent_token VARCHAR(128) DEFAULT NULL;
 --
--- ALTER TABLE UTILISATEUR ADD COLUMN telephone_whatsapp VARCHAR(30) DEFAULT NULL;
+-- La colonne telephone_whatsapp n'est plus déclarée : le canal WhatsApp
+-- a été retiré (voir notificationService.js). Sur une base existante,
+-- elle peut rester en place sans effet — la supprimer effacerait des
+-- numéros sans rien apporter.
 --
 -- ALTER TABLE SERVICE_DETECTE ADD UNIQUE KEY uniq_equip_port (id_equipement, port);
 -- =====================================================================

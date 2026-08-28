@@ -9,7 +9,6 @@ const ROLES = [
   { valeur: "lecteur", label: "Lecteur" },
 ];
 
-const AIDE_WHATSAPP = "Format international sans le « + » — ex. 237691234567";
 
 const champClasse =
   "bg-[var(--color-surface-2)] border border-[var(--color-line)] rounded-lg px-3 py-2 text-sm outline-none focus:border-[var(--color-signal)] transition";
@@ -23,7 +22,6 @@ const FORMULAIRE_VIDE = {
   mot_de_passe: "",
   role: "lecteur",
   id_site: "",
-  telephone_whatsapp: "",
 };
 
 /**
@@ -95,7 +93,6 @@ export default function UtilisateursPage() {
       mot_de_passe: "",
       role: u.role || "lecteur",
       id_site: u.id_site ?? "",
-      telephone_whatsapp: u.telephone_whatsapp || "",
     });
     setErreur(null);
     setMessage(null);
@@ -118,7 +115,6 @@ export default function UtilisateursPage() {
       email: formulaire.email.trim(),
       role: formulaire.role,
       id_site: formulaire.id_site === "" ? null : Number(formulaire.id_site),
-      telephone_whatsapp: formulaire.telephone_whatsapp.trim() || null,
     };
     // Mot de passe : envoyé seulement s'il est renseigné. Un champ laissé vide
     // en modification conserve le mot de passe existant.
@@ -247,17 +243,6 @@ export default function UtilisateursPage() {
             </select>
           </div>
 
-          <div>
-            <label className={labelClasse}>Numéro WhatsApp (optionnel)</label>
-            <input
-              value={formulaire.telephone_whatsapp}
-              onChange={(e) => majChamp("telephone_whatsapp", e.target.value)}
-              placeholder="237691234567"
-              inputMode="numeric"
-              className={`${champClasse} font-[var(--font-mono)]`}
-            />
-          </div>
-
           <button
             type="submit"
             disabled={envoi}
@@ -278,13 +263,6 @@ export default function UtilisateursPage() {
         </form>
       )}
 
-      {estAdmin && (
-        <p className="text-xs text-[var(--color-mute)]">
-          Numéro WhatsApp : {AIDE_WHATSAPP}. Un format incorrect fait échouer l'envoi des alertes
-          sans message d'erreur visible.
-        </p>
-      )}
-
       {erreur && <p className="text-sm text-[var(--color-crit)]">{erreur}</p>}
       {message && <p className="text-sm text-[var(--color-ok)]">{message}</p>}
 
@@ -301,7 +279,6 @@ export default function UtilisateursPage() {
                 <th className="pb-2 font-medium">E-mail</th>
                 <th className="pb-2 font-medium">Rôle</th>
                 <th className="pb-2 font-medium">Site</th>
-                <th className="pb-2 font-medium">WhatsApp</th>
                 {estAdmin && <th className="pb-2 font-medium text-right">Actions</th>}
               </tr>
             </thead>
@@ -330,9 +307,6 @@ export default function UtilisateursPage() {
                       >
                         {libelleSite(u)}
                       </span>
-                    </td>
-                    <td className="py-2.5 text-[var(--color-mute)] font-[var(--font-mono)] text-[13px]">
-                      {u.telephone_whatsapp || "—"}
                     </td>
                     {estAdmin && (
                       <td className="py-2.5">

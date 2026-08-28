@@ -56,7 +56,7 @@ const ATTENDU = {
   ],
   UTILISATEUR: [
     "id_utilisateur", "nom", "email", "mot_de_passe_hash", "role",
-    "id_site", "telephone_whatsapp",
+    "id_site",
   ],
   LOG_ACTIVITE: [
     "id_log", "id_utilisateur", "action", "description",

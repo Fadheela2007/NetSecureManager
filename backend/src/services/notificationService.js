@@ -1,11 +1,31 @@
 /**
  * notificationService.js
- * Envoi des alertes par e-mail (Nodemailer) et WhatsApp (WhatsApp Business Cloud API).
+ * Envoi des alertes par e-mail (Nodemailer).
  *
  * Dépendances : npm install nodemailer axios
  * Variables d'environnement (.env) :
  *   SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, ALERT_EMAIL_FROM
- *   WHATSAPP_TOKEN, WHATSAPP_PHONE_ID
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * POURQUOI PAS DE WHATSAPP
+ *
+ * Un envoi WhatsApp a existé ici, et a été retiré volontairement.
+ *
+ * Meta n'autorise le texte libre que pendant 24 heures après qu'une
+ * personne a écrit au numéro de l'entreprise. Au-delà, tout message
+ * émis par l'entreprise doit passer par un MODÈLE pré-approuvé.
+ *
+ * Or une alerte de supervision est exactement le cas interdit : elle
+ * part à trois heures du matin, sans que personne n'ait rien écrit. Le
+ * code fonctionnait en démonstration préparée et aurait été rejeté en
+ * exploitation réelle — la pire des situations pour un outil vendu
+ * comme dispositif d'alerte.
+ *
+ * Le rétablir demande : un compte Meta Business vérifié, un modèle de
+ * catégorie Utility approuvé, et un jeton permanent d'utilisateur
+ * système. C'est un travail de déploiement autant que de code, à mener
+ * quand un client le demandera vraiment.
+ * ─────────────────────────────────────────────────────────────────────
  *
  * IMPORTANT — ces fonctions ne doivent PAS être attendues (await) depuis le
  * cycle de supervision : un SMTP lent ou en échec ferait déborder le cycle
@@ -75,7 +95,7 @@ async function tracerNotification({ idAlerte, idUtilisateur, canal, destinataire
 
 async function getDestinataires(idSite) {
   const [rows] = await db.query(
-    `SELECT id_utilisateur, email, telephone_whatsapp FROM UTILISATEUR
+    `SELECT id_utilisateur, email FROM UTILISATEUR
      WHERE role IN ('admin','operateur') AND (id_site = ? OR id_site IS NULL)`,
     [idSite]
   );
@@ -117,46 +137,6 @@ async function envoyerEmails(equipement, message, destinataires, idAlerte) {
   }
 }
 
-async function envoyerWhatsApp(equipement, message, destinataires, idAlerte) {
-  if (!process.env.WHATSAPP_TOKEN || !process.env.WHATSAPP_PHONE_ID) return;
-
-  for (const user of destinataires) {
-    if (!user.telephone_whatsapp) continue;
-    try {
-      await axios.post(
-        `https://graph.facebook.com/v19.0/${process.env.WHATSAPP_PHONE_ID}/messages`,
-        {
-          messaging_product: "whatsapp",
-          to: user.telephone_whatsapp,
-          type: "text",
-          text: { body: `NetSecureManager - ${message}` },
-        },
-        {
-          headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` },
-          timeout: 10000,
-        }
-      );
-      await tracerNotification({
-        idAlerte,
-        idUtilisateur: user.id_utilisateur,
-        canal: "whatsapp",
-        destinataire: user.telephone_whatsapp,
-        statut: "envoye",
-      });
-    } catch (err) {
-      const detail = err.response?.data?.error?.message || err.message;
-      journaliserLimite("WhatsApp", detail);
-      await tracerNotification({
-        idAlerte,
-        idUtilisateur: user.id_utilisateur,
-        canal: "whatsapp",
-        destinataire: user.telephone_whatsapp,
-        statut: "echec",
-        erreur: detail,
-      });
-    }
-  }
-}
 
 // =====================================================================
 // File d'attente : regroupement + limitation de débit + coupe-circuit
@@ -271,14 +251,6 @@ async function viderFile(idSite) {
       journaliserLimite("e-mail", `envoi différé/ignoré (débit ou coupe-circuit) — ${alertes.length} alerte(s)`);
     }
 
-    if (canalDisponible("whatsapp")) {
-      taches.push(
-        envoyerWhatsApp(pseudoEquipement, corps, destinataires, idAlerte)
-          .then(() => enregistrerEnvoi("whatsapp", true))
-          .catch(() => enregistrerEnvoi("whatsapp", false))
-      );
-    }
-
     await Promise.all(taches);
   } catch (err) {
     journaliserLimite("notification", err.message);
@@ -327,11 +299,6 @@ async function notifierAlerte(equipement, message, idAlerte = null) {
 async function sendEmailAlert(equipement, message, idAlerte = null) {
   const destinataires = await getDestinataires(equipement.id_site);
   await envoyerEmails(equipement, message, destinataires, idAlerte);
-}
-
-async function sendWhatsAppAlert(equipement, message, idAlerte = null) {
-  const destinataires = await getDestinataires(equipement.id_site);
-  await envoyerWhatsApp(equipement, message, destinataires, idAlerte);
 }
 
 // =====================================================================
@@ -465,7 +432,6 @@ async function viderToutesLesFiles() {
 module.exports = {
   notifierAlerte,
   sendEmailAlert,
-  sendWhatsAppAlert,
   envoyerRapport,
   viderToutesLesFiles,
   // Exportés pour les tests et le diagnostic.

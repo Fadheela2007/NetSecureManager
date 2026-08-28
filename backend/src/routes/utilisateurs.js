@@ -35,9 +35,6 @@ const COUT_BCRYPT = 10; // identique au reste du projet (routes/auth.js)
 // frappe évidentes, pas de réimplémenter la RFC 5322.
 const MOTIF_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
-/** Le numéro WhatsApp attendu par l'API Meta : international, sans "+". */
-const MOTIF_WHATSAPP = /^\d{8,15}$/;
-
 /** Normalise id_site : "", undefined et null valent tous « compte global ». */
 function normaliserIdSite(valeur) {
   if (valeur === undefined || valeur === null || valeur === "") return null;
@@ -90,7 +87,7 @@ router.get("/utilisateurs", requireRole("admin", "operateur"), async (req, res) 
   const portee = porteeDe(req);
   const [rows] = await db.query(
     `SELECT u.id_utilisateur, u.nom, u.email, u.role, u.id_site,
-            u.telephone_whatsapp, u.date_creation,
+            u.date_creation,
             s.nom AS site_nom
      FROM UTILISATEUR u
      LEFT JOIN SITE s ON s.id_site = u.id_site
@@ -102,7 +99,7 @@ router.get("/utilisateurs", requireRole("admin", "operateur"), async (req, res) 
   // ── COORDONNÉES RÉSERVÉES AUX ADMINISTRATEURS ──
   //
   // La route était déjà fermée aux lecteurs, mais un opérateur y voyait
-  // l'adresse e-mail et le numéro WhatsApp de tous ses collègues.
+  // l'adresse e-mail de tous ses collègues.
   //
   // Un opérateur a besoin de la LISTE des personnes — pour assigner un
   // incident, il faut bien choisir un nom. Il n'a pas besoin de leurs
@@ -122,7 +119,6 @@ router.get("/utilisateurs", requireRole("admin", "operateur"), async (req, res) 
       // laisserait croire que le champ n'est pas renseigné, et un
       // administrateur pourrait le ressaisir par-dessus.
       delete base.email;
-      delete base.telephone_whatsapp;
       return base;
     })
   );
@@ -132,7 +128,7 @@ router.get("/utilisateurs", requireRole("admin", "operateur"), async (req, res) 
  * POST /api/utilisateurs — création d'un compte.
  */
 router.post("/utilisateurs", requireRole("admin"), async (req, res) => {
-  const { nom, email, mot_de_passe, role, telephone_whatsapp } = req.body;
+  const { nom, email, mot_de_passe, role } = req.body;
   const portee = porteeDe(req);
 
   if (!nom || !email || !mot_de_passe) {
@@ -155,11 +151,6 @@ router.post("/utilisateurs", requireRole("admin"), async (req, res) => {
     return res.status(400).json({ error: "id_site invalide" });
   }
 
-  if (telephone_whatsapp && !MOTIF_WHATSAPP.test(String(telephone_whatsapp).trim())) {
-    return res.status(400).json({
-      error: "Numéro WhatsApp invalide : format international sans le « + » (ex. 237XXXXXXXXX)",
-    });
-  }
 
   // Cloisonnement : un admin rattaché ne crée que dans son propre site.
   if (portee !== null) {
@@ -176,7 +167,7 @@ router.post("/utilisateurs", requireRole("admin"), async (req, res) => {
   try {
     const hash = await bcrypt.hash(String(mot_de_passe), COUT_BCRYPT);
     const [result] = await db.query(
-      `INSERT INTO UTILISATEUR (nom, email, mot_de_passe_hash, role, id_site, telephone_whatsapp)
+      `INSERT INTO UTILISATEUR (nom, email, mot_de_passe_hash, role, id_site)
        VALUES (?, ?, ?, ?, ?, ?)`,
       [
         String(nom).trim(),
@@ -184,13 +175,12 @@ router.post("/utilisateurs", requireRole("admin"), async (req, res) => {
         hash,
         role,
         idSite,
-        telephone_whatsapp ? String(telephone_whatsapp).trim() : null,
       ]
     );
 
     // Relecture par projection explicite : le hash ne peut pas fuiter.
     const [rows] = await db.query(
-      `SELECT id_utilisateur, nom, email, role, id_site, telephone_whatsapp, date_creation
+      `SELECT id_utilisateur, nom, email, role, id_site, date_creation
        FROM UTILISATEUR WHERE id_utilisateur = ?`,
       [result.insertId]
     );
@@ -215,7 +205,7 @@ router.patch("/utilisateurs/:id", requireRole("admin"), async (req, res) => {
     return res.status(400).json({ error: "Identifiant invalide" });
   }
 
-  const { nom, email, mot_de_passe, role, telephone_whatsapp } = req.body;
+  const { nom, email, mot_de_passe, role } = req.body;
   const portee = porteeDe(req);
   const idSiteFourni = Object.prototype.hasOwnProperty.call(req.body, "id_site");
   const idSite = idSiteFourni ? normaliserIdSite(req.body.id_site) : undefined;
@@ -234,23 +224,13 @@ router.patch("/utilisateurs/:id", requireRole("admin"), async (req, res) => {
       error: `Le mot de passe doit contenir au moins ${LONGUEUR_MIN_MOT_DE_PASSE} caractères`,
     });
   }
-  if (
-    telephone_whatsapp !== undefined &&
-    telephone_whatsapp !== null &&
-    String(telephone_whatsapp).trim() !== "" &&
-    !MOTIF_WHATSAPP.test(String(telephone_whatsapp).trim())
-  ) {
-    return res.status(400).json({
-      error: "Numéro WhatsApp invalide : format international sans le « + » (ex. 237XXXXXXXXX)",
-    });
-  }
 
   const cx = await db.getConnection();
   try {
     await cx.beginTransaction();
 
     const [existants] = await cx.query(
-      `SELECT id_utilisateur, nom, email, role, id_site, telephone_whatsapp
+      `SELECT id_utilisateur, nom, email, role, id_site
        FROM UTILISATEUR WHERE id_utilisateur = ? FOR UPDATE`,
       [idCible]
     );
@@ -295,11 +275,6 @@ router.patch("/utilisateurs/:id", requireRole("admin"), async (req, res) => {
     if (email !== undefined) { champs.push("email = ?"); valeurs.push(String(email).trim()); }
     if (role !== undefined) { champs.push("role = ?"); valeurs.push(role); }
     if (idSiteFourni) { champs.push("id_site = ?"); valeurs.push(idSite); }
-    if (telephone_whatsapp !== undefined) {
-      const tel = telephone_whatsapp ? String(telephone_whatsapp).trim() : "";
-      champs.push("telephone_whatsapp = ?");
-      valeurs.push(tel === "" ? null : tel);
-    }
     // Mot de passe : uniquement s'il est fourni ET non vide.
     if (mot_de_passe) {
       champs.push("mot_de_passe_hash = ?");
@@ -315,7 +290,7 @@ router.patch("/utilisateurs/:id", requireRole("admin"), async (req, res) => {
     await cx.query(`UPDATE UTILISATEUR SET ${champs.join(", ")} WHERE id_utilisateur = ?`, valeurs);
 
     const [rows] = await cx.query(
-      `SELECT id_utilisateur, nom, email, role, id_site, telephone_whatsapp, date_creation
+      `SELECT id_utilisateur, nom, email, role, id_site, date_creation
        FROM UTILISATEUR WHERE id_utilisateur = ?`,
       [idCible]
     );
