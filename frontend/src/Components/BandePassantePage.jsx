@@ -343,8 +343,23 @@ export default function BandePassantePage({ idSite }) {
                   {/* connectNulls={false} : un trou dans la mesure (agent
                       redémarré, équipement injoignable) doit se voir comme
                       un trou. Relier les points masquerait la panne. */}
-                  <Area type="monotone" dataKey="entrant" stroke="var(--color-signal)" strokeWidth={2} fill="url(#grad-entrant)" connectNulls={false} dot={false} />
-                  <Area type="monotone" dataKey="sortant" stroke="var(--color-ok)" strokeWidth={2} fill="url(#grad-sortant)" connectNulls={false} dot={false} />
+                  {/* ANIMATION DÉSACTIVÉE — deux raisons.
+
+                      1. LE DÉFAUT. React StrictMode monte, démonte puis
+                         remonte chaque composant en développement, pour
+                         débusquer les effets mal nettoyés. L'animation
+                         d'apparition de la courbe est interrompue par ce
+                         cycle et reste figée dans son état INITIAL :
+                         un tracé entièrement masqué. Le graphique
+                         paraissait vide alors que la courbe existait
+                         bien dans le document, à la bonne couleur.
+
+                      2. LE PRODUIT. Même sans ce défaut, animer
+                         l'apparition d'une mesure n'a pas de sens ici.
+                         Un opérateur qui ouvre une fiche veut lire une
+                         valeur, pas attendre qu'elle se dessine. */}
+                  <Area type="monotone" dataKey="entrant" stroke="var(--color-signal)" strokeWidth={2} fill="url(#grad-entrant)" connectNulls={false} dot={false} isAnimationActive={false} />
+                  <Area type="monotone" dataKey="sortant" stroke="var(--color-ok)" strokeWidth={2} fill="url(#grad-sortant)" connectNulls={false} dot={false} isAnimationActive={false} />
                 </AreaChart>
               </ResponsiveContainer>
             </div>

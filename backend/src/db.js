@@ -51,6 +51,40 @@ function obtenirPool() {
       database: process.env.DB_NAME,
       waitForConnections: true,
       connectionLimit: 10,
+
+      /* -----------------------------------------------------------------
+         Les DECIMAL sont renvoyés comme NOMBRES, pas comme chaînes.
+
+         CE QUI N'ALLAIT PAS. Par défaut, le pilote MySQL rend les colonnes
+         DECIMAL sous forme de chaînes — délibérément, pour ne perdre
+         aucune précision sur des valeurs monétaires très grandes.
+
+         Toutes nos colonnes de mesure sont en DECIMAL : latence,
+         processeur, mémoire, débits, taux de disponibilité. Le graphique
+         de latence recevait donc « 3.00 » au lieu de 3. La bibliothèque
+         de graphiques, qui ne convertit pas, ne savait pas placer cette
+         valeur sur un axe et ne traçait RIEN.
+
+         Le symptôme était trompeur : un graphique parfaitement vide alors
+         que la base contenait 32 relevés tous valides. Rien à l'écran ne
+         distinguait « aucune donnée » de « données du mauvais type ».
+
+         Les autres écrans s'en sortaient par accident : JavaScript
+         convertit implicitement les chaînes lors des soustractions et des
+         comparaisons. « 10 » - « 5 » vaut bien 5. Ce n'est pas de la
+         justesse, c'est de la chance — et elle finit toujours par tourner.
+
+         POURQUOI ICI ET NON DANS CHAQUE ÉCRAN. Corriger à la source vaut
+         pour tous les appelants, présents et futurs. Vingt conversions
+         éparpillées, c'est vingt occasions d'en oublier une.
+
+         LA LIMITE. Un DECIMAL dépassant la précision d'un nombre flottant
+         perdrait des décimales. Nos valeurs — millisecondes, pourcentages,
+         kilobits — en sont très loin. Le jour où la plateforme manipulera
+         des montants, il faudra reconsidérer ce réglage colonne par
+         colonne.
+         ----------------------------------------------------------------- */
+      decimalNumbers: true,
     });
   }
   return pool;

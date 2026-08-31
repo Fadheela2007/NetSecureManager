@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import EtatVide from "./EtatVide";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip } from "recharts";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
@@ -61,6 +61,39 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
   const [services, setServices] = useState([]);
   const [dispo, setDispo] = useState(null);
   const [periodeDispo, setPeriodeDispo] = useState(30);
+
+  /* ------------------------------------------------------------------
+     LARGEUR DES GRAPHIQUES, MESUREE PAR NOUS.
+
+     Le composant de mise a l'echelle de la bibliotheque rendait ici un
+     graphique de largeur NULLE : sept graduations et une courbe aux
+     bonnes coordonnees, dessinees dans un espace de zero pixel de
+     large. Invisible, et indiscernable d'une absence de donnees -- ce
+     symptome a resiste a quatre corrections portant sur les donnees.
+
+     On mesure donc le conteneur nous-memes. Deux occasions : au
+     montage, puis apres un court delai qui laisse la fenetre finir sa
+     mise en page. Une largeur nulle n'est jamais retenue : elle
+     survient pendant les transitions et ferait clignoter le graphique.
+     ------------------------------------------------------------------ */
+  const conteneurGraphique = useRef(null);
+  const [largeurGraphique, setLargeurGraphique] = useState(0);
+
+  useEffect(() => {
+    function mesurer() {
+      const el = conteneurGraphique.current;
+      if (!el) return;
+      const l = el.getBoundingClientRect().width;
+      if (l > 0) setLargeurGraphique(Math.round(l));
+    }
+    mesurer();
+    const differee = setTimeout(mesurer, 60);
+    window.addEventListener("resize", mesurer);
+    return () => {
+      clearTimeout(differee);
+      window.removeEventListener("resize", mesurer);
+    };
+  }, [loading]);
 
   // Nom personnalisé. Gardé en état local plutôt que relu depuis la
   // liste : après enregistrement, la fiche doit se mettre à jour
@@ -659,15 +692,17 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
               <h3 className="text-xs uppercase tracking-wide text-[var(--color-mute)] mb-2">
                 Latence (ms)
               </h3>
-              <ResponsiveContainer width="100%" height={180}>
-                <LineChart data={donnees}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="var(--color-line)" />
-                  <XAxis dataKey="heure" stroke="var(--color-mute)" fontSize={11} />
-                  <YAxis stroke="var(--color-mute)" fontSize={11} />
-                  <Tooltip contentStyle={{ background: "var(--color-surface-2)", border: "1px solid var(--color-line)" }} />
-                  <Line type="monotone" dataKey="latence" stroke="var(--color-signal)" dot={false} strokeWidth={2} />
-                </LineChart>
-              </ResponsiveContainer>
+              <div ref={conteneurGraphique} className="w-full" style={{ minHeight: 180 }}>
+                {largeurGraphique > 0 && (
+                  <LineChart data={donnees} width={largeurGraphique} height={180}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--color-line)" />
+                    <XAxis dataKey="heure" stroke="var(--color-mute)" fontSize={11} />
+                    <YAxis stroke="var(--color-mute)" fontSize={11} />
+                    <Tooltip contentStyle={{ background: "var(--color-surface-2)", border: "1px solid var(--color-line)" }} />
+                    <Line type="monotone" dataKey="latence" stroke="var(--color-signal)" dot={false} strokeWidth={2} isAnimationActive={false} />
+                  </LineChart>
+                )}
+              </div>
             </div>
 
             {aDesMetriques && (
@@ -675,16 +710,18 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
                 <h3 className="text-xs uppercase tracking-wide text-[var(--color-mute)] mb-2">
                   CPU / RAM (%)
                 </h3>
-                <ResponsiveContainer width="100%" height={180}>
-                  <LineChart data={donnees}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--color-line)" />
-                    <XAxis dataKey="heure" stroke="var(--color-mute)" fontSize={11} />
-                    <YAxis stroke="var(--color-mute)" fontSize={11} domain={[0, 100]} />
-                    <Tooltip contentStyle={{ background: "var(--color-surface-2)", border: "1px solid var(--color-line)" }} />
-                    <Line type="monotone" dataKey="cpu" name="CPU" stroke="var(--color-warn)" dot={false} strokeWidth={2} />
-                    <Line type="monotone" dataKey="ram" name="RAM" stroke="var(--color-ok)" dot={false} strokeWidth={2} />
-                  </LineChart>
-                </ResponsiveContainer>
+                <div className="w-full" style={{ minHeight: 180 }}>
+                  {largeurGraphique > 0 && (
+                    <LineChart data={donnees} width={largeurGraphique} height={180}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="var(--color-line)" />
+                      <XAxis dataKey="heure" stroke="var(--color-mute)" fontSize={11} />
+                      <YAxis stroke="var(--color-mute)" fontSize={11} domain={[0, 100]} />
+                      <Tooltip contentStyle={{ background: "var(--color-surface-2)", border: "1px solid var(--color-line)" }} />
+                      <Line type="monotone" dataKey="cpu" name="CPU" stroke="var(--color-warn)" dot={false} strokeWidth={2} isAnimationActive={false} />
+                      <Line type="monotone" dataKey="ram" name="RAM" stroke="var(--color-ok)" dot={false} strokeWidth={2} isAnimationActive={false} />
+                    </LineChart>
+                  )}
+                </div>
               </div>
             )}
 
