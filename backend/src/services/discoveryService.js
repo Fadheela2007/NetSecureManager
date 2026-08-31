@@ -32,13 +32,50 @@ const PORTS_COURANTS = {
   515: "LPD", 554: "RTSP", 631: "IPP", 9100: "JetDirect",
 };
 
+/**
+ * Vrai si le dernier octet vaut 0 ou 255.
+ *
+ * POURQUOI CES DEUX-LÀ SONT ÉCARTÉES.
+ *
+ * Sur un parc réel, l'adresse 192.168.0.255 s'est retrouvée enregistrée
+ * comme un équipement, puis a généré une alerte « ne répond plus »
+ * permanente. Ce n'est pas une machine : c'est l'adresse de DIFFUSION
+ * du bloc 192.168.0.x.
+ *
+ * Le mécanisme : la plage scannée était un /23, où 192.168.0.255 est
+ * techniquement une adresse d'hôte valide. Mais les postes du réseau,
+ * eux, sont configurés en /24 — comme la quasi-totalité du matériel. Ils
+ * la traitent donc comme une diffusion et répondent au ping. Cette
+ * réponse ne vient d'aucun appareil situé à cette adresse : c'est un
+ * écho collectif.
+ *
+ * L'équipement fantôme ainsi créé ne répond plus au balayage suivant, et
+ * alerte indéfiniment. Un outil de supervision qui invente des pannes
+ * perd sa raison d'être.
+ *
+ * CE QU'ON PERD. Sur un /23 ou plus large, une machine peut légitimement
+ * porter une adresse en .0 ou .255. Elle ne sera pas découverte. C'est
+ * assumé : cette configuration est rare et déconseillée précisément
+ * parce qu'elle perturbe les équipements en /24, alors que le faux
+ * positif, lui, se produit sur presque tous les réseaux.
+ */
+function estAdresseReservee(ip) {
+  const dernier = Number(String(ip).split(".")[3]);
+  return dernier === 0 || dernier === 255;
+}
+
 function listHostsFromCidr(cidr) {
   const subnet = ipLib.cidrSubnet(cidr);
   const hosts = [];
   const start = ipLib.toLong(subnet.firstAddress);
   const end = ipLib.toLong(subnet.lastAddress);
   for (let i = start; i <= end; i++) {
-    hosts.push(ipLib.fromLong(i));
+    const ip = ipLib.fromLong(i);
+    // firstAddress/lastAddress écartent déjà le réseau et la diffusion
+    // de la plage SCANNÉE. Restent ceux des blocs /24 intermédiaires,
+    // qui sont ceux qui posent problème.
+    if (estAdresseReservee(ip)) continue;
+    hosts.push(ip);
   }
   return hosts;
 }
@@ -844,6 +881,7 @@ async function snmpMetrics(ip, community = "public", { avecInventaire = false } 
 }
 
 module.exports = {
+  estAdresseReservee,
   scanRange, pingSweep, snmpProbe, snmpProbeV3, listHostsFromCidr,
   diagnosePanne, scanPorts, arpComplement, snmpMetrics, nmapFingerprint,
   wakeOnLan, fingerprint,

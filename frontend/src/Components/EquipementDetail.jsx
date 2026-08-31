@@ -86,11 +86,30 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
   }
 
   /**
-   * Enregistre le nom saisi. `valeur` permet de forcer l'effacement
-   * depuis le bouton dédié sans passer par le champ.
+   * Enregistre le nom saisi.
+   *
+   * `valeur` sert au bouton « Effacer », qui force la chaîne vide sans
+   * passer par le champ.
+   *
+   * LE PIÈGE, ET POURQUOI CE CONTRÔLE DE TYPE EXISTE.
+   *
+   * Cette fonction était câblée directement sur un bouton :
+   * `onClick={enregistrerNom}`. React passe alors l'ÉVÉNEMENT DE CLIC
+   * en premier argument. Comme il n'est pas `undefined`, il devenait le
+   * nom à enregistrer — et axios échouait en tentant de sérialiser un
+   * objet circulaire, AVANT même d'émettre la requête.
+   *
+   * Symptôme : « Enregistrement impossible », et aucune trace dans
+   * l'onglet Réseau du navigateur. Une erreur invisible là où on la
+   * cherche.
+   *
+   * Deux corrections, volontairement redondantes : les appels passent
+   * désormais par une lambda, ET la fonction refuse tout ce qui n'est
+   * pas une chaîne. La première suffit aujourd'hui ; la seconde protège
+   * du prochain qui recâblera un bouton sans y penser.
    */
   async function enregistrerNom(valeur) {
-    const nom = valeur !== undefined ? valeur : nomSaisi;
+    const nom = typeof valeur === "string" ? valeur : nomSaisi;
     setEnregistrement(true);
     setErreurNom(null);
     try {
@@ -216,7 +235,9 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
                 />
                 <div className="flex flex-wrap items-center gap-2">
                   <button
-                    onClick={enregistrerNom}
+                    /* Lambda et non `onClick={enregistrerNom}` : React
+                       passerait l'événement de clic en argument. */
+                    onClick={() => enregistrerNom()}
                     disabled={enregistrement}
                     className="text-xs px-3 py-1.5 rounded-lg bg-[var(--color-signal)] text-[var(--color-sur-accent)] font-medium disabled:opacity-50"
                   >

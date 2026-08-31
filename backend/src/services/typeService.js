@@ -71,17 +71,53 @@ function typeDepuisTexte(texte, provenance = "snmp") {
   if (!texte) return null;
   const t = String(texte).toLowerCase();
 
-  // ── Équipements réseau : marqueurs produits, très fiables ──────────
-  if (/fortigate|fortios|fortinet|palo alto|pan-os|sonicwall|watchguard|pfsense|opnsense|checkpoint|check point/.test(t))
-    return TYPES.PARE_FEU;
-  if (/\bios[- ]?xe\b|catalyst|procurve|aruba|\bswitch\b|powerconnect|ex\d{4}|nexus/.test(t))
-    return TYPES.SWITCH;
-  if (/routeros|mikrotik|\brouter\b|routeur|rv\d{3}|isr\d|edgerouter|draytek|vigor/.test(t))
-    return TYPES.ROUTEUR;
-  if (/unifi|ubiquiti|access point|wireless ap|\bwap\b/.test(t))
-    return TYPES.SWITCH;
-  if (/cisco ios|huawei|juniper|junos|d-link|tp-link|netgear|zyxel|extreme networks/.test(t))
-    return TYPES.SWITCH; // constructeur réseau sans indice de produit plus précis
+  // ── Équipements réseau ────────────────────────────────────────────
+  //
+  // RÉSERVÉ AU TEXTE SNMP. Ces règles ne s'appliquent PLUS aux
+  // estimations de nmap, et c'est la correction la plus importante de
+  // ce fichier.
+  //
+  // CE QUI S'EST PASSÉ. Sur un parc réel, treize appareils — un
+  // téléphone Honor, plusieurs Android, des objets connectés répartis
+  // sur deux sous-réseaux — ont TOUS été classés « routeur ». Tous
+  // portaient exactement la même estimation nmap :
+  //
+  //     « 3Com OfficeConnect 3CRWER100-75 wireless broadband router (96%) »
+  //
+  // Ce n'est pas une identification, c'est la réponse par défaut de
+  // nmap devant une petite pile réseau embarquée : ce modèle de routeur
+  // domestique est son repli. Le mot « router » y figurait, la règle
+  // ci-dessous s'est déclenchée, et treize téléphones sont devenus des
+  // routeurs.
+  //
+  // LA FAUTE DE FOND. On déduisait une CATÉGORIE d'un NOM DE PRODUIT.
+  // C'est la même erreur que le nom d'équipement hérité de nmap, ou que
+  // le type de service mDNS pris pour un nom de machine : une donnée
+  // réelle, rangée dans un champ qui n'est pas le sien.
+  //
+  // POURQUOI SNMP RESTE FIABLE. Le texte SNMP est ce que l'équipement
+  // DÉCLARE de lui-même. Un commutateur qui répond « Catalyst » est un
+  // commutateur. L'estimation nmap, elle, est une comparaison
+  // d'empreintes : elle propose le modèle le plus ressemblant de sa
+  // base, même quand rien ne ressemble vraiment.
+  //
+  // CE QU'ON PERD. Un vrai routeur sans SNMP retombe sur « inconnu » au
+  // lieu d'être reconnu. C'est le compromis assumé du produit — mieux
+  // vaut vide que faux — et il reste rattrapé par nmapDeviceType, qui
+  // annonce une catégorie et non un modèle, et qui est consulté AVANT
+  // cette fonction (voir determinerType).
+  if (provenance === "snmp") {
+    if (/fortigate|fortios|fortinet|palo alto|pan-os|sonicwall|watchguard|pfsense|opnsense|checkpoint|check point/.test(t))
+      return TYPES.PARE_FEU;
+    if (/\bios[- ]?xe\b|catalyst|procurve|aruba|\bswitch\b|powerconnect|ex\d{4}|nexus/.test(t))
+      return TYPES.SWITCH;
+    if (/routeros|mikrotik|\brouter\b|routeur|rv\d{3}|isr\d|edgerouter|draytek|vigor/.test(t))
+      return TYPES.ROUTEUR;
+    if (/unifi|ubiquiti|access point|wireless ap|\bwap\b/.test(t))
+      return TYPES.SWITCH;
+    if (/cisco ios|huawei|juniper|junos|d-link|tp-link|netgear|zyxel|extreme networks/.test(t))
+      return TYPES.SWITCH; // constructeur réseau sans indice de produit plus précis
+  }
 
   // ── Impression ────────────────────────────────────────────────────
   if (/laserjet|officejet|deskjet|jetdirect|\bnpi[0-9a-f]{6}\b|imprimante|\bprinter\b|print server|mfp|workcentre|imagerunner|bizhub|aficio|ecosys|phaser/.test(t))

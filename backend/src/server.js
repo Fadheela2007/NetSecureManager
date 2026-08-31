@@ -661,6 +661,35 @@ app.use("/api", requireAuth, configurationRoutes);
 app.use("/api", requireAuth, accesWebRoutes);
 app.use("/api", requireAuth, reinitialisationRoutes);
 
+/* ---------------------------------------------------------------------
+   ROUTE INEXISTANTE — répondre en JSON, comme partout ailleurs.
+
+   CE QUI N'ALLAIT PAS. Aucun gestionnaire ne couvrait le cas « cette
+   route n'existe pas ». Express renvoyait alors sa page HTML par
+   défaut, que le frontend ne sait pas lire : `err.response.data.error`
+   restait vide, et l'interface affichait son message de repli le plus
+   vague — « Enregistrement impossible ».
+
+   Conséquence pratique : une route mal orthographiée, oubliée au
+   déploiement, ou présente dans une version du frontend plus récente
+   que celle du backend, produisait exactement le même message qu'une
+   panne de base de données. Impossible de distinguer les deux sans
+   ouvrir les outils du navigateur.
+
+   Ce middleware ne corrige aucun bug par lui-même. Il rend les bugs
+   LISIBLES — ce qui, sur une plateforme déployée chez des clients,
+   vaut souvent davantage.
+
+   Il est placé APRÈS toutes les routes et AVANT le gestionnaire
+   d'erreurs : l'ordre est ce qui le rend fonctionnel.
+   --------------------------------------------------------------------- */
+app.use("/api", (req, res) => {
+  res.status(404).json({
+    error: `Route inconnue : ${req.method} ${req.originalUrl}`,
+    aide: "Vérifiez que le backend et le frontend sont sur la même version.",
+  });
+});
+
 // Filet de sécurité : Express 5 transmet automatiquement les rejets de promesse
 // des handlers async ici. Sans ce middleware, le client reçoit une page HTML
 // d'erreur au lieu d'un JSON exploitable par le frontend.
