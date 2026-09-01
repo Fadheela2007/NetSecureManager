@@ -601,7 +601,14 @@ async function scanPorts(ip) {
 }
 
 const OID_HR_PROCESSOR_LOAD = "1.3.6.1.2.1.25.3.3.1.2";
+// HOST-RESOURCES-MIB, table du stockage. Les trois colonnes se lisent
+// ensemble : le libellé dit DE QUOI il s'agit (« Physical memory », un
+// disque, un cache…), les deux autres donnent la taille et l'occupation.
+// Elles sont exprimées en unités d'allocation propres à chaque ligne —
+// d'où le rapport occupation/taille, où l'unité se simplifie.
 const OID_HR_STORAGE_DESCR = "1.3.6.1.2.1.25.2.3.1.3";
+const OID_HR_STORAGE_SIZE = "1.3.6.1.2.1.25.2.3.1.5";
+const OID_HR_STORAGE_USED = "1.3.6.1.2.1.25.2.3.1.6";
 const OID_IF_IN_OCTETS = "1.3.6.1.2.1.2.2.1.10";
 const OID_IF_OUT_OCTETS = "1.3.6.1.2.1.2.2.1.16";
 // Inventaire des interfaces (IF-MIB) : nom et états administratif/opérationnel.
@@ -635,10 +642,10 @@ const OID_DOT1D_BASE_PORT_IFINDEX = "1.3.6.1.2.1.17.1.4.1.2";
 /**
  * Parcourt une sous-arborescence SNMP et renvoie les couples (OID, valeur).
  *
- * `snmpTable()` ne convient pas ici : il suppose un index simple, alors
- * que la table d'apprentissage est indexée par l'adresse MAC — six
- * nombres accolés à l'OID — et parfois précédée du numéro de VLAN. Il
- * faut donc les OID bruts pour en extraire la MAC.
+ * `snmpColonne()` ne convient pas ici : il rend une valeur par index, or
+ * la table d'apprentissage est indexée par l'adresse MAC — six nombres
+ * accolés à l'OID — parfois précédée du numéro de VLAN. C'est l'index
+ * lui-même qui porte l'information : il faut donc les OID bruts.
  */
 function snmpParcours(ip, community, oid, timeoutMs = 6000) {
   return new Promise((resolve) => {
@@ -772,19 +779,94 @@ function formaterMacSnmp(valeur) {
   return octets.map((o) => o.toString(16).padStart(2, "0").toUpperCase()).join("-");
 }
 
-function snmpTable(ip, community, oid, timeoutMs = 3000) {
+/**
+ * Lit UNE COLONNE d'une table SNMP et renvoie { index: valeur }.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * POURQUOI CETTE FONCTION REMPLACE UN APPEL À `session.table()`
+ *
+ * La version précédente appelait `session.table(oid)` en lui passant des
+ * identifiants de COLONNE — « octets reçus », « nom d'interface ». Or
+ * cette méthode attend l'identifiant de la TABLE. Recevant une colonne,
+ * elle ne trouvait rien à structurer et renvoyait un objet VIDE, sans
+ * la moindre erreur.
+ *
+ * Constaté sur une imprimante HP, mesures à l'appui :
+ *
+ *   parcours de la colonne « nom d'interface »  →  0 ligne
+ *   parcours de la TABLE des interfaces         →  4 lignes
+ *   parcours brut de la même colonne            →  4 valeurs
+ *                                                  LOOPBACK, Ethernet,
+ *                                                  wifi0, wifiUAP
+ *
+ * L'équipement répondait parfaitement. C'est notre lecture qui était
+ * fausse — et elle l'était pour TOUS les équipements, sur n'importe quel
+ * réseau. Bande passante, processeur, mémoire, taux d'occupation des
+ * liens : rien de tout cela n'a jamais pu fonctionner.
+ *
+ * Le défaut était indétectable depuis l'interface, puisqu'un objet vide
+ * est exactement ce que renvoie aussi un équipement muet.
+ *
+ * CE QUE FAIT LA NOUVELLE VERSION
+ *
+ * Elle parcourt la colonne demandée sans présumer d'aucune structure, et
+ * indexe chaque valeur par ce qui suit l'identifiant de colonne. C'est le
+ * fonctionnement le plus simple possible, donc le moins susceptible de
+ * se tromper.
+ *
+ * `retries: 1` et non 0 : un parcours enchaîne de nombreux échanges, et
+ * un seul paquet UDP perdu anéantissait auparavant la collecte entière.
+ * ─────────────────────────────────────────────────────────────────────
+ *
+ * @returns {Promise<Object<string, *>>} valeurs indexées, {} si rien
+ */
+function snmpColonne(ip, community, oidColonne, timeoutMs = 4000) {
   return new Promise((resolve) => {
     let session;
     try {
-      session = snmp.createSession(ip, community, { timeout: timeoutMs, retries: 0 });
+      session = snmp.createSession(ip, community, { timeout: timeoutMs, retries: 1 });
     } catch {
       return resolve({});
     }
-    session.on("error", () => resolve({}));
-    session.table(oid, 20, (error, table) => {
-      session.close();
-      resolve(error ? {} : table || {});
-    });
+
+    const valeurs = {};
+    const prefixe = `${oidColonne}.`;
+    let termine = false;
+
+    const finir = () => {
+      if (termine) return;
+      termine = true;
+      try {
+        session.close();
+      } catch {
+        /* session déjà fermée */
+      }
+      // On rend TOUJOURS ce qui a été collecté, même en cas d'erreur en
+      // fin de parcours : une table à moitié lue vaut mieux que rien.
+      resolve(valeurs);
+    };
+
+    session.on("error", finir);
+
+    try {
+      session.subtree(
+        oidColonne,
+        20,
+        (varbinds) => {
+          for (const vb of varbinds) {
+            if (snmp.isVarbindError(vb)) continue;
+            const oid = String(vb.oid);
+            // Le parcours peut déborder sur la colonne suivante : on
+            // n'accepte que ce qui appartient vraiment à celle demandée.
+            if (!oid.startsWith(prefixe)) continue;
+            valeurs[oid.slice(prefixe.length)] = vb.value;
+          }
+        },
+        () => finir()
+      );
+    } catch {
+      finir();
+    }
   });
 }
 
@@ -805,73 +887,204 @@ function snmpTable(ip, community, oid, timeoutMs = 3000) {
  *   Le cron continue de ne lire que les compteurs de trafic, indispensables
  *   au calcul du débit.
  */
+
+/**
+ * Convertit une valeur SNMP en nombre, ou null.
+ *
+ * POURQUOI PAS `Number()` DIRECTEMENT. `Number(null)` vaut 0, tout comme
+ * `Number("")` et `Number([])`. Une valeur ABSENTE devenait donc « 0 % de
+ * charge processeur » — une affirmation fausse présentée comme une mesure.
+ * Un test l'a attrapée avant qu'elle n'atteigne un client.
+ *
+ * La règle du produit est constante : une case vide vaut mieux qu'un
+ * chiffre inventé.
+ */
+function nombreOuNull(valeur) {
+  // Liste BLANCHE et non liste noire. `Number([])` vaut 0, `Number(true)`
+  // vaut 1 : impossible d'énumérer d'avance tout ce qui se convertit en un
+  // chiffre trompeur. On n'accepte donc que ce qui est légitimement un
+  // nombre — les deux seules formes qu'un agent SNMP produit ici.
+  //
+  // Conséquence assumée : un compteur 64 bits, que la bibliothèque rend
+  // sous forme d'octets bruts, sera écarté. Nous ne lisons que des
+  // compteurs 32 bits ; le jour où cela changera, ce sera un ajout
+  // explicite, pas une conversion accidentelle.
+  if (typeof valeur === "number") return Number.isFinite(valeur) ? valeur : null;
+  if (typeof valeur !== "string") return null;
+  if (valeur.trim() === "") return null;
+  const n = Number(valeur);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Moyenne des charges processeur, en pourcentage, ou null.
+ *
+ * Un équipement multi-cœurs déclare une ligne par cœur. La moyenne est la
+ * seule lecture honnête : le maximum ferait hurler l'alerte dès qu'un seul
+ * cœur travaille, ce qui est le fonctionnement normal d'une machine.
+ *
+ * Les valeurs hors de 0–100 sont écartées : certains agents SNMP publient
+ * -1 pour « je ne sais pas », et une charge négative moyennée fausserait
+ * tout le reste.
+ */
+function moyenneCharges(colonne) {
+  const charges = Object.values(colonne || {})
+    .map(nombreOuNull)
+    .filter((v) => v !== null && v >= 0 && v <= 100);
+  if (charges.length === 0) return null;
+  return charges.reduce((a, b) => a + b, 0) / charges.length;
+}
+
+/**
+ * Libellés qui NE désignent PAS la mémoire vive, même s'ils contiennent
+ * le mot « memory ».
+ *
+ * Vérifiés en écartant : « Flash Memory », « Virtual Memory », « Cached
+ * memory », « Memory buffers », « Shared memory », « ramdisk0 », « HDD »,
+ * « C:\ Label:OS ». Chacun est une vraie ligne rencontrée sur du matériel
+ * ou décrite par la norme HOST-RESOURCES-MIB.
+ */
+const MOTIFS_PAS_MEMOIRE = /disk|disque|swap|virtual|cache|buffer|shared|flash|hdd|ssd|storage|partition|volume|[/\\]/i;
+
+/**
+ * Libellés dont on est SÛR qu'ils désignent la mémoire vive. Ils sont
+ * préférés aux formulations vagues quand plusieurs lignes conviennent.
+ */
+const MOTIFS_MEMOIRE_CERTAINE = /physical memory|real memory|random access memory/i;
+
+/** Formulations acceptables à défaut : le mot « mémoire » ou « ram » seul. */
+const MOTIFS_MEMOIRE_PROBABLE = /\bmemory\b|\bmémoire\b|\bram\b/i;
+
+/**
+ * Taux d'occupation de la mémoire vive, en pourcentage, ou null.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * DEUX ERREURS CORRIGÉES, DÉCOUVERTES SUR MATÉRIEL RÉEL
+ *
+ * La première version ne retenait que « physical memory », « real
+ * memory » ou le mot « ram ». Un relevé du parc a montré qu'elle se
+ * trompait dans LES DEUX SENS :
+ *
+ *   Canon iR-ADV C3525      RAM(main)              2097152 / 0 utilisé
+ *                           RAM(sub)               1048576 / 0
+ *                           Flash Memory            483210 / 0
+ *                           HDD                   78142806 / 0
+ *     → retenu : 0 %. Un disque de 78 Go « vide à 0 octet » n'existe
+ *       pas : cet agent DÉCLARE les compteurs sans les remplir. Nous
+ *       affichions ce zéro comme une mesure.
+ *
+ *   HP NPI4DDD0A            Random Access Memory  268435456 / 113434152
+ *   HP HP694AA2             Random Access Memory  356794368 / 339501056
+ *     → retenu : rien. Deux mesures parfaitement valables — 42 % et
+ *       95 % — jetées parce que le libellé normalisé de HP n'était pas
+ *       dans la liste. Or 95 % d'occupation est exactement ce qu'un
+ *       outil de supervision doit signaler.
+ *
+ * D'où la logique actuelle : on ÉCARTE d'abord ce qui n'est pas de la
+ * mémoire vive (disques, flash, swap, caches, tampons), puis on choisit
+ * la ligne la plus explicite parmi celles qui restent.
+ *
+ * ET ON REFUSE UN COMPTEUR À ZÉRO. Un équipement qui répond en SNMP fait
+ * tourner un système : son occupation mémoire n'est jamais nulle. Un zéro
+ * signifie « l'agent ne remplit pas ce champ », pas « rien n'est
+ * utilisé ». C'est la règle constante du produit — une case vide vaut
+ * mieux qu'un chiffre inventé.
+ * ─────────────────────────────────────────────────────────────────────
+ */
+function tauxMemoire(colonneDescr, colonneTaille, colonneUtilise) {
+  let meilleur = null;
+
+  for (const [idx, libelle] of Object.entries(colonneDescr || {})) {
+    const texte = String(libelle == null ? "" : libelle).trim();
+    if (!texte) continue;
+    if (MOTIFS_PAS_MEMOIRE.test(texte)) continue;
+
+    const certaine = MOTIFS_MEMOIRE_CERTAINE.test(texte);
+    if (!certaine && !MOTIFS_MEMOIRE_PROBABLE.test(texte)) continue;
+
+    const taille = nombreOuNull((colonneTaille || {})[idx]);
+    const utilise = nombreOuNull((colonneUtilise || {})[idx]);
+    if (taille === null || utilise === null) continue;
+    if (taille <= 0) continue;
+
+    // Zéro octet utilisé sur une machine allumée : compteur non rempli.
+    if (utilise <= 0) continue;
+
+    const rang = certaine ? 2 : 1;
+    // À rang égal, la première ligne l'emporte : les agents déclarent la
+    // mémoire principale avant les mémoires secondaires.
+    if (meilleur === null || rang > meilleur.rang) {
+      // Les deux valeurs sont dans la même unité d'allocation : le
+      // rapport est valable sans jamais avoir à connaître cette unité.
+      meilleur = { rang, taux: Math.min(100, (utilise / taille) * 100) };
+    }
+  }
+
+  return meilleur === null ? null : meilleur.taux;
+}
+
 async function snmpMetrics(ip, community = "public", { avecInventaire = false } = {}) {
-  const tablesBase = [
-    snmpTable(ip, community, OID_HR_PROCESSOR_LOAD),
-    snmpTable(ip, community, OID_HR_STORAGE_DESCR.slice(0, -2)),
-    snmpTable(ip, community, OID_IF_IN_OCTETS),
-    snmpTable(ip, community, OID_IF_OUT_OCTETS),
+  // Chaque colonne est lue séparément puis recollée par index. C'est ce
+  // que faisait déjà le code appelant — mais il lisait des colonnes en
+  // croyant lire des tables, et n'obtenait donc jamais rien. Voir le
+  // commentaire de snmpColonne pour le détail de ce défaut.
+  const colonnesBase = [
+    snmpColonne(ip, community, OID_HR_PROCESSOR_LOAD),
+    snmpColonne(ip, community, OID_HR_STORAGE_DESCR),
+    snmpColonne(ip, community, OID_HR_STORAGE_SIZE),
+    snmpColonne(ip, community, OID_HR_STORAGE_USED),
+    snmpColonne(ip, community, OID_IF_IN_OCTETS),
+    snmpColonne(ip, community, OID_IF_OUT_OCTETS),
   ];
 
-  const tablesInventaire = avecInventaire
+  const colonnesInventaire = avecInventaire
     ? [
-        snmpTable(ip, community, OID_IF_DESCR),
-        snmpTable(ip, community, OID_IF_ADMIN_STATUS),
-        snmpTable(ip, community, OID_IF_OPER_STATUS),
-        snmpTable(ip, community, OID_IF_PHYS_ADDRESS),
-        snmpTable(ip, community, OID_IF_SPEED),
+        snmpColonne(ip, community, OID_IF_DESCR),
+        snmpColonne(ip, community, OID_IF_ADMIN_STATUS),
+        snmpColonne(ip, community, OID_IF_OPER_STATUS),
+        snmpColonne(ip, community, OID_IF_PHYS_ADDRESS),
+        snmpColonne(ip, community, OID_IF_SPEED),
       ]
     : [];
 
-  const resultats = await Promise.all([...tablesBase, ...tablesInventaire]);
-  const [cpuTable, storageTable, inTable, outTable] = resultats;
-  const [descrTable, adminTable, operTable, macTable, speedTable] = avecInventaire
-    ? resultats.slice(4)
+  const resultats = await Promise.all([...colonnesBase, ...colonnesInventaire]);
+  const [cpuCol, storageDescrCol, storageSizeCol, storageUsedCol, inCol, outCol] = resultats;
+  const [descrCol, adminCol, operCol, macCol, speedCol] = avecInventaire
+    ? resultats.slice(colonnesBase.length)
     : [null, null, null, null, null];
 
-  const charges = Object.values(cpuTable || {}).map((row) => row[2]).filter((v) => typeof v === "number");
-  const cpuPercent = charges.length ? charges.reduce((a, b) => a + b, 0) / charges.length : null;
-
-  let ramPercent = null;
-  for (const row of Object.values(storageTable || {})) {
-    const descr = (row[3] || "").toString().toLowerCase();
-    if (descr.includes("physical memory") || descr === "ram") {
-      const taille = Number(row[5]);
-      const utilise = Number(row[6]);
-      if (taille > 0) ramPercent = (utilise / taille) * 100;
-      break;
-    }
-  }
+  const cpuPercent = moyenneCharges(cpuCol);
+  const ramPercent = tauxMemoire(storageDescrCol, storageSizeCol, storageUsedCol);
 
   // Les index proviennent des compteurs de trafic ; en mode inventaire on
   // complète avec ceux vus dans ifDescr (une interface peut apparaître dans
   // l'une et pas dans l'autre selon l'agent SNMP).
-  const indexes = new Set(Object.keys(inTable || {}));
+  const indexes = new Set(Object.keys(inCol || {}));
   if (avecInventaire) {
-    Object.keys(descrTable || {}).forEach((i) => indexes.add(i));
+    Object.keys(descrCol || {}).forEach((i) => indexes.add(i));
   }
 
   const interfaces = [...indexes].map((idx) => {
     const base = {
       index: Number(idx),
-      inOctets: Number((inTable || {})[idx]?.[10]) || 0,
-      outOctets: Number((outTable || {})[idx]?.[16]) || 0,
+      inOctets: Number((inCol || {})[idx]) || 0,
+      outOctets: Number((outCol || {})[idx]) || 0,
     };
 
     if (!avecInventaire) return base;
 
-    const nomBrut = (descrTable || {})[idx]?.[2];
-    const vitesseBits = Number((speedTable || {})[idx]?.[5]);
+    const nomBrut = (descrCol || {})[idx];
+    const vitesseBits = nombreOuNull((speedCol || {})[idx]);
     return {
       ...base,
-      nom: nomBrut ? nomBrut.toString().trim() : null,
-      adresseMac: formaterMacSnmp((macTable || {})[idx]?.[6]),
-      etatAdmin: etatInterface((adminTable || {})[idx]?.[7]),
-      etatOperationnel: etatInterface((operTable || {})[idx]?.[8]),
+      nom: nomBrut === null || nomBrut === undefined ? null : nomBrut.toString().trim() || null,
+      adresseMac: formaterMacSnmp((macCol || {})[idx]),
+      etatAdmin: etatInterface((adminCol || {})[idx]),
+      etatOperationnel: etatInterface((operCol || {})[idx]),
       // ifSpeed sature à 4294967295 sur les liens ≥ 4 Gbit/s (compteur 32
       // bits) : au-delà, la valeur n'a plus de sens et on préfère rien.
       vitesseMbps:
-        Number.isFinite(vitesseBits) && vitesseBits > 0 && vitesseBits < 4294967295
+        vitesseBits !== null && vitesseBits > 0 && vitesseBits < 4294967295
           ? Math.round(vitesseBits / 1_000_000)
           : null,
     };
@@ -887,4 +1100,6 @@ module.exports = {
   wakeOnLan, fingerprint,
   // Attribution du trafic par port de switch — voir attributionPortService.
   tableCommutation, macDepuisOid,
+  // Exposés pour les tests : logique pure, sans réseau.
+  moyenneCharges, tauxMemoire, nombreOuNull,
 };

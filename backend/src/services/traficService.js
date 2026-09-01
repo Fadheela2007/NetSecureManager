@@ -32,13 +32,44 @@ const compteurs = new Map();
  *
  * La boucle locale voit passer tout le trafic interne de la machine : la
  * compter reviendrait à doubler, voire tripler, la consommation réelle.
- * Les interfaces de type « null » et les tunnels non actifs faussent de
- * même.
+ * Les interfaces « null » (rejet Cisco) faussent de même.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * POURQUOI UNE LISTE DE MOTIFS PRÉCIS, ET NON UN SEUL MOTIF SOUPLE
+ *
+ * La version précédente s'écrivait `/^(lo|lo0|loopback|null\d*|…)/i` —
+ * une seule expression, sans ancrage de fin. Le fragment `lo` seul y
+ * suffisait donc à écarter TOUT nom commençant par ces deux lettres.
+ *
+ * Ce qu'elle excluait sans que personne ne s'en aperçoive :
+ *
+ *     « Local Area Connection »     ← la carte Ethernet standard
+ *     « Local Area Connection 2 »     de tout poste Windows
+ *
+ * Sur un parc Windows, l'interface PRINCIPALE de chaque machine était
+ * donc silencieusement retirée du calcul. L'équipement affichait un
+ * trafic nul tout en fonctionnant parfaitement — le pire des défauts
+ * pour un outil de supervision, puisqu'il ressemble à une bonne nouvelle.
+ *
+ * Les tests existants ne l'avaient pas vu : ils ne vérifiaient que des
+ * noms Unix et Cisco. Un test ne protège que de ce qu'on a pensé à lui
+ * soumettre.
+ *
+ * Chaque motif est désormais ancré, et chacun couvre une convention de
+ * nommage identifiée. Ajouter un cas doit rester un geste explicite.
+ * ─────────────────────────────────────────────────────────────────────
  */
-const MOTIF_INTERFACE_IGNOREE = /^(lo|lo0|loopback|null\d*|Null\d*|Software Loopback)/i;
+const MOTIFS_INTERFACE_IGNOREE = [
+  /^lo\d*$/i,                 // lo, lo0, lo1 — convention Unix, nom complet
+  /^loopback\b/i,             // LOOPBACK, « Loopback Pseudo-Interface 1 »
+  /^software loopback\b/i,    // libellé Windows complet
+  /^null\d*$/i,               // Null0 — interface de rejet Cisco
+];
 
 function estIgnoree(nomInterface) {
-  return !!nomInterface && MOTIF_INTERFACE_IGNOREE.test(String(nomInterface).trim());
+  if (!nomInterface) return false;
+  const nom = String(nomInterface).trim();
+  return MOTIFS_INTERFACE_IGNOREE.some((motif) => motif.test(nom));
 }
 
 /**

@@ -592,9 +592,21 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
               </thead>
               <tbody className="divide-y divide-[var(--color-line)]">
                 {interfaces.map((i) => (
-                  <tr key={i.id_interface}>
+                  // Atténuée quand elle est exclue du total : la même
+                  // convention que sur la page Bande passante. Deux écrans
+                  // qui montrent la même interface doivent en dire la même
+                  // chose, sinon c'est l'outil qu'on cesse de croire.
+                  <tr key={i.id_interface} className={i.ignoree_du_total ? "opacity-50" : ""}>
                     <td className="py-2 font-[var(--font-mono)] text-[13px]">
                       {i.nom}
+                      {i.ignoree_du_total && (
+                        <span
+                          className="ml-2 text-[11px] text-[var(--color-mute)]"
+                          title="Boucle locale : elle voit passer le trafic interne de la machine. La compter doublerait la consommation apparente."
+                        >
+                          (hors total)
+                        </span>
+                      )}
                       {i.adresse_mac && (
                         <span className="ml-2 text-[11px] text-[var(--color-mute)]">{i.adresse_mac}</span>
                       )}
@@ -725,9 +737,26 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
               </div>
             )}
 
+            {/* CE MESSAGE NE DOIT PAS INVENTER DE CAUSE.
+
+                Il affirmait « cet équipement n'expose pas SNMP
+                HOST-RESOURCES-MIB ». C'est faux au moins une fois sur ce
+                parc : une imprimante Canon expose parfaitement cette
+                table — quatre lignes, tailles renseignées — mais laisse
+                TOUS ses compteurs d'occupation à zéro. Nous refusons donc
+                ses valeurs, ce qui est le bon choix ; mais le motif
+                annoncé, lui, était inexact.
+
+                Un opérateur qui lit « n'expose pas SNMP » ira vérifier la
+                configuration SNMP de l'appareil et n'y trouvera rien à
+                corriger. Une phrase qui envoie chercher au mauvais
+                endroit coûte plus cher qu'une phrase vague. */}
             {!aDesMetriques && (
               <p className="text-xs text-[var(--color-mute)]">
-                Aucune donnée CPU/RAM — cet équipement n'expose pas SNMP HOST-RESOURCES-MIB.
+                Aucune donnée processeur ni mémoire pour cet équipement. Soit
+                il ne publie pas ces mesures, soit il les déclare sans les
+                renseigner — dans les deux cas, aucune valeur fiable n'existe.
+                Le reste de la supervision n'est pas affecté.
               </p>
             )}
           </div>

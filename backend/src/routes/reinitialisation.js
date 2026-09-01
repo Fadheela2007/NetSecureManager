@@ -38,7 +38,7 @@ const express = require("express");
 const router = express.Router();
 const db = require("../db");
 const { requireRole } = require("../middleware/requireRole");
-const { porteeDe } = require("../middleware/porteeSite");
+const { porteeDe, siteAutorise } = require("../middleware/porteeSite");
 
 const PHRASE = "REINITIALISER";
 
@@ -114,9 +114,61 @@ const CIBLES = [
   },
 ];
 
+
+/**
+ * Portée EFFECTIVE de l'opération : celle de l'utilisateur, éventuellement
+ * restreinte à un site qu'il a explicitement désigné.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * POURQUOI CE PARAMÈTRE EXISTE
+ *
+ * Sans lui, la réinitialisation était tout ou rien : un administrateur de
+ * plateforme ne pouvait que vider LES DEUX sites à la fois. Or « je veux
+ * refaire le scan de l'agence de Yaoundé » est la demande la plus banale
+ * qui soit sur un outil multi-sites — et la seule façon de la satisfaire
+ * était de tout effacer, y compris l'historique du siège.
+ *
+ * LE PARAMÈTRE NE PEUT PAS ÉLARGIR LES DROITS, SEULEMENT LES RESTREINDRE.
+ * Un administrateur rattaché au site 1 qui demanderait le site 2 est
+ * refusé : sa portée reste la borne. Le champ vient du client, la portée
+ * vient du jeton signé — seule la seconde fait autorité.
+ * ─────────────────────────────────────────────────────────────────────
+ *
+ * @returns {{ site: number|null } | { erreur: string }}
+ */
+function resoudrePortee(req, idSiteDemande) {
+  const portee = porteeDe(req);
+
+  // Rien de demandé : on garde la portée de l'utilisateur.
+  if (idSiteDemande === undefined || idSiteDemande === null || idSiteDemande === "") {
+    return { site: portee };
+  }
+
+  // Liste BLANCHE des formes acceptées, et non simple appel à Number().
+  // `Number(true)` vaut 1 et `Number(["2"])` vaut 2 : sans ce filtre, un
+  // client qui envoie une valeur aberrante déclenche une suppression sur
+  // un site qu'il n'a jamais désigné. Un test l'a démontré.
+  const forme = typeof idSiteDemande;
+  if (forme !== "number" && forme !== "string") {
+    return { erreur: "Le site visé doit être un identifiant valide." };
+  }
+  const cible = Number(idSiteDemande);
+  if (!Number.isInteger(cible) || cible <= 0) {
+    return { erreur: "Le site visé doit être un identifiant valide." };
+  }
+  if (!siteAutorise(req, cible)) {
+    // Même raisonnement qu'ailleurs : on ne confirme pas l'existence d'un
+    // site hors périmètre.
+    return { erreur: "Site introuvable" };
+  }
+  return { site: cible };
+}
+
 /** GET /api/reinitialisation/apercu — ce qui serait effacé, sans rien effacer. */
 router.get("/reinitialisation/apercu", requireRole("admin"), async (req, res) => {
-  const portee = porteeDe(req);
+  const resolution = resoudrePortee(req, req.query.id_site);
+  if (resolution.erreur) return res.status(400).json({ error: resolution.erreur });
+  const portee = resolution.site;
 
   const compter = async (texte, params) => {
     try {
@@ -128,7 +180,7 @@ router.get("/reinitialisation/apercu", requireRole("admin"), async (req, res) =>
     }
   };
 
-  const site = portee === null ? null : portee;
+  const site = portee;
   const clause = (colonne) => (site === null ? "1=1" : `${colonne} = ?`);
   const p = site === null ? [] : [site];
 
@@ -159,9 +211,38 @@ router.get("/reinitialisation/apercu", requireRole("admin"), async (req, res) =>
     journal: portee === null ? await compter("SELECT COUNT(*) AS n FROM LOG_ACTIVITE", []) : null,
   };
 
+  // Les sites que CET utilisateur peut viser. La liste vient du serveur et
+  // non du frontend : un administrateur rattaché ne doit pas même voir
+  // qu'un autre site existe.
+  let sites = [];
+  try {
+    const [rows] = await db.query(
+      `SELECT s.id_site, s.nom, s.ville,
+              (SELECT COUNT(*) FROM EQUIPEMENT e WHERE e.id_site = s.id_site) AS equipements
+       FROM SITE s
+       WHERE (? IS NULL OR s.id_site = ?)
+       ORDER BY s.nom`,
+      [porteeDe(req), porteeDe(req)]
+    );
+    sites = rows.map((r) => ({
+      id_site: r.id_site,
+      nom: r.nom,
+      ville: r.ville,
+      equipements: Number(r.equipements) || 0,
+    }));
+  } catch {
+    // Une liste de sites indisponible ne doit pas empêcher l'aperçu :
+    // l'écran retombe alors sur la portée de l'utilisateur.
+    sites = [];
+  }
+
+  const nomDuSite = site === null ? null : sites.find((x) => x.id_site === site)?.nom || `site ${site}`;
+
   res.json({
     apercu,
-    portee: portee === null ? "toute la plateforme" : `site ${portee}`,
+    portee: site === null ? "toute la plateforme" : nomDuSite,
+    site_choisi: site,
+    sites,
     phrase_attendue: PHRASE,
     // Ce que l'interface doit annoncer comme JAMAIS touché. La liste vit
     // ici et non dans le frontend : une promesse d'interface qui n'est
@@ -181,7 +262,7 @@ router.get("/reinitialisation/apercu", requireRole("admin"), async (req, res) =>
  * body : { confirmation: "REINITIALISER", cibles: ["alertes", "equipements"] }
  */
 router.post("/reinitialisation", requireRole("admin"), async (req, res) => {
-  const { confirmation, cibles } = req.body || {};
+  const { confirmation, cibles, id_site: idSiteDemande } = req.body || {};
 
   if (confirmation !== PHRASE) {
     return res.status(400).json({
@@ -200,8 +281,9 @@ router.post("/reinitialisation", requireRole("admin"), async (req, res) => {
     });
   }
 
-  const portee = porteeDe(req);
-  const site = portee === null ? null : portee;
+  const resolution = resoudrePortee(req, idSiteDemande);
+  if (resolution.erreur) return res.status(400).json({ error: resolution.erreur });
+  const site = resolution.site;
 
   // Un administrateur rattaché à un site ne peut pas vider le journal
   // global : il y verrait — et effacerait — l'activité d'autres sites.
@@ -280,3 +362,6 @@ router.post("/reinitialisation", requireRole("admin"), async (req, res) => {
 });
 
 module.exports = router;
+// Exposée pour les tests : c'est la règle qui garantit qu'un paramètre
+// venu du client ne peut pas élargir la portée d'une suppression.
+module.exports.resoudrePortee = resoudrePortee;

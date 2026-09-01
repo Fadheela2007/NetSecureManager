@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import {
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
 } from "recharts";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
@@ -77,6 +77,53 @@ export default function BandePassantePage({ idSite }) {
   const [selection, setSelection] = useState(null);
   const [detail, setDetail] = useState(null);
   const [detailEnCours, setDetailEnCours] = useState(false);
+
+  /* ─────────────────────────────────────────────────────────────────
+     LARGEUR DU GRAPHIQUE, MESURÉE À LA MAIN
+
+     `ResponsiveContainer` de recharts observe son parent pour se
+     dimensionner. Quand ce parent apparaît en même temps que lui — ici,
+     le panneau de détail qui se déplie au clic — la mesure a lieu avant
+     que la mise en page ne soit calculée. Le conteneur retient alors
+     une largeur de ZÉRO et ne la révise jamais.
+
+     Le résultat à l'écran : un cadre vide de la bonne hauteur. Aucune
+     erreur, aucune trace en console. La courbe existe dans le document,
+     à la bonne couleur, dans un dessin large de 0 pixel.
+
+     Le même défaut s'est produit sur la fiche d'un équipement. On avait
+     alors cherché du côté des couleurs, du format des nombres et de
+     l'animation avant de simplement MESURER le conteneur — qui faisait
+     « 0 x 180 ».
+
+     Cette logique est volontairement recopiée depuis EquipementDetail
+     plutôt que partagée : une première tentative d'extraction en hook
+     avait cassé le composant. À mutualiser quand le protocole de test
+     sera terminé, pas au milieu.
+     ───────────────────────────────────────────────────────────────── */
+  const conteneurGraphique = useRef(null);
+  const [largeurGraphique, setLargeurGraphique] = useState(0);
+
+  useEffect(() => {
+    function mesurer() {
+      const el = conteneurGraphique.current;
+      if (!el) return;
+      const l = el.getBoundingClientRect().width;
+      if (l > 0) setLargeurGraphique(Math.round(l));
+    }
+    mesurer();
+    // Seconde mesure après le rendu : au premier passage, le panneau
+    // vient d'apparaître et sa largeur définitive n'est pas encore posée.
+    const differee = setTimeout(mesurer, 60);
+    window.addEventListener("resize", mesurer);
+    return () => {
+      clearTimeout(differee);
+      window.removeEventListener("resize", mesurer);
+    };
+    // `selection` et `detailEnCours` : le panneau change de taille quand
+    // on passe d'un équipement à l'autre, et quand le chargement se
+    // termine. Sans eux, la largeur resterait celle du premier affichage.
+  }, [selection, detailEnCours, heures]);
 
   useEffect(() => {
     let annule = false;
@@ -314,9 +361,9 @@ export default function BandePassantePage({ idSite }) {
               Pas assez de points pour tracer une courbe sur cette période.
             </p>
           ) : (
-            <div className="h-56">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={courbe} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+            <div ref={conteneurGraphique} className="w-full" style={{ minHeight: 224 }}>
+              {largeurGraphique > 0 && (
+                <AreaChart data={courbe} width={largeurGraphique} height={224} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
                   <defs>
                     <linearGradient id="grad-entrant" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="0%" stopColor="var(--color-signal)" stopOpacity={0.35} />
@@ -361,7 +408,7 @@ export default function BandePassantePage({ idSite }) {
                   <Area type="monotone" dataKey="entrant" stroke="var(--color-signal)" strokeWidth={2} fill="url(#grad-entrant)" connectNulls={false} dot={false} isAnimationActive={false} />
                   <Area type="monotone" dataKey="sortant" stroke="var(--color-ok)" strokeWidth={2} fill="url(#grad-sortant)" connectNulls={false} dot={false} isAnimationActive={false} />
                 </AreaChart>
-              </ResponsiveContainer>
+              )}
             </div>
           )}
 
@@ -373,6 +420,14 @@ export default function BandePassantePage({ idSite }) {
               <p className="text-xs text-[var(--color-mute)] mb-3">
                 Dernière mesure connue de chaque interface. C'est ici qu'on
                 identifie le port responsable.
+                {detail.interfaces.some((i) => i.ignoree_du_total) && (
+                  <>
+                    {" "}
+                    Les lignes grisées sont mesurées mais exclues du total de
+                    l'équipement — la somme de cette colonne ne correspond
+                    donc pas au chiffre du classement.
+                  </>
+                )}
               </p>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
@@ -396,9 +451,25 @@ export default function BandePassantePage({ idSite }) {
                         const max = Math.max(i.trafic_entrant_kbps ?? 0, i.trafic_sortant_kbps ?? 0);
                         const taux = i.vitesse_mbps > 0 ? Math.min(100, (max / (i.vitesse_mbps * 1000)) * 100) : null;
                         return (
-                          <tr key={i.index_snmp} className="border-b border-[var(--color-line)] last:border-0">
+                          <tr
+                            key={i.index_snmp}
+                            className={`border-b border-[var(--color-line)] last:border-0 ${
+                              // Atténuée, pas masquée : la boucle locale est
+                              // une vraie mesure, et la cacher ferait croire
+                              // à une interface oubliée par l'inventaire.
+                              i.ignoree_du_total ? "opacity-50" : ""
+                            }`}
+                          >
                             <td className="px-3 py-2">
                               <span className="text-[var(--color-ink)]">{i.nom}</span>
+                              {i.ignoree_du_total && (
+                                <span
+                                  className="ml-2 text-xs text-[var(--color-mute)]"
+                                  title="Boucle locale : elle voit passer le trafic interne de la machine. La compter doublerait la consommation apparente."
+                                >
+                                  (hors total)
+                                </span>
+                              )}
                               {i.etat_operationnel === "down" && (
                                 <span className="ml-2 text-xs text-[var(--color-mute)]">(hors service)</span>
                               )}

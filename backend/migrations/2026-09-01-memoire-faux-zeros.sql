@@ -1,0 +1,48 @@
+-- ---------------------------------------------------------------------
+-- 2026-09-01 — Effacement des taux de mémoire à zéro.
+--
+-- CE QUI N'ALLAIT PAS
+--
+-- Le graphique CPU/RAM d'une imprimante Canon affichait une courbe plate
+-- à « RAM : 0 » sur toute la période, alors que la courbe processeur,
+-- elle, était simplement absente.
+--
+-- Cette asymétrie était le signal. Une courbe ABSENTE dit « je n'ai pas
+-- mesuré ». Une courbe à ZÉRO dit « cette machine n'utilise aucune
+-- mémoire » — ce qui n'arrive jamais sur un équipement allumé. La
+-- première est une abstention, la seconde une affirmation fausse.
+--
+-- Le relevé SNMP de l'appareil a donné la raison :
+--
+--     RAM(main)        2 097 152 unités   0 utilisée
+--     RAM(sub)         1 048 576 unités   0 utilisée
+--     Flash Memory       483 210 unités   0 utilisée
+--     HDD             78 142 806 unités   0 utilisée
+--
+-- Un disque de 78 Go occupé à zéro octet n'existe pas. Cet agent DÉCLARE
+-- les compteurs sans jamais les remplir. Nous prenions son silence pour
+-- une mesure.
+--
+-- CE QUE FAIT CETTE MIGRATION
+--
+-- Elle remet à NULL les taux de mémoire enregistrés à zéro. Le code de
+-- lecture refuse désormais ces valeurs à la source (voir tauxMemoire dans
+-- discoveryService) ; cette migration traite l'historique déjà écrit,
+-- qui continuerait sinon à tracer des courbes plates.
+--
+-- POURQUOI LA MÉMOIRE SEULEMENT, ET PAS LE PROCESSEUR
+--
+-- Une charge processeur de 0 % est parfaitement plausible : un
+-- équipement au repos, mesuré entre deux tâches, l'atteint réellement.
+-- Effacer ces zéros-là détruirait de vraies mesures. La mémoire, non :
+-- un système qui tourne en occupe toujours.
+--
+-- CE QU'ON PERD
+--
+-- Rien de vérifiable. Aucun équipement n'a jamais eu 0 % de mémoire
+-- occupée ; ces lignes ne portaient aucune information.
+-- ---------------------------------------------------------------------
+
+UPDATE RELEVE
+   SET ram_pourcent = NULL
+ WHERE ram_pourcent = 0;

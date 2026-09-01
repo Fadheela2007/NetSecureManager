@@ -31,6 +31,8 @@ const {
 } = require("../services/nomPersonnaliseService");
 const { detecterConflits, decrireConflit } = require("../services/conflitIpService");
 const { creerAlerte } = require("../services/monitoringService");
+// Même règle que celle qui calcule le total : voir le détail par port.
+const { estIgnoree } = require("../services/traficService");
 
 /**
  * Vrai si l'erreur MySQL est « colonne inconnue » (ER_BAD_FIELD_ERROR, 1054).
@@ -57,8 +59,9 @@ function colonneManquante(err) {
  * table INTERFACE_RESEAU n'a pas encore reçu la colonne index_snmp, ne doit
  * pas faire échouer le scan.
  *
- * Limite connue : snmpTable() ouvre une session v1/v2c. Les équipements
- * configurés en SNMPv3 uniquement ne renverront pas d'interfaces.
+ * Limite connue : la lecture des interfaces ouvre une session v1/v2c. Les
+ * équipements configurés en SNMPv3 uniquement ne renverront pas
+ * d'interfaces, même si l'identification initiale, elle, a réussi en v3.
  */
 async function enregistrerInterfaces(idEquipement, ip, communaute) {
   try {
@@ -69,13 +72,18 @@ async function enregistrerInterfaces(idEquipement, ip, communaute) {
     for (const iface of interfaces) {
       await db.query(
         `INSERT INTO INTERFACE_RESEAU
-           (id_equipement, index_snmp, nom, adresse_mac, etat_admin, etat_operationnel)
-         VALUES (?, ?, ?, ?, ?, ?)
+           (id_equipement, index_snmp, nom, adresse_mac, etat_admin,
+            etat_operationnel, vitesse_mbps)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
            nom = VALUES(nom),
            adresse_mac = VALUES(adresse_mac),
            etat_admin = VALUES(etat_admin),
-           etat_operationnel = VALUES(etat_operationnel)`,
+           etat_operationnel = VALUES(etat_operationnel),
+           -- COALESCE et non affectation directe : un équipement qui
+           -- refuse ifSpeed le temps d'un scan ne doit pas EFFACER une
+           -- vitesse déjà connue. Même principe que pour le nom.
+           vitesse_mbps = COALESCE(VALUES(vitesse_mbps), vitesse_mbps)`,
         [
           idEquipement,
           iface.index,
@@ -83,6 +91,26 @@ async function enregistrerInterfaces(idEquipement, ip, communaute) {
           iface.adresseMac,
           iface.etatAdmin,
           iface.etatOperationnel,
+          // ─────────────────────────────────────────────────────────
+          // COLONNE OUBLIÉE À L'ÉCRITURE.
+          //
+          // `vitesse_mbps` était collectée en SNMP, déclarée au schéma et
+          // lue par la page Bande passante — mais jamais ÉCRITE. Elle
+          // valait donc NULL pour tout le parc, et la colonne « Lien »
+          // affichait « — » sur chaque interface.
+          //
+          // Ce n'est pas un détail d'affichage : sans la capacité du lien,
+          // le taux d'occupation est impossible à calculer. Or c'est LUI
+          // l'information exploitable — 50 000 kbit/s valent 5 % d'un lien
+          // gigabit et 500 % d'un lien 10 Mbit/s. Un débit brut ne dit pas
+          // si le lien sature.
+          //
+          // Le défaut était invisible : une case vide se lit « cet
+          // équipement n'expose pas sa vitesse », ce qui arrive vraiment.
+          // Seule la comparaison avec la sonde SNMP — qui annonçait
+          // 10 Mbit/s là où l'écran affichait « — » — l'a révélé.
+          // ─────────────────────────────────────────────────────────
+          iface.vitesseMbps ?? null,
         ]
       );
     }
@@ -808,7 +836,27 @@ router.get("/equipements/:id/bande-passante", async (req, res) => {
     [req.params.id]
   ).catch(() => [[]]);
 
-  res.json({ periode_heures: heures, historique, interfaces });
+  // ─────────────────────────────────────────────────────────────────
+  // POURQUOI LE SERVEUR DIT CE QUI EST EXCLU DU TOTAL
+  //
+  // La boucle locale voit passer le trafic interne de la machine : elle
+  // est mesurée, affichée, mais retirée du total — sinon la consommation
+  // d'un serveur serait doublée. Constaté sur une imprimante HP dont
+  // l'interface LOOPBACK porte cent fois le débit du lien réel.
+  //
+  // Sans cette marque, le tableau est honnête ligne à ligne et incohérent
+  // dans son ensemble : un client additionne la colonne, ne retombe pas
+  // sur le total de l'équipement, et conclut que l'outil compte mal.
+  //
+  // La règle vient de traficService, celui-là même qui calcule le total.
+  // La recopier dans le frontend garantirait qu'un jour les deux diffèrent.
+  // ─────────────────────────────────────────────────────────────────
+  const detaillees = interfaces.map((i) => ({
+    ...i,
+    ignoree_du_total: estIgnoree(i.nom),
+  }));
+
+  res.json({ periode_heures: heures, historique, interfaces: detaillees });
 });
 
 /** État du registre OUI, pour diagnostic. */
@@ -1205,7 +1253,11 @@ router.get("/equipements/:id/interfaces", async (req, res) => {
         [req.params.id]
       )
     );
-  res.json(rows);
+  // Même marquage que sur la page Bande passante : la boucle locale est
+  // mesurée mais retirée du total. Les deux écrans lisent la MÊME règle,
+  // celle de traficService — sans quoi ils finiraient par se contredire
+  // sur la même machine.
+  res.json(rows.map((r) => ({ ...r, ignoree_du_total: estIgnoree(r.nom) })));
 });
 
 /**

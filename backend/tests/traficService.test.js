@@ -155,11 +155,64 @@ test("les noms de boucle locale reconnus, et ceux qu'il ne faut pas confondre", 
   assert.strictEqual(estIgnoree("lo0"), true);
   assert.strictEqual(estIgnoree("Software Loopback Interface 1"), true);
   assert.strictEqual(estIgnoree("Null0"), true);
+  // Majuscules : une imprimante HP annonce « LOOPBACK ».
+  assert.strictEqual(estIgnoree("LOOPBACK"), true);
+  assert.strictEqual(estIgnoree("Loopback Pseudo-Interface 1"), true);
 
   // Faux positifs à éviter : ces interfaces sont de vrais liens.
   assert.strictEqual(estIgnoree("eth0"), false);
   assert.strictEqual(estIgnoree("Gi0/1"), false);
   assert.strictEqual(estIgnoree("wlan0"), false);
+});
+
+test("« Local Area Connection » est un VRAI lien et doit être compté", () => {
+  // ─────────────────────────────────────────────────────────────────
+  // CE TEST EXISTE PARCE QUE LE FILTRE L'A DÉJÀ EXCLU EN SILENCE.
+  //
+  // Le motif s'écrivait `/^(lo|lo0|loopback|…)/i`, sans ancrage de fin :
+  // le fragment `lo` suffisait à écarter tout nom commençant par ces deux
+  // lettres. La carte Ethernet standard de chaque poste Windows était donc
+  // retirée du calcul, et la machine affichait un trafic nul en
+  // fonctionnant normalement.
+  //
+  // Les tests d'origine n'utilisaient que des noms Unix et Cisco : ils
+  // confirmaient l'hypothèse au lieu de l'éprouver.
+  // ─────────────────────────────────────────────────────────────────
+  assert.strictEqual(estIgnoree("Local Area Connection"), false);
+  assert.strictEqual(estIgnoree("Local Area Connection 2"), false);
+  assert.strictEqual(estIgnoree("Local Area Connection* 11"), false);
+
+  // Même piège, autres conventions : ces noms commencent par « lo » ou
+  // « null » sans désigner une boucle locale.
+  assert.strictEqual(estIgnoree("lohan-switch-1"), false);
+  assert.strictEqual(estIgnoree("loopy-uplink"), false);
+  assert.strictEqual(estIgnoree("nullmodem0"), false);
+});
+
+test("une boucle locale exclue ne fait pas passer l'équipement pour muet", () => {
+  // Le cas de l'imprimante HP réelle : LOOPBACK porte des compteurs
+  // élevés, Ethernet porte le vrai trafic. Si LOOPBACK entrait dans le
+  // total, la consommation serait surestimée ; si Ethernet en sortait,
+  // elle serait nulle. Les deux erreurs sont graves et opposées.
+  const t0 = 1_700_000_000_000;
+  calculerDebitsEquipement("hp", [
+    { index: 1, nom: "LOOPBACK", inOctets: 60_971_884, outOctets: 60_971_884 },
+    { index: 2, nom: "Ethernet", inOctets: 233_949_264, outOctets: 12_000_000 },
+  ], t0);
+  const r = calculerDebitsEquipement("hp", [
+    // La boucle locale bouge cent fois plus vite que le lien réel.
+    { index: 1, nom: "LOOPBACK", inOctets: 60_971_884 + 100_000_000, outOctets: 60_971_884 },
+    { index: 2, nom: "Ethernet", inOctets: 233_949_264 + 1_048_576, outOctets: 12_000_000 },
+  ], t0 + 60_000);
+
+  const boucle = r.parInterface.find((i) => i.nom === "LOOPBACK");
+  const lien = r.parInterface.find((i) => i.nom === "Ethernet");
+  assert.strictEqual(boucle.ignoree_du_total, true, "LOOPBACK en majuscules doit être reconnu");
+  assert.strictEqual(lien.ignoree_du_total, false, "Ethernet est le vrai lien");
+  assert.strictEqual(r.total.interfaces_comptees, 1);
+  // 1 048 576 octets en 60 s ≈ 136,5 kbit/s. Si la boucle entrait dans le
+  // total, on lirait environ 13 500 kbit/s : cent fois trop.
+  assert.ok(Math.abs(r.total.entrant - 136.53) < 0.1, `obtenu ${r.total.entrant}`);
 });
 
 test("une interface sans index SNMP est ignorée sans faire échouer le calcul", () => {

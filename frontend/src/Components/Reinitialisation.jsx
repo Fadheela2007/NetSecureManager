@@ -33,17 +33,24 @@ export default function Reinitialisation() {
   const [resultat, setResultat] = useState(null);
   const [erreur, setErreur] = useState(null);
   const [ouvert, setOuvert] = useState(false);
+  // "" = tous les sites autorisés ; sinon l'identifiant d'un site précis.
+  const [siteVise, setSiteVise] = useState("");
 
-  const charger = () => {
+  const charger = (site = siteVise) => {
     axios
-      .get(`${API_URL}/reinitialisation/apercu`)
+      .get(`${API_URL}/reinitialisation/apercu`, {
+        params: site === "" ? {} : { id_site: site },
+      })
       .then(({ data }) => setApercu(data))
       .catch((e) => setErreur(e.response?.data?.error || "Aperçu indisponible"));
   };
 
   useEffect(() => {
     if (ouvert) charger();
-  }, [ouvert]);
+    // Les volumes affichés dépendent du site visé : changer de site sans
+    // recharger l'aperçu ferait valider des chiffres qui ne correspondent
+    // plus à ce qui sera effacé.
+  }, [ouvert, siteVise]);
 
   const CIBLES = [
     {
@@ -101,6 +108,10 @@ export default function Reinitialisation() {
       const { data } = await axios.post(`${API_URL}/reinitialisation`, {
         confirmation: phrase.trim(),
         cibles: [...choisies],
+        // Omis quand aucun site n'est visé : le serveur retombe alors sur
+        // la portée du compte. Envoyer null signifierait « tous », ce qui
+        // n'est pas la même chose pour un administrateur rattaché.
+        ...(siteVise === "" ? {} : { id_site: Number(siteVise) }),
       });
       setResultat(data);
       setChoisies(new Set());
@@ -197,6 +208,46 @@ export default function Reinitialisation() {
             ))}
           </ul>
         </div>
+      )}
+
+      {/* Choix du site — AVANT les cases, parce qu'il change les volumes
+          affichés en dessous. Le proposer après reviendrait à faire lire
+          des chiffres qui ne correspondent pas à ce qui sera effacé.
+
+          N'apparaît qu'à partir de deux sites : sur une installation
+          mono-site, ce menu n'aurait qu'une entrée et n'ajouterait qu'une
+          décision inutile à l'écran le plus dangereux de la plateforme. */}
+      {(apercu?.sites?.length || 0) > 1 && (
+        <label className="block rounded-lg bg-[var(--color-surface-2)] px-4 py-3">
+          <span className="block text-xs text-[var(--color-ink)] font-medium mb-1.5">
+            Sur quel site ?
+          </span>
+          <select
+            value={siteVise}
+            onChange={(e) => {
+              setSiteVise(e.target.value);
+              // Changer de cible remet les cases et la phrase à zéro : une
+              // confirmation déjà saisie ne doit jamais s'appliquer à un
+              // site qu'on vient de choisir.
+              setChoisies(new Set());
+              setPhrase("");
+              setResultat(null);
+            }}
+            className="w-full sm:w-80 bg-[var(--color-surface)] border border-[var(--color-line)] rounded-lg px-3 py-2 text-sm outline-none focus:border-[var(--color-crit)] transition"
+          >
+            <option value="">
+              Tous les sites ({apercu.sites.reduce((s, x) => s + x.equipements, 0)} équipements)
+            </option>
+            {apercu.sites.map((s) => (
+              <option key={s.id_site} value={s.id_site}>
+                {s.nom} — {s.ville} ({s.equipements} équipements)
+              </option>
+            ))}
+          </select>
+          <span className="block text-xs text-[var(--color-mute)] mt-1.5">
+            Les autres sites ne sont pas touchés.
+          </span>
+        </label>
       )}
 
       <div className="space-y-2">
