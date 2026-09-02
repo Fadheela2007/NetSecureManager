@@ -104,6 +104,51 @@ let versionPolitique = null;
  * dnsmasq est absent, si les droits manquent, si la plateforme ne répond
  * pas — on le signale et on continue de superviser.
  */
+/**
+ * Dernier motif annoncé, pour ne pas répéter le même message à chaque
+ * cycle. Voir `annoncer()`.
+ */
+let dernierMotif = null;
+
+/**
+ * Dit ce qui s'est passé — une fois par changement d'état.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * POURQUOI CETTE FONCTION EXISTE
+ *
+ * `appliquerPolitiqueWeb()` comportait TROIS sorties muettes : migration
+ * absente côté serveur, politique inactive, politique inchangée. Chacune
+ * est un comportement légitime, aucune ne disait rien.
+ *
+ * Résultat observé pendant un test : huit cycles affichant
+ *
+ *     [Agent site 1] Cycle 1 — politique web uniquement.
+ *     [Agent site 1] Cycle 2 — politique web uniquement.
+ *     ...
+ *
+ * et rien d'autre. Le script d'installation venait pourtant d'écrire
+ * « À surveiller : la ligne "Politique web vN appliquée" ». Cette ligne
+ * ne pouvait pas venir, et rien n'expliquait pourquoi. Impossible de
+ * distinguer « tout va bien, rien à refaire » de « le serveur n'a pas la
+ * migration » ou de « aucune politique n'est active ».
+ *
+ * Un agent qui tourne sans rien dire ressemble exactement à un agent qui
+ * fonctionne. C'est le défaut le plus coûteux qu'on puisse livrer à un
+ * client : il ne produit aucun symptôme jusqu'au jour où quelqu'un
+ * constate qu'un site interdit s'ouvre.
+ *
+ * ON NE RÉPÈTE PAS. Un agent tourne toutes les cinq minutes, parfois
+ * pendant des mois. Réafficher « politique inchangée » sans arrêt
+ * noierait les vraies informations dans le journal. On n'annonce donc
+ * qu'au premier passage et à chaque CHANGEMENT d'état.
+ * ─────────────────────────────────────────────────────────────────────
+ */
+function annoncer(motif, message, estErreur = false) {
+  if (dernierMotif === motif) return;
+  dernierMotif = motif;
+  (estErreur ? console.error : console.log)(`[Agent site ${ID_SITE}] ${message}`);
+}
+
 async function appliquerPolitiqueWeb() {
   try {
     const { data } = await axios.get(`${CENTRAL_API_URL}/agent/politique`, {
@@ -112,7 +157,16 @@ async function appliquerPolitiqueWeb() {
       timeout: 60000, // la liste peut être volumineuse au premier envoi
     });
 
-    if (data.non_installee) return; // migration non passée côté serveur
+    if (data.non_installee) {
+      annoncer(
+        "non_installee",
+        "Blocage web indisponible : la base du serveur central n'a pas reçu " +
+          "les tables de politique web. Lancez les migrations côté serveur. " +
+          "La supervision, elle, continue normalement.",
+        true
+      );
+      return;
+    }
 
     if (!data.active) {
       // Politique désactivée : on RETIRE le blocage. Le conserver
@@ -121,20 +175,52 @@ async function appliquerPolitiqueWeb() {
       if (versionPolitique !== null) {
         const r = await dnsGuard.retirer();
         versionPolitique = null;
-        console.log(
-          `[Agent site ${ID_SITE}] Politique web retirée${r.applique ? "" : ` (échec : ${r.erreur})`}`
+        annoncer(
+          "retiree",
+          `Politique web retirée${r.applique ? "" : ` (échec : ${r.erreur})`}`
+        );
+      } else {
+        // Cas qui ne disait rien : aucune politique n'a JAMAIS été
+        // appliquée, et il n'y en a pas d'active à appliquer. Rien ne
+        // bloque, et c'est normal — mais il faut le dire, sinon on
+        // attend indéfiniment une ligne qui ne viendra pas.
+        annoncer(
+          "inactive",
+          "Aucune politique de blocage active pour ce site — rien n'est " +
+            "bloqué. Activez-la depuis la page Contrôle d'accès web."
         );
       }
       return;
     }
 
-    if (data.inchangee) return;
+    if (data.inchangee) {
+      annoncer(
+        `inchangee-v${data.version}`,
+        `Politique web v${data.version} déjà en place — rien à refaire.`
+      );
+      return;
+    }
 
     const resultat = await dnsGuard.appliquer(data.dnsmasq);
 
     // On remonte le résultat RÉEL, succès comme échec. C'est ce qui
     // permet à l'interface de dire « politique reçue mais non appliquée :
     // dnsmasq absent » au lieu d'afficher un blocage imaginaire.
+    // ─────────────────────────────────────────────────────────────
+    // CE COMPTE RENDU NE DOIT PAS ÉCHOUER EN SILENCE.
+    //
+    // Il portait un `.catch(() => {})` : si l'envoi échouait, l'agent
+    // continuait sans un mot. Or c'est CE message qui alimente le
+    // bandeau « l'agent applique la version N » de l'interface. Sans
+    // lui, l'écran affiche un tiret pour toujours — et le tiret veut
+    // dire « je ne sais pas », ce qui est vrai mais inexploitable :
+    // impossible de distinguer un agent qui n'a rien appliqué d'un
+    // agent qui a réussi mais dont le compte rendu s'est perdu.
+    //
+    // Le blocage, lui, EST posé. On ne fait donc pas échouer le cycle :
+    // on le dit, et on continue. C'est la même règle que partout
+    // ailleurs dans cet agent — signaler sans interrompre.
+    // ─────────────────────────────────────────────────────────────
     await axios
       .post(
         `${CENTRAL_API_URL}/agent/politique/etat`,
@@ -145,20 +231,68 @@ async function appliquerPolitiqueWeb() {
         },
         { headers: { Authorization: `Bearer ${AGENT_TOKEN}` } }
       )
-      .catch(() => {});
+      .then((r) => {
+        // Le serveur peut répondre 200 en disant qu'il n'a rien
+        // enregistré — migration absente, par exemple. Un code 200 ne
+        // suffit donc pas à conclure que c'est passé.
+        if (r.data && r.data.enregistre === false) {
+          annoncer(
+            "etat-non-enregistre",
+            "Blocage posé, mais le serveur central n'a pas enregistré le " +
+              "compte rendu" +
+              (r.data.non_installee ? " (tables de politique web absentes)." : ".") +
+              " L'interface affichera « — » à la place de la version appliquée.",
+            true
+          );
+        }
+      })
+      .catch((e) => {
+        annoncer(
+          `etat-echec-${e.message}`,
+          `Blocage posé, mais le compte rendu au serveur a échoué : ${e.message}. ` +
+            "L'interface affichera « — » à la place de la version appliquée.",
+          true
+        );
+      });
 
     if (resultat.applique) {
       versionPolitique = data.version;
-      console.log(
-        `[Agent site ${ID_SITE}] Politique web v${data.version} appliquée — ` +
-          `${data.stats?.total_bloques ?? "?"} domaine(s) bloqué(s).`
-      );
+      // ─────────────────────────────────────────────────────────────
+      // DEUX NOMBRES, PAS UN SEUL.
+      //
+      // `total_bloques` compte les RÈGLES écrites dans le résolveur, pas
+      // les domaines bloqués. Le compilateur retire les sous-domaines
+      // déjà couverts par leur parent : bloquer « exemple.com » bloque
+      // aussi « pub.exemple.com ». La réduction est importante — 78 985
+      // domaines tenaient en 43 701 règles lors d'un test réel.
+      //
+      // L'ancien message annonçait « 43 701 domaine(s) bloqué(s) » après
+      // qu'on venait d'en importer 78 985. Le chiffre était exact, sa
+      // formulation trompeuse : elle se lit « 35 000 domaines ont été
+      // perdus ». Un client qui compare les deux écrans conclut à une
+      // panne, et rien dans le produit ne le détrompe.
+      // ─────────────────────────────────────────────────────────────
+      const regles = data.stats?.total_bloques;
+      const couverts = data.stats?.domaines_categories;
+      const compactes = data.stats?.compactes;
+      let detail;
+      if (couverts && regles && couverts > regles) {
+        detail =
+          `${couverts.toLocaleString("fr-FR")} domaine(s) couvert(s) par ` +
+          `${regles.toLocaleString("fr-FR")} règle(s)` +
+          (compactes
+            ? ` — ${compactes.toLocaleString("fr-FR")} sous-domaine(s) déjà couvert(s) par leur domaine parent.`
+            : ".");
+      } else {
+        detail = `${regles ?? "?"} règle(s) de blocage.`;
+      }
+      annoncer(`appliquee-v${data.version}`, `Politique web v${data.version} appliquée — ${detail}`);
     } else {
       versionPolitique = null;
-      console.error(`[Agent site ${ID_SITE}] Politique web NON appliquée : ${resultat.erreur}`);
+      annoncer(`echec-${resultat.erreur}`, `Politique web NON appliquée : ${resultat.erreur}`, true);
     }
   } catch (err) {
-    console.error(`[Agent site ${ID_SITE}] Politique web indisponible :`, err.message);
+    annoncer(`injoignable-${err.message}`, `Politique web indisponible : ${err.message}`, true);
   }
 }
 

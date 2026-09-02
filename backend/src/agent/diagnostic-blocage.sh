@@ -56,10 +56,22 @@ fi
 # ─────────────────────────────────────────────────────────────────────
 titre "2. Les fichiers de configuration"
 
+# CE QU'ON COMPTE ICI, ET POURQUOI CE N'EST PAS LE NOMBRE DE DOMAINES.
+#
+# Chaque domaine bloqué produit DEUX lignes « address= » : une qui répond
+# à la question IPv4, une qui répond à la question IPv6. Un blocage qui
+# n'en poserait qu'une se contournerait tout seul, les navigateurs
+# préférant l'IPv6 quand elle existe.
+#
+# Le script annonçait donc « 87402 blocage(s) » là où l'agent venait de
+# dire « 43701 règles » : le double, exactement. Deux écrans, deux
+# chiffres, aucun moyen de savoir lequel croire. On affiche maintenant
+# les deux nombres et ce qui les relie.
 for f in "$CONF_WSL" "$CONF"; do
   if [[ -f "$f" ]]; then
     N=$(grep -c '^address=' "$f" 2>/dev/null || echo 0)
-    printf "  %-45s %s blocage(s)\n" "$(basename "$f")" "$N"
+    N4=$(grep -c '^address=/.*/[0-9]' "$f" 2>/dev/null || echo 0)
+    printf "  %-45s %s ligne(s) · %s domaine(s)\n" "$(basename "$f")" "$N" "$N4"
   else
     jaune "  $(basename "$f") — ABSENT"
   fi

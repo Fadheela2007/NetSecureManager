@@ -378,9 +378,32 @@ app.get("/api/agent/politique", async (req, res) => {
     // la plateforme entière ne répond plus. Dix sites suffisaient à la
     // rendre poussive en permanence.
     const politique = await chargerPolitiqueSite(site.id_site);
-    const versionAgent = Number(req.query.version);
 
-    if (politique && politique.active && Number.isFinite(versionAgent) && versionAgent === politique.version) {
+    // ─────────────────────────────────────────────────────────────────
+    // UN AGENT QUI N'A RIEN APPLIQUÉ ENVOIE UNE VERSION VIDE.
+    //
+    // `Number("")` vaut 0, et `Number.isFinite(0)` vaut true. Le test
+    // précédent acceptait donc cette chaîne vide comme un numéro de
+    // version valable. Si une politique portait le numéro 0, tout agent
+    // fraîchement démarré se serait entendu répondre « inchangée » et
+    // n'aurait JAMAIS rien installé — en silence, puisque ce cas ne
+    // produit aucun message.
+    //
+    // Les numéros commencent aujourd'hui à 1, donc le cas ne s'est pas
+    // encore produit. On ne compte pas là-dessus : la chaîne vide veut
+    // dire « je n'ai rien », ce qui n'est pas un numéro.
+    // ─────────────────────────────────────────────────────────────────
+    const brut = req.query.version;
+    const versionAgent =
+      typeof brut === "string" && brut.trim() !== "" ? Number(brut) : null;
+
+    if (
+      politique &&
+      politique.active &&
+      versionAgent !== null &&
+      Number.isFinite(versionAgent) &&
+      versionAgent === politique.version
+    ) {
       return res.json({ active: true, version: politique.version, inchangee: true });
     }
 
