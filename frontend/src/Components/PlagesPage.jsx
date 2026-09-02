@@ -277,6 +277,17 @@ export default function PlagesPage({ idSite }) {
                       <span className="text-[var(--color-mute)]">
                         v3 — {p.snmp_v3_username || "utilisateur non défini"}
                       </span>
+                    ) : p.snmp_community_masquee ? (
+                      // Masquée pour les rôles lecteur et opérateur : la
+                      // communauté SNMP est un mot de passe de lecture sur
+                      // tout le parc. Le dire, plutôt que d'afficher des
+                      // points sans explication — sinon on croit à un bug.
+                      <span
+                        className="text-[var(--color-mute)]"
+                        title="La communauté SNMP donne accès en lecture à tout le parc. Elle n'est visible que par un administrateur."
+                      >
+                        {p.snmp_community} <span className="text-xs">(réservée aux administrateurs)</span>
+                      </span>
                     ) : (
                       p.snmp_community || "public"
                     )}

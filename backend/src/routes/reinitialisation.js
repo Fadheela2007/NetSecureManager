@@ -353,6 +353,50 @@ router.post("/reinitialisation", requireRole("admin"), async (req, res) => {
     connexion.release();
   }
 
+  /* ─────────────────────────────────────────────────────────────────
+     LA TRACE DOIT SURVIVRE À L'OPÉRATION QUI L'A ÉCRITE.
+
+     La ligne de journal est écrite AVANT d'agir, pour qu'elle existe
+     même si la suppression échoue à mi-parcours. Le commentaire d'origine
+     en concluait : « si elle réussit, la ligne survit puisque le journal
+     est effacé en dernier, ou pas du tout ».
+
+     C'était faux. Quand « journal » figure parmi les cibles, le DELETE
+     final emporte AUSSI la ligne qu'on venait d'écrire. La fonction la
+     plus destructrice du produit effaçait donc sa propre trace.
+
+     CE QUE ÇA A COÛTÉ, ICI, PENDANT LES TESTS. Un parc est passé de 92 à
+     35 équipements du jour au lendemain. Le journal ne montrait AUCUNE
+     réinitialisation. Il a fallu une demi-heure et trois hypothèses —
+     dont « le produit supprime des machines tout seul » — pour
+     comprendre qu'une réinitialisation avait bien eu lieu et avait effacé
+     son propre enregistrement.
+
+     Chez un client, la même situation est ingérable : un administrateur
+     nie avoir touché à quoi que ce soit, et rien ne permet de trancher.
+
+     On réécrit donc la trace APRÈS coup lorsque le journal a été vidé.
+     ───────────────────────────────────────────────────────────────── */
+  if (aTraiter.some((c) => c.cle === "journal")) {
+    await db
+      .query(
+        `INSERT INTO LOG_ACTIVITE (id_utilisateur, action, description, adresse_ip_utilisateur)
+         VALUES (?, 'reinitialisation', ?, ?)`,
+        [
+          req.user?.id ?? null,
+          `Réinitialisation effectuée (${demandees.join(", ")}) — portée : ${
+            site === null ? "toute la plateforme" : "site " + site
+          }. Le journal d'activité a été vidé : cette ligne est la première ` +
+            `du nouveau journal, réécrite après l'opération pour qu'elle en garde la trace. ` +
+            `Supprimé : ${Object.entries(bilan)
+              .map(([k, v]) => `${k}=${v}`)
+              .join(", ")}`,
+          req.ip,
+        ]
+      )
+      .catch((e) => console.error("Réécriture de la trace impossible:", e.message));
+  }
+
   res.json({
     supprime: bilan,
     // Rappel destiné à l'écran : sans nouveau scan, la plateforme est

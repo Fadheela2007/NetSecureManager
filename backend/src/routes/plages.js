@@ -12,6 +12,13 @@ const { requireRole } = require("../middleware/requireRole");
 const { clauseSite, siteAutorise } = require("../middleware/porteeSite");
 
 
+/**
+ * Masque de la communauté SNMP renvoyé aux comptes non administrateurs.
+ * Même convention que /api/configuration, pour que l'interface affiche
+ * partout la même chose quand une valeur est cachée.
+ */
+const MASQUE = "••••••••";
+
 router.get("/plages", async (req, res) => {
   const { id_site } = req.query;
   const portee = clauseSite(req, "id_site");
@@ -25,7 +32,32 @@ router.get("/plages", async (req, res) => {
      ORDER BY id_site, cidr`,
     [id_site || null, id_site || null, ...portee.params]
   );
-  res.json(rows);
+
+  /* ─────────────────────────────────────────────────────────────────
+     LA COMMUNAUTÉ SNMP EST UN MOT DE PASSE.
+
+     Elle donne accès en LECTURE à tout le parc : inventaire, interfaces,
+     table de commutation d'un switch — directement depuis n'importe
+     quelle machine, sans passer par la plateforme.
+
+     Cette route est ouverte à tout compte authentifié, y compris au rôle
+     « lecteur ». Un lecteur repartait donc avec la clé de tout le réseau
+     du client.
+
+     C'EST LA MÊME FAUTE QUE CELLE DÉJÀ CORRIGÉE SUR agent_token, sur une
+     autre route. Elle a survécu parce que la correction avait visé un
+     CHAMP et non une CATÉGORIE : « ce qui est un secret ne sort pas ».
+     D'où le choix de masquer plutôt que de retirer — un administrateur
+     doit pouvoir vérifier ce qui est configuré, mais lui seul.
+     ───────────────────────────────────────────────────────────────── */
+  const estAdmin = req.user?.role === "admin";
+  const plages = rows.map((p) =>
+    estAdmin || !p.snmp_community
+      ? p
+      : { ...p, snmp_community: MASQUE, snmp_community_masquee: true }
+  );
+
+  res.json(plages);
 });
 
 router.post("/plages", requireRole("admin", "operateur"), async (req, res) => {

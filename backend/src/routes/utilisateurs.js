@@ -167,8 +167,17 @@ router.post("/utilisateurs", requireRole("admin"), async (req, res) => {
   try {
     const hash = await bcrypt.hash(String(mot_de_passe), COUT_BCRYPT);
     const [result] = await db.query(
+      // CINQ COLONNES, CINQ MARQUEURS. Il y en avait SIX, pour cinq
+      // valeurs : MySQL rejetait la requête avec une erreur de syntaxe,
+      // et la création d'utilisateur était donc impossible — sur toutes
+      // les installations, depuis toujours.
+      //
+      // Ce défaut a survécu parce que la plateforme s'utilise avec le
+      // compte administrateur créé par tools/creer-admin.js, qui écrit
+      // directement en base. Personne n'avait eu besoin de créer un
+      // SECOND compte avant le test de cloisonnement par site.
       `INSERT INTO UTILISATEUR (nom, email, mot_de_passe_hash, role, id_site)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?)`,
       [
         String(nom).trim(),
         String(email).trim(),

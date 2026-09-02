@@ -58,7 +58,21 @@ const app = express();
    interface qui ne charge pas est de désactiver la protection, pas de
    la configurer.
    --------------------------------------------------------------------- */
-const ORIGINES_DEV = ["http://localhost:5173", "http://127.0.0.1:5173"];
+// 5173 : serveur de développement de Vite. 4173 : « npm run preview »,
+// qui sert la version COMPILÉE en local. Le second est indispensable — le
+// contrôle « aucun secret ne sort » (T15 du protocole) n'a de sens que sur
+// une version compilée : en développement, Vite sert le code source en
+// clair, et une recherche dans les réponses y trouve des correspondances
+// qui ne sont pas des fuites.
+//
+// Ces deux adresses ne servent QUE si FRONTEND_URL n'est pas renseigné,
+// c'est-à-dire hors mise en service.
+const ORIGINES_DEV = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://localhost:4173",
+  "http://127.0.0.1:4173",
+];
 
 const originesAutorisees = (process.env.FRONTEND_URL || "")
   .split(",")
@@ -84,7 +98,25 @@ app.use(
       if (originesAutorisees.includes(origine.replace(/\/$/, ""))) {
         return rappel(null, true);
       }
-      return rappel(new Error(`Origine non autorisée : ${origine}`));
+      // ─────────────────────────────────────────────────────────────
+      // UN REFUS D'ORIGINE N'EST PAS UNE PANNE.
+      //
+      // Sans statut, cette erreur ressortait en 500 « Erreur serveur »
+      // accompagnée d'une trace d'exécution complète dans le journal.
+      // Or une origine inconnue est un événement ORDINAIRE : un robot,
+      // un client mal configuré, un test depuis un autre port.
+      //
+      // Deux dégâts. Le journal d'un serveur exposé se remplit de traces
+      // qui noient les vraies erreurs. Et « Erreur serveur » envoie
+      // chercher un défaut du produit là où il s'agit d'une ligne de
+      // configuration — FRONTEND_URL — qui n'a pas été renseignée.
+      // ─────────────────────────────────────────────────────────────
+      const refus = new Error(`Origine non autorisée : ${origine}`);
+      refus.status = 403;
+      refus.aide =
+        "Ajoutez cette adresse à FRONTEND_URL dans backend/.env " +
+        "(plusieurs adresses se séparent par des virgules), puis redémarrez le serveur.";
+      return rappel(refus);
     },
     credentials: true,
   })
@@ -718,14 +750,32 @@ app.use("/api", (req, res) => {
 // d'erreur au lieu d'un JSON exploitable par le frontend.
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
-  console.error("Erreur non gérée:", err);
+  // Les erreurs client (corps JSON malformé, origine refusée…) portent déjà
+  // leur propre statut : ne pas les transformer en 500.
+  const statut = err.status || err.statusCode || 500;
+
+  // UNE LIGNE POUR CE QUI EST ATTENDU, LA TRACE POUR CE QUI NE L'EST PAS.
+  //
+  // Imprimer une trace d'exécution complète à chaque requête mal formée
+  // rend le journal illisible le jour où une VRAIE erreur s'y produit.
+  // Une origine refusée ou un JSON invalide sont des événements normaux
+  // sur un serveur exposé : ils méritent une ligne, pas une page.
+  if (statut < 500) {
+    console.warn(`Requête refusée (${statut}) : ${err.message}`);
+  } else {
+    console.error("Erreur non gérée:", err);
+  }
+
   if (res.headersSent) return;
 
-  // Les erreurs client (corps JSON malformé signalé par express.json(), etc.)
-  // portent déjà leur propre statut : ne pas les transformer en 500.
-  const statut = err.status || err.statusCode || 500;
   if (statut < 500) {
-    return res.status(statut).json({ error: "Requête invalide", details: err.message });
+    return res.status(statut).json({
+      error: statut === 403 ? "Origine non autorisée" : "Requête invalide",
+      details: err.message,
+      // `aide` dit QUOI FAIRE. Sans elle, « origine non autorisée » laisse
+      // l'exploitant deviner quel réglage corriger, et où.
+      ...(err.aide ? { aide: err.aide } : {}),
+    });
   }
   res.status(500).json({ error: "Erreur serveur", details: err.message });
 });

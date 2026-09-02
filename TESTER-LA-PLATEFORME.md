@@ -287,24 +287,49 @@ Ils comptent autant que les autres : un acheteur sérieux les fera.
 
 ### T15. Aucun secret ne sort
 
-Outils de développement (**F12**) → onglet **Réseau**, puis naviguez.
+```powershell
+node tools\verifier-secrets.js votre-email
+```
 
-| À chercher | Attendu |
-|---|---|
-| `mot_de_passe_hash` | **jamais présent** |
-| `agent_token` dans `/api/sites` | **jamais présent** |
-| `snmp_v3_auth_key` | **jamais présent** |
-| valeurs de `/api/configuration` | masquées si la clé contient `pass`, `secret`, `token` |
+Le mot de passe est demandé ensuite, sans s'afficher.
 
-Un seul de ces champs visible est un défaut à corriger avant toute
-démonstration.
+**Attendu :** dix-sept routes examinées, aucun secret, et l'exception
+documentée (`/sites/:id/agent` sert le jeton, réservé aux
+administrateurs).
+
+**Ce que l'outil garantit et que l'œil ne garantit pas :** une route qui
+répond en erreur est comptée comme **non examinée**, jamais comme
+réussie.
+
+**Pourquoi ce n'est plus un contrôle manuel.** La version précédente
+demandait de fouiller l'onglet Réseau des outils du navigateur. Trois
+pièges, tous rencontrés :
+
+- si la liste des requêtes est vide — panneau ouvert trop tard, page non
+  rechargée — la recherche répond « rien trouvé ». C'est vrai, et ça ne
+  prouve rien ;
+- en développement, Vite sert le code source en clair : la recherche y
+  trouve des correspondances qui ne sont pas des fuites ;
+- le résultat dépend des pages auxquelles on a pensé.
 
 ### T16. Le cloisonnement par site tient
 
-Créez un utilisateur rattaché à un seul site, connectez-vous avec.
+Créez un utilisateur rattaché à un seul site, puis :
 
-**Attendu :** il ne voit que les équipements, alertes et incidents de son
-site. Le sélecteur de site en haut n'affiche que le sien.
+```powershell
+node tools\verifier-cloisonnement.js son-email
+```
+
+**Attendu :** « Le cloisonnement tient. »
+
+L'outil compare ce que contient la base à ce que reçoit ce compte, et
+vérifie cinq points — dont **le plus important, qu'un test à l'œil ne
+voit jamais** : l'accès DIRECT par identifiant à un équipement d'un autre
+site doit être refusé (404). Filtrer les listes ne suffit pas ; si
+`/equipements/47/interfaces` répond, il suffit de deviner un numéro.
+
+Faites ensuite le tour dans l'interface pour l'impression générale, mais
+c'est l'outil qui tranche.
 
 ### T17. Le dernier administrateur est protégé
 
@@ -316,13 +341,22 @@ verrouiller hors de sa propre plateforme.
 
 ### T18. La création de compte est fermée
 
-Déconnectez-vous, puis dans PowerShell :
-
 ```powershell
-curl.exe -X POST http://localhost:5000/api/auth/register -H "Content-Type: application/json" -d "{\"email\":\"pirate@test.fr\",\"mot_de_passe\":\"motdepasse123\",\"role\":\"admin\"}"
+node tools\verifier-protections.js
 ```
 
-**Attendu :** un refus (403).
+**Attendu :** « Tous les refus attendus sont en place » — dix contrôles :
+création de compte, lecture sans jeton, jeton inventé, injection
+d'équipements par un faux agent, réinitialisation sans authentification.
+
+**Pourquoi plus de commande curl.** PowerShell réinterprète les
+guillemets échappés : le serveur recevait du JSON tronqué et répondait
+« Requête invalide ». Un refus, mais pas celui qu'on voulait vérifier —
+et le test paraissait concluant sans avoir rien testé.
+
+L'outil n'accepte que **401 ou 403**. Un 400 pour corps malformé n'est
+pas une preuve : un refus ne vaut que si l'on sait pourquoi il a été
+prononcé.
 
 Cette route servait à créer le tout premier compte, mais restait ouverte
 ensuite : n'importe qui sur le réseau pouvait se fabriquer un compte
@@ -330,6 +364,13 @@ administrateur. Elle n'accepte plus que si la table des utilisateurs est
 **entièrement vide**, et le rôle n'est plus lu depuis la requête.
 
 ### T18b. Les tentatives de connexion sont freinées
+
+> **Reporté après la mise en ligne.** Ce test exige un SECOND appareil
+> capable d'atteindre la plateforme, ce que le poste de développement ne
+> permet pas simplement : un téléphone en 4G n'atteint pas `localhost`,
+> et le mettre sur le même Wi-Fi demande de modifier `FRONTEND_URL` puis
+> de le remettre en état. Une fois la plateforme hébergée, le test tient
+> en deux minutes depuis n'importe où.
 
 Sur l'écran de connexion, saisissez **onze fois** un mauvais mot de passe
 pour un compte existant.
