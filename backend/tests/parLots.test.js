@@ -60,6 +60,32 @@ test("la limite tient même si les durées sont très inégales", async () => {
   assert.ok(etat.max <= 5, `pointe observée : ${etat.max}, ne doit pas dépasser 5`);
 });
 
+test("une machine lente n'immobilise pas les autres places", async () => {
+  // C'EST LE TEST QUI JUSTIFIE LA FILE D'ATTENTE.
+  //
+  // 10 éléments, 5 en parallèle. Quatre sont lents (100 ms), six sont
+  // rapides (1 ms).
+  //
+  //   • en lots figés : le premier lot contient des lents, il coûte
+  //     100 ms ; le second aussi. Total ≈ 200 ms.
+  //   • en file d'attente : les places libérées par les rapides sont
+  //     reprises aussitôt. Total ≈ 100 ms, le temps du plus lent.
+  //
+  // Le seuil est placé à 160 ms : largement au-dessus du comportement
+  // attendu, largement en dessous de l'ancien. Il ne peut donc ni échouer
+  // sur une machine chargée, ni réussir si l'on revenait aux lots.
+  const lents = new Set([0, 1, 2, 3]);
+  const debut = Date.now();
+
+  await parLots([...Array(10).keys()], 5, async (i) => {
+    await attendre(lents.has(i) ? 100 : 1);
+    return i;
+  });
+
+  const duree = Date.now() - debut;
+  assert.ok(duree < 160, `durée ${duree} ms : les places libérées ne sont pas reprises`);
+});
+
 test("l'ordre des résultats suit l'ordre d'entrée, pas l'ordre d'achèvement", async () => {
   // Sans cette garantie, la liste des équipements changerait d'ordre à
   // chaque scan du même réseau, selon qui a répondu le plus vite.
@@ -125,17 +151,30 @@ test("une taille supérieure au nombre d'éléments ne pose pas de problème", a
 });
 
 // ─────────────────────────────────────────────────────────────────────
-test("l'avancement est notifié après chaque lot, sans jamais dépasser le total", async () => {
+test("l'avancement est notifié à chaque machine terminée, sans dépasser le total", async () => {
+  // CONTRAT MODIFIÉ VOLONTAIREMENT, ET NON TEST AJUSTÉ POUR PASSER.
+  //
+  // Tant que parLots découpait en lots figés, l'avancement ne pouvait
+  // être connu qu'à la fin d'un lot : il sautait de 5 en 5. Avec une file
+  // d'attente, il n'y a plus de lot — chaque machine se termine pour son
+  // propre compte, et l'avancement se compte une par une.
+  //
+  // C'est meilleur pour l'usage réel : sur une plage large, la barre de
+  // progression avançait par à-coups en restant figée le temps de la
+  // machine la plus lente du lot. Elle avance maintenant régulièrement.
   const etapes = [];
   await parLots([...Array(13).keys()], 5, async (i) => i, (traites, total) =>
     etapes.push([traites, total])
   );
 
-  assert.deepStrictEqual(etapes, [
-    [5, 13],
-    [10, 13],
-    [13, 13],
-  ]);
+  assert.strictEqual(etapes.length, 13, "une notification par machine");
+  assert.deepStrictEqual(etapes[0], [1, 13]);
+  assert.deepStrictEqual(etapes[12], [13, 13]);
+
+  // Le compteur ne recule jamais et ne dépasse jamais le total : c'est ce
+  // qui compte pour l'affichage, quel que soit l'ordre d'achèvement.
+  const compteurs = etapes.map(([traites]) => traites);
+  assert.deepStrictEqual(compteurs, [...Array(13).keys()].map((i) => i + 1));
 });
 
 test("l'avancement est facultatif", async () => {

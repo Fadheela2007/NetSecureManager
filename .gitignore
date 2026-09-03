@@ -64,6 +64,22 @@ diagnostic-*.txt
 sortie-*.txt
 
 # ---------------------------------------------------------------------
+# Outils de diagnostic — instruments de travail, pas livrables.
+#
+# Ces scripts servent à enquêter sur une installation : mesurer les
+# phases d'un scan, sonder un équipement en SNMP, vérifier qu'aucun
+# secret ne sort d'une route. Ils s'exécutent contre un réseau réel et
+# affichent ses adresses.
+#
+# Ils ne font pas partie du produit livré et n'ont rien à faire dans un
+# dépôt public. Ils restent sur le poste de développement.
+#
+# Déjà versionnés ? Les retirer du suivi sans les effacer du disque :
+#     git rm -r --cached backend/tools
+# ---------------------------------------------------------------------
+backend/tools/
+
+# ---------------------------------------------------------------------
 # Documents de travail — à garder sur le poste, hors du dépôt.
 #
 # Ces fichiers racontent un processus de débogage, pas le produit. Ils

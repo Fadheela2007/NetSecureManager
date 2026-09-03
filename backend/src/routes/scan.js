@@ -322,15 +322,18 @@ async function resoudreParametresScan(idSite, cidr, communauteFormulaire) {
   };
 }
 
-router.post("/scan", requireRole("admin", "operateur"), async (req, res) => {
-  const { id_site, cidr, snmp_community } = req.body;
-  if (!id_site || !cidr) {
-    return res.status(400).json({ error: "id_site et cidr sont requis" });
-  }
-  if (!siteAutorise(req, id_site)) {
-    return res.status(403).json({ error: "Vous n'êtes pas autorisé à scanner ce site" });
-  }
-
+/**
+ * Scanne UNE plage et enregistre ce qu'elle contient.
+ *
+ * Extrait de la route pour être appelé aussi par le scan de site complet,
+ * qui parcourt toutes les plages déclarées. Le corps est inchangé : seule
+ * l'enveloppe a bougé.
+ *
+ * Lève en cas d'échec, en attachant le CIDR à l'erreur. Sur un scan de
+ * site, savoir QUELLE plage a échoué est le seul moyen de distinguer
+ * « ce réseau ne contient rien » de « ce réseau n'a pas été examiné ».
+ */
+async function scannerUnePlage(req, id_site, cidr, snmp_community) {
   try {
     const { options, plage } = await resoudreParametresScan(id_site, cidr, snmp_community);
 
@@ -419,26 +422,78 @@ router.post("/scan", requireRole("admin", "operateur"), async (req, res) => {
           );
         }
 
-        // Inventaire des interfaces : seulement ici, pas dans le cron.
-        await enregistrerInterfaces(idEquipement, eq.adresse_ip, options.snmpCommunity || "public");
+        // ── INVENTAIRE DES INTERFACES ──
+        //
+        // Seulement ici, pas dans le cycle de supervision. Et SEULEMENT si
+        // l'identification a déjà obtenu une réponse SNMP de cette machine.
+        //
+        // POURQUOI CE GARDE-FOU EXISTE — c'était le vrai coût du scan.
+        //
+        // Cet appel lit onze colonnes SNMP. Chacune attend 4 s, avec une
+        // reprise : une machine muette coûte donc jusqu'à 8 s. Il était
+        // fait pour CHAQUE équipement, y compris ceux dont la phase
+        // d'identification venait d'établir qu'ils ne parlent pas SNMP —
+        // l'immense majorité d'un parc bureautique. Et cette boucle est
+        // séquentielle : les attentes s'additionnent au lieu de se
+        // recouvrir. Sur 30 machines muettes, cela faisait quatre minutes
+        // passées à reposer une question dont on avait déjà la réponse.
+        //
+        // On ne perd aucune information : si `snmpProbe` n'a rien obtenu
+        // pendant l'identification, la même communauté sur les mêmes OID
+        // n'obtiendra rien de plus trente secondes plus tard.
+        const aReponduEnSnmp =
+          Boolean(eq.sys_descr) ||
+          eq.fabricant_source === "snmp" ||
+          eq.type_source === "snmp" ||
+          eq.nom_source === "snmp";
+
+        if (aReponduEnSnmp) {
+          await enregistrerInterfaces(
+            idEquipement,
+            eq.adresse_ip,
+            options.snmpCommunity || "public"
+          );
+        }
       } catch (errEq) {
         console.error(`Erreur d'enregistrement pour ${eq.adresse_ip}:`, errEq.message);
       }
     }
 
-    // ── CONFLITS D'ADRESSES ──
-    //
-    // Cherché sur l'ensemble du SITE, et non sur les seuls équipements
-    // de ce scan : un conflit peut opposer une machine découverte
-    // aujourd'hui à une autre découverte la semaine dernière, et scanner
-    // une demi-plage ne doit pas faire disparaître le signal.
-    //
-    // N'interrompt jamais le scan : c'est une information
-    // supplémentaire, pas une étape.
-    const conflits = await signalerConflitsIp(id_site).catch((e) => {
-      console.error("Détection des conflits d'adresses ignorée:", e.message);
-      return [];
-    });
+    return { cidr, equipements };
+  } catch (err) {
+    err.cidr = cidr;
+    throw err;
+  }
+}
+
+/**
+ * Conflits d'adresses, cherchés sur l'ensemble du SITE et non sur les
+ * seuls équipements du scan : un conflit peut opposer une machine
+ * découverte aujourd'hui à une autre découverte la semaine dernière, et
+ * scanner une demi-plage ne doit pas faire disparaître le signal.
+ *
+ * N'interrompt jamais un scan : c'est une information supplémentaire, pas
+ * une étape.
+ */
+async function conflitsDuSite(id_site) {
+  return signalerConflitsIp(id_site).catch((e) => {
+    console.error("Détection des conflits d'adresses ignorée:", e.message);
+    return [];
+  });
+}
+
+router.post("/scan", requireRole("admin", "operateur"), async (req, res) => {
+  const { id_site, cidr, snmp_community } = req.body;
+  if (!id_site || !cidr) {
+    return res.status(400).json({ error: "id_site et cidr sont requis" });
+  }
+  if (!siteAutorise(req, id_site)) {
+    return res.status(403).json({ error: "Vous n'êtes pas autorisé à scanner ce site" });
+  }
+
+  try {
+    const { equipements } = await scannerUnePlage(req, id_site, cidr, snmp_community);
+    const conflits = await conflitsDuSite(id_site);
 
     res.json({
       message: "Scan terminé",
@@ -449,6 +504,115 @@ router.post("/scan", requireRole("admin", "operateur"), async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Erreur pendant le scan", details: err.message });
+  }
+});
+
+/**
+ * POST /api/scan/site
+ * Scanne TOUTES les plages déclarées et actives d'un site.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * POURQUOI CETTE ROUTE EXISTE
+ *
+ * Le but du produit est de superviser le parc d'une entreprise. Or une
+ * entreprise sépare ses réseaux : bureautique, imprimantes, serveurs,
+ * wifi. Chacun est un sous-réseau distinct, et `POST /scan` n'en prenait
+ * qu'un seul à la fois.
+ *
+ * Conséquence, jusqu'ici : scanner « le parc » demandait autant d'actions
+ * manuelles que de VLAN, et rien ne rappelait à l'opérateur que les
+ * autres existaient. Un client dont on n'avait scanné qu'un réseau voyait
+ * un inventaire d'apparence complète. Un trou silencieux ressemble trait
+ * pour trait à un réseau sans trou — c'est le défaut le plus coûteux pour
+ * un outil dont toute la valeur tient à l'exactitude de son inventaire.
+ *
+ * DEUX CHOIX DE CONCEPTION
+ *
+ * 1. Les plages sont parcourues l'une APRÈS l'autre. En parallèle, la
+ *    limite de cinq machines simultanées serait multipliée par le nombre
+ *    de plages : le scan deviendrait, vu du réseau du client, une
+ *    reconnaissance massive. La borne posée dans parLots n'a de sens que
+ *    si personne ne la contourne au niveau du dessus.
+ *
+ * 2. Une plage en échec N'INTERROMPT PAS les suivantes, et son échec est
+ *    RAPPORTÉ. C'est le point entier de la route : elle doit distinguer
+ *    « ce réseau ne contient rien » de « ce réseau n'a pas pu être
+ *    examiné ». Renvoyer 200 avec zéro équipement dans les deux cas
+ *    reproduirait exactement le défaut qu'on corrige.
+ * ─────────────────────────────────────────────────────────────────────
+ */
+router.post("/scan/site", requireRole("admin", "operateur"), async (req, res) => {
+  const { id_site, snmp_community } = req.body;
+  if (!id_site) {
+    return res.status(400).json({ error: "id_site est requis" });
+  }
+  if (!siteAutorise(req, id_site)) {
+    return res.status(403).json({ error: "Vous n'êtes pas autorisé à scanner ce site" });
+  }
+
+  try {
+    const [plages] = await db.query(
+      `SELECT id_plage, cidr FROM PLAGE_SCAN
+       WHERE id_site = ? AND actif = TRUE ORDER BY id_plage`,
+      [id_site]
+    );
+
+    // Aucune plage déclarée : on REFUSE au lieu de répondre « 0 équipement ».
+    // Un succès vide laisserait croire que le site a été examiné et qu'il
+    // ne contient rien, alors que rien n'a été regardé.
+    if (plages.length === 0) {
+      return res.status(400).json({
+        error: "Aucune plage active n'est déclarée pour ce site",
+        aide: "Déclarez au moins une plage (page Plages) avant de lancer un scan de site.",
+      });
+    }
+
+    const resultats = [];
+    let total = 0;
+
+    for (const p of plages) {
+      try {
+        const { equipements } = await scannerUnePlage(req, id_site, p.cidr, snmp_community);
+        total += equipements.length;
+        resultats.push({ cidr: p.cidr, nb_equipements: equipements.length, examinee: true });
+      } catch (err) {
+        console.error(`Scan de ${p.cidr} échoué:`, err.message);
+        resultats.push({
+          cidr: p.cidr,
+          nb_equipements: 0,
+          examinee: false,
+          erreur: err.message,
+        });
+      }
+    }
+
+    const echecs = resultats.filter((r) => !r.examinee);
+    const conflits = await conflitsDuSite(id_site);
+
+    await logActivite(
+      req,
+      "scan_site_lance",
+      `Scan du site ${id_site} : ${plages.length} plage(s), ${total} équipement(s)` +
+        (echecs.length > 0 ? `, ${echecs.length} plage(s) en échec` : "")
+    );
+
+    res.json({
+      // Le message dit la vérité même quand elle est partielle : c'est ce
+      // que l'interface affichera, et ce que le client lira.
+      message:
+        echecs.length === 0
+          ? "Scan du site terminé"
+          : `Scan du site terminé, ${echecs.length} plage(s) NON examinée(s)`,
+      nb_plages: plages.length,
+      nb_plages_examinees: plages.length - echecs.length,
+      complet: echecs.length === 0,
+      nb_equipements: total,
+      plages: resultats,
+      conflits_ip: conflits.length,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Erreur pendant le scan du site", details: err.message });
   }
 });
 

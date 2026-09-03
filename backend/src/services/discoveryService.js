@@ -228,21 +228,71 @@ function fabricantFromOsString(osString) {
  * Détection d'OS via nmap (signature TCP/IP), complémentaire à la détection
  * SNMP. Nécessite nmap installé sur la machine, et des droits administrateur
  * sous Windows pour la détection -O.
+ *
+ * ───────────────────────────────────────────────────────────────────────
+ * POURQUOI CES OPTIONS, ET POURQUOI PAS LES AUTRES
+ *
+ * nmap représente 93 % du temps d'un scan. Chaque option ci-dessous a été
+ * mesurée SÉPARÉMENT sur des machines réelles du parc
+ * (`tools/mesurer-nmap-options.js`), et seules celles qui accélèrent SANS
+ * rien perdre ont été retenues.
+ *
+ *   -F              retenue. 15 % plus rapide sur les machines identifiées,
+ *                   aucune détection perdue. `-O` déduit le système d'un
+ *                   port ouvert ET d'un port fermé ; les 100 ports usuels
+ *                   les fournissent, les 1 000 par défaut ne servaient qu'à
+ *                   attendre. C'était pourtant l'option que je soupçonnais.
+ *
+ *   -T4             ÉCARTÉE. Aucun gain mesurable ici (−1 %). Le temps ne
+ *                   part pas dans les délais d'attente mais dans le sondage
+ *                   lui-même : accélérer le rythme ne change rien.
+ *   -n              ÉCARTÉE. Idem, et une mesure aberrante à 12 s sur une
+ *                   machine qui en demandait 2. Rien ne justifie de la
+ *                   garder.
+ *   --max-retries   ÉCARTÉE. Effet nul (−2 %), donc du risque sans
+ *                   contrepartie.
+ *
+ * --host-timeout : le point le plus important
+ *
+ * Une première tentative fixait 12 s. Elle perdait la détection sur trois
+ * machines qui en demandaient 14 : le réglage censé faire gagner du temps
+ * transformait des succès en échecs. On coupe donc TRÈS au-dessus du
+ * besoin observé (15,5 s au maximum mesuré). À 25 s, ce délai n'abrège que
+ * les machines qui n'auraient de toute façon rien donné.
+ *
+ * Le délai Node reste au-dessus du délai nmap, et c'est délibéré : ainsi
+ * c'est nmap qui s'arrête lui-même et RESTITUE ce qu'il a trouvé, au lieu
+ * d'être tué par Node — auquel cas on paie l'attente et on repart les
+ * mains vides. C'était le cas jusqu'ici pour toute machine dépassant 15 s,
+ * et le parc en contient.
+ * ───────────────────────────────────────────────────────────────────────
  */
-function nmapFingerprint(ip, timeoutMs = 15000) {
+const NMAP_DELAI_HOTE_S = 25;
+
+function nmapFingerprint(ip, timeoutMs = 30000) {
   return new Promise((resolve) => {
-    exec(`nmap -O --osscan-guess ${ip}`, { timeout: timeoutMs }, (error, stdout) => {
-      if (error || !stdout) return resolve(null);
+    exec(
+      `nmap -O --osscan-guess -F --host-timeout ${NMAP_DELAI_HOTE_S}s ${ip}`,
+      { timeout: timeoutMs },
+      (error, stdout) => {
+        // On analyse la sortie DÈS QU'ELLE EXISTE, même en cas d'erreur.
+        // nmap sort en code non nul dans plusieurs cas bénins (hôte
+        // partiellement analysé, avertissement) tout en ayant déjà imprimé
+        // l'empreinte. L'ancienne version jetait ce résultat.
+        if (!stdout) return resolve(null);
+        void error;
 
-      const matchOs = stdout.match(/OS details: (.+)/) || stdout.match(/Aggressive OS guesses: (.+)/);
-      const matchDevice = stdout.match(/Device type: (.+)/);
+        const matchOs =
+          stdout.match(/OS details: (.+)/) || stdout.match(/Aggressive OS guesses: (.+)/);
+        const matchDevice = stdout.match(/Device type: (.+)/);
 
-      if (!matchOs) return resolve(null);
-      resolve({
-        os_detecte: matchOs[1].split(",")[0].trim(),
-        type_detecte: matchDevice ? matchDevice[1].trim() : null,
-      });
-    });
+        if (!matchOs) return resolve(null);
+        resolve({
+          os_detecte: matchOs[1].split(",")[0].trim(),
+          type_detecte: matchDevice ? matchDevice[1].trim() : null,
+        });
+      }
+    );
   });
 }
 

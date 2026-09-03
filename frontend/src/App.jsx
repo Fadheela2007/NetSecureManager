@@ -1,6 +1,7 @@
 import { useState, useEffect, lazy, Suspense } from "react";
 import axios from "axios";
 import Login from "./Components/Login";
+import Accueil from "./Components/Accueil";
 import Sidebar from "./Components/Sidebar";
 import SearchBar from "./Components/SearchBar";
 import BasculeTheme from "./Components/BasculeTheme";
@@ -63,6 +64,7 @@ function App() {
   const [ready, setReady] = useState(false);
   const [selectionRecherche, setSelectionRecherche] = useState(null);
   const [menuOuvert, setMenuOuvert] = useState(false);
+  const [montrerConnexion, setMontrerConnexion] = useState(false);
 
   useEffect(() => {
     const token = localStorage.getItem("token");
@@ -123,8 +125,14 @@ function App() {
 
   if (!ready) return null;
 
+  // Un visiteur non connecté voit d'abord la présentation du produit.
+  // L'écran de connexion n'apparaît qu'à sa demande.
   if (!user) {
-    return <Login onLogin={handleLogin} />;
+    return montrerConnexion ? (
+      <Login onLogin={handleLogin} />
+    ) : (
+      <Accueil onConnexion={() => setMontrerConnexion(true)} />
+    );
   }
 
   return (

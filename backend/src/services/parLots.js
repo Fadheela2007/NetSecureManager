@@ -24,27 +24,60 @@
 async function parLots(elements, taille, traiter, surLot = null) {
   const liste = Array.isArray(elements) ? elements : [];
 
-  // Une taille invalide (0, négative, NaN) ferait une boucle infinie :
-  // `i += 0` ne progresse jamais. On retombe sur 1 — plus lent, jamais
-  // bloqué. Un scan lent se remarque ; un serveur figé aussi, mais bien
-  // plus tard et bien plus mal.
+  // Une taille invalide (0, négative, NaN) donnerait une file sans
+  // ouvrier, qui ne démarrerait jamais. On retombe sur 1 — plus lent,
+  // jamais bloqué. Un scan lent se remarque ; un serveur figé aussi, mais
+  // bien plus tard et bien plus mal.
   const n = Number.isFinite(taille) && taille >= 1 ? Math.floor(taille) : 1;
 
-  const resultats = [];
-  for (let i = 0; i < liste.length; i += n) {
-    const lot = liste.slice(i, i + n);
+  // ───────────────────────────────────────────────────────────────────
+  // FILE D'ATTENTE, ET NON LOTS FIGÉS.
+  //
+  // La version précédente découpait la liste en tranches de N et
+  // attendait que la tranche ENTIÈRE se termine avant d'ouvrir la
+  // suivante. Une tranche coûtait donc le temps de sa machine la plus
+  // lente, les autres places restant vides à l'attendre.
+  //
+  // Ce n'est pas un détail sur un scan : les durées par machine vont de
+  // 1 s (réponse SNMP immédiate) à 25 s (plafond nmap sur une machine
+  // qu'on n'arrive pas à identifier). Une seule machine lente immobilise
+  // quatre places pendant vingt secondes. Sur trente machines, on paie
+  // six fois le maximum au lieu de la moyenne.
+  //
+  // Ici, N ouvriers tirent dans une file commune : dès que l'un termine,
+  // il prend l'élément suivant. Il y a donc TOUJOURS N machines en cours
+  // tant qu'il en reste — jamais plus, ce qui est la garantie que ce
+  // fichier existe pour défendre, et jamais moins, ce qui est le gain.
+  //
+  // L'ordre des RÉSULTATS reste celui de l'entrée : chaque résultat est
+  // écrit à son index. Seul l'ordre d'EXÉCUTION devient dynamique. La
+  // liste des équipements d'un scan ne dépend donc toujours pas de qui a
+  // répondu le plus vite.
+  // ───────────────────────────────────────────────────────────────────
+  const resultats = new Array(liste.length);
+  let prochain = 0;
+  let termines = 0;
 
-    // Promise.all conserve l'ordre du tableau qu'on lui donne, quel que
-    // soit l'ordre d'achèvement. Combiné au traitement des lots l'un
-    // après l'autre, l'ordre global est celui de l'entrée : le résultat
-    // d'un scan ne dépend pas de quelle machine a répondu le plus vite.
-    const lotResultats = await Promise.all(lot.map((el, j) => traiter(el, i + j)));
-    resultats.push(...lotResultats);
+  async function ouvrier() {
+    for (;;) {
+      // Lecture ET incrément sans await entre les deux : deux ouvriers ne
+      // peuvent pas recevoir le même index.
+      const index = prochain++;
+      if (index >= liste.length) return;
 
-    if (typeof surLot === "function") {
-      surLot(Math.min(i + n, liste.length), liste.length);
+      resultats[index] = await traiter(liste[index], index);
+
+      termines++;
+      if (typeof surLot === "function") surLot(termines, liste.length);
     }
   }
+
+  // Pas plus d'ouvriers que d'éléments : sur une liste de 2 avec N = 100,
+  // on n'en lance que 2.
+  await Promise.all(
+    Array.from({ length: Math.min(n, liste.length) }, () => ouvrier())
+  );
+
   return resultats;
 }
 
