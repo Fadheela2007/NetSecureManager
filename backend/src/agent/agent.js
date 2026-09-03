@@ -34,6 +34,7 @@ const cron = require("node-cron");
 const { scanRange, snmpMetrics } = require("../services/discoveryService");
 const { calculerDebitsEquipement } = require("../services/traficService");
 const dnsGuard = require("./dnsGuard");
+const pageBlocage = require("./pageBlocage");
 
 const {
   CENTRAL_API_URL,
@@ -142,6 +143,7 @@ async function appliquerPolitiqueWeb() {
       // nulle part — impossible à diagnostiquer pour l'administrateur.
       if (versionPolitique !== null) {
         const r = await dnsGuard.retirer();
+        await pageBlocage.arreter();
         versionPolitique = null;
         annoncer(
           "retiree",
@@ -170,6 +172,22 @@ async function appliquerPolitiqueWeb() {
     }
 
     const resultat = await dnsGuard.appliquer(data.dnsmasq);
+
+    // La page d'explication n'est servie que si le blocage est réellement
+    // posé : l'ouvrir alors que rien n'est bloqué afficherait « accès
+    // bloqué » sur une adresse que plus personne n'atteint.
+    if (resultat.applique) {
+      const p = await pageBlocage.demarrer(data.message_blocage);
+      if (!p.actif) {
+        annoncer(
+          "page-blocage-indisponible",
+          `Blocage actif, mais la page d'explication n'a pas pu être servie : ${p.erreur} ` +
+            "Les utilisateurs verront « impossible d'accéder à ce site » " +
+            "au lieu de votre message.",
+          true
+        );
+      }
+    }
 
     // On remonte le résultat RÉEL, succès comme échec. C'est ce qui
     // permet à l'interface de dire « politique reçue mais non appliquée :

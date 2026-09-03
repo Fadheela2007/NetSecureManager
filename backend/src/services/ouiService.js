@@ -91,12 +91,22 @@ async function chargerRegistre(forcer = false) {
   if (!forcer && cache && cacheExpire > Date.now()) return cache;
 
   let table = new Map();
+  let sansBase = false;
   try {
     const [rows] = await db.query("SELECT oui, fabricant FROM OUI_FABRICANT");
     table = new Map(rows.map((r) => [r.oui, r.fabricant]));
   } catch (err) {
-    // Table absente : ce n'est pas une erreur bloquante, on utilisera la graine.
-    if (err.code !== "ER_NO_SUCH_TABLE") {
+    // Deux situations normales, qui ne doivent pas s'annoncer comme des
+    // pannes : la table n'existe pas encore, ou il n'y a pas de base du
+    // tout. Le second cas est celui de l'AGENT — il n'a délibérément
+    // aucun accès à la base du serveur central, et affichait pourtant
+    // « Lecture de OUI_FABRICANT impossible » à chaque cycle. Un message
+    // d'erreur pour un fonctionnement prévu use la confiance de celui qui
+    // installe, et masque les vraies erreurs au milieu.
+    sansBase =
+      err.code === "ER_NO_SUCH_TABLE" ||
+      /variables d'environnement manquantes/i.test(err.message || "");
+    if (!sansBase) {
       console.error("Lecture de OUI_FABRICANT impossible:", err.message);
     }
   }
@@ -106,7 +116,9 @@ async function chargerRegistre(forcer = false) {
     origineCache = `table (${table.size} entrées)`;
   } else {
     cache = lireGraine();
-    origineCache = `graine embarquée (${cache.size} entrées) — table vide, lancer tools/importer-oui.js`;
+    origineCache = sansBase
+      ? `graine embarquée (${cache.size} entrées) — sans accès à la base, comportement normal pour un agent`
+      : `graine embarquée (${cache.size} entrées) — table vide, lancer tools/importer-oui.js`;
   }
 
   cacheExpire = Date.now() + DUREE_CACHE_MS;

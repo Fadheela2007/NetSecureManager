@@ -17,6 +17,7 @@ const {
 } = require("../middleware/porteeSite");
 const {
   scanRange, scanPorts, wakeOnLan, snmpMetrics, tableCommutation,
+  diagnostiquerPortee,
 } = require("../services/discoveryService");
 const {
   construireCorrespondance,
@@ -559,7 +560,24 @@ router.post("/scan/site", requireRole("admin", "operateur"), async (req, res) =>
       try {
         const { equipements } = await scannerUnePlage(req, id_site, p.cidr, snmp_community);
         total += equipements.length;
-        resultats.push({ cidr: p.cidr, nb_equipements: equipements.length, examinee: true });
+        const resultat = {
+          cidr: p.cidr,
+          nb_equipements: equipements.length,
+          examinee: true,
+        };
+
+        // Zéro équipement : le scan a-t-il vu un réseau vide, ou n'a-t-il
+        // rien vu du tout ? Les deux rendent la même chose, et les
+        // confondre est ce qui fait croire à un inventaire complet.
+        // Le diagnostic n'envoie aucun paquet : il lit les interfaces
+        // locales, tout ayant déjà été pingué par le scan.
+        if (equipements.length === 0) {
+          const portee = diagnostiquerPortee(p.cidr);
+          resultat.joignable = portee.joignable;
+          resultat.diagnostic = portee.raison;
+        }
+
+        resultats.push(resultat);
       } catch (err) {
         console.error(`Scan de ${p.cidr} échoué:`, err.message);
         resultats.push({
@@ -572,25 +590,38 @@ router.post("/scan/site", requireRole("admin", "operateur"), async (req, res) =>
     }
 
     const echecs = resultats.filter((r) => !r.examinee);
+    const horsPortee = resultats.filter((r) => r.joignable === false);
     const conflits = await conflitsDuSite(id_site);
+
+    // Une plage hors de portée compte comme non couverte au même titre
+    // qu'une plage en échec : dans les deux cas, on ignore ce qu'elle
+    // contient. Seule la formulation change.
+    const nonCouvertes = echecs.length + horsPortee.length;
 
     await logActivite(
       req,
       "scan_site_lance",
       `Scan du site ${id_site} : ${plages.length} plage(s), ${total} équipement(s)` +
-        (echecs.length > 0 ? `, ${echecs.length} plage(s) en échec` : "")
+        (echecs.length > 0 ? `, ${echecs.length} en échec` : "") +
+        (horsPortee.length > 0 ? `, ${horsPortee.length} hors de portée` : "")
     );
+
+    let message = "Scan du site terminé";
+    if (echecs.length > 0) {
+      message += `, ${echecs.length} plage(s) NON examinée(s)`;
+    }
+    if (horsPortee.length > 0) {
+      message += `, ${horsPortee.length} plage(s) hors de portée`;
+    }
 
     res.json({
       // Le message dit la vérité même quand elle est partielle : c'est ce
       // que l'interface affichera, et ce que le client lira.
-      message:
-        echecs.length === 0
-          ? "Scan du site terminé"
-          : `Scan du site terminé, ${echecs.length} plage(s) NON examinée(s)`,
+      message,
       nb_plages: plages.length,
       nb_plages_examinees: plages.length - echecs.length,
-      complet: echecs.length === 0,
+      nb_plages_hors_portee: horsPortee.length,
+      complet: nonCouvertes === 0,
       nb_equipements: total,
       plages: resultats,
       conflits_ip: conflits.length,

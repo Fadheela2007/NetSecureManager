@@ -104,17 +104,33 @@ export default function ScanLauncher({ idSite }) {
           <p className={result.complet ? "success" : "error"}>
             {result.nb_equipements} équipement(s) sur{" "}
             {result.nb_plages_examinees}/{result.nb_plages} plage(s) examinée(s).
+            {result.nb_plages_hors_portee > 0 &&
+              ` ${result.nb_plages_hors_portee} hors de portée.`}
             {!result.complet && " Inventaire INCOMPLET."}
           </p>
 
           <ul className="detail-plages">
             {result.plages.map((p) => (
-              <li key={p.cidr} className={p.examinee ? "" : "echec"}>
+              <li
+                key={p.cidr}
+                className={p.examinee && p.joignable !== false ? "" : "echec"}
+              >
                 <strong>{p.cidr}</strong>{" "}
-                {p.examinee ? (
-                  <>— {p.nb_equipements} équipement(s)</>
-                ) : (
+                {!p.examinee ? (
                   <>— NON EXAMINÉE : {p.erreur}</>
+                ) : p.joignable === false ? (
+                  // Une plage vide et une plage inatteignable rendent toutes
+                  // deux zéro équipement. C'est la distinction qui empêche de
+                  // croire un inventaire complet alors qu'un réseau entier
+                  // n'a pas été vu.
+                  <>— HORS DE PORTÉE : {p.diagnostic}</>
+                ) : (
+                  <>
+                    — {p.nb_equipements} équipement(s)
+                    {p.nb_equipements === 0 && p.diagnostic && (
+                      <span className="aide"> ({p.diagnostic})</span>
+                    )}
+                  </>
                 )}
               </li>
             ))}

@@ -12,6 +12,7 @@ const snmp = require("net-snmp");
 const ipLib = require("ip");
 const net = require("net");
 const dgram = require("dgram");
+const os = require("os");
 const { exec } = require("child_process");
 const { chargerRegistre, resoudreAvecRegistre } = require("./ouiService");
 const { determinerType, typeDepuisTexte } = require("./typeService");
@@ -62,6 +63,87 @@ const PORTS_COURANTS = {
 function estAdresseReservee(ip) {
   const dernier = Number(String(ip).split(".")[3]);
   return dernier === 0 || dernier === 255;
+}
+
+/**
+ * Sous-réseaux auxquels ce serveur est directement raccordé.
+ *
+ * Les interfaces virtuelles ne sont pas écartées ici : sur un poste de
+ * développement elles sont nombreuses (Hyper-V, WSL, VMware), mais elles
+ * désignent de vrais réseaux joignables. La distinction utile est faite
+ * par l'appelant.
+ *
+ * @param {object} [interfaces] injectable pour les tests
+ */
+function sousReseauxLocaux(interfaces) {
+  const cartes = interfaces || os.networkInterfaces();
+  const liste = [];
+  for (const groupe of Object.values(cartes || {})) {
+    for (const c of groupe || []) {
+      // Node renvoie "IPv4" selon les versions, 4 selon d'autres.
+      if (c.family !== "IPv4" && c.family !== 4) continue;
+      if (c.internal || !c.address) continue;
+      liste.push(c.address);
+    }
+  }
+  return liste;
+}
+
+/** Vrai si ce serveur possède une adresse à l'intérieur de la plage. */
+function estDirectementAttache(cidr, adressesLocales) {
+  try {
+    const sous = ipLib.cidrSubnet(cidr);
+    return adressesLocales.some((a) => sous.contains(a));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Une plage sans équipement est-elle vide, ou hors de portée ?
+ *
+ * Les deux cas rendent zéro machine et sont indiscernables dans le
+ * résultat d'un scan. C'est le trou le plus coûteux d'un inventaire : un
+ * VLAN inatteignable ressemble trait pour trait à un VLAN vide, et le
+ * client croit son parc complet.
+ *
+ * Le seul signal utile est le RACCORDEMENT, et il ne coûte aucun paquet.
+ * Une première version repinguait la passerelle probable ; c'était inutile,
+ * puisque `scanRange` vient de pinguer TOUTES les adresses de la plage, y
+ * compris celle-là. Reposer la question ne pouvait rien apprendre.
+ *
+ * Si le serveur possède une adresse dans la plage, le réseau lui est
+ * directement raccordé : zéro machine signifie alors réellement zéro
+ * machine. Sinon, l'atteindre suppose un routage qu'on n'a aucun moyen de
+ * vérifier depuis ici — et l'absence totale de réponse s'explique alors
+ * bien plus souvent par une route absente que par un réseau désert.
+ *
+ * Le verdict négatif reste un DOUTE : un VLAN routé et réellement vide
+ * donne le même résultat. Le message le formule comme tel.
+ *
+ * @returns {{joignable: boolean|null, raison: string}}
+ */
+function diagnostiquerPortee(cidr) {
+  try {
+    ipLib.cidrSubnet(cidr);
+  } catch {
+    return { joignable: null, raison: "plage illisible" };
+  }
+
+  if (estDirectementAttache(cidr, sousReseauxLocaux())) {
+    return {
+      joignable: true,
+      raison: "réseau directement raccordé à ce serveur : il est réellement vide",
+    };
+  }
+
+  return {
+    joignable: false,
+    raison:
+      "aucune machine n'a répondu et ce réseau n'est pas raccordé à ce " +
+      "serveur. L'absence de route ou un pare-feu entre VLAN est le cas le " +
+      "plus fréquent : il faut alors un agent local sur ce réseau.",
+  };
 }
 
 function listHostsFromCidr(cidr) {
@@ -1072,6 +1154,7 @@ module.exports = {
   estAdresseReservee,
   scanRange, pingSweep, snmpProbe, snmpProbeV3, listHostsFromCidr,
   diagnosePanne, scanPorts, arpComplement, snmpMetrics, nmapFingerprint,
+  diagnostiquerPortee, sousReseauxLocaux, estDirectementAttache,
   wakeOnLan, fingerprint,
   // Attribution du trafic par port de switch — voir attributionPortService.
   tableCommutation, macDepuisOid,
