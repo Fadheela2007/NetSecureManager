@@ -2,31 +2,19 @@
  * erreurReseau.js
  * Traduit une erreur de requête en message exploitable.
  *
- * ─────────────────────────────────────────────────────────────────────
- * LE DÉFAUT QUE CE FICHIER CORRIGE
+ * Les pages avalaient leurs erreurs — `.catch(() => {})` ou un
+ * `console.error`. Une requête échouée laissait l'écran « chargé mais
+ * vide », strictement identique à « il n'y a rien à afficher ». Le tableau
+ * de bord annonçait donc « tout le parc répond » en vert alors que le
+ * serveur était arrêté : l'outil dont le métier est de signaler les pannes
+ * rassurait précisément quand il ne voyait plus rien.
  *
- * Toutes les pages avalaient leurs erreurs — `.catch(() => {})` ou un
- * simple `console.error`. Une requête échouée laissait donc l'écran dans
- * l'état « chargé, mais vide », strictement identique à « il n'y a rien
- * à afficher ».
+ * Un écran vide doit pouvoir dire « je ne sais pas » — un troisième état,
+ * distinct de « tout va bien » et de « il manque une étape ».
  *
- * Sur un outil de supervision, c'est le pire défaut possible : le
- * tableau de bord annonçait « Tout le parc répond » en vert alors que le
- * serveur était arrêté. L'outil dont le métier est de signaler les
- * pannes rassurait, précisément quand il ne voyait plus rien.
- *
- * Un écran vide doit pouvoir dire « je ne sais pas ». C'est un troisième
- * état, distinct de « tout va bien » et de « il manque une étape ».
- *
- * POURQUOI DISTINGUER LES CAUSES
- *
- * Serveur injoignable, session expirée, erreur serveur : trois causes,
- * trois actions différentes. Les réunir sous « une erreur est survenue »
- * oblige l'utilisateur à deviner laquelle — et devant une plateforme
- * qu'il évalue, il conclura que le produit est fragile.
- * ─────────────────────────────────────────────────────────────────────
+ * Les causes sont distinguées parce qu'elles appellent des actions
+ * différentes : serveur injoignable, session expirée, erreur serveur.
  */
-
 export function decrireErreur(err, contexte = "Les données") {
   const statut = err?.response?.status;
 

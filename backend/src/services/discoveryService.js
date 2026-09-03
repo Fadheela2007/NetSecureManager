@@ -225,47 +225,28 @@ function fabricantFromOsString(osString) {
 }
 
 /**
- * Détection d'OS via nmap (signature TCP/IP), complémentaire à la détection
- * SNMP. Nécessite nmap installé sur la machine, et des droits administrateur
- * sous Windows pour la détection -O.
+ * Détection d'OS via nmap (signature TCP/IP), complémentaire à SNMP.
+ * Nécessite nmap installé, et des droits administrateur sous Windows.
  *
- * ───────────────────────────────────────────────────────────────────────
- * POURQUOI CES OPTIONS, ET POURQUOI PAS LES AUTRES
+ * nmap représente 93 % du temps d'un scan. Chaque option a été mesurée
+ * séparément sur des machines réelles ; seules celles qui accélèrent sans
+ * rien perdre sont retenues.
  *
- * nmap représente 93 % du temps d'un scan. Chaque option ci-dessous a été
- * mesurée SÉPARÉMENT sur des machines réelles du parc
- * (`tools/mesurer-nmap-options.js`), et seules celles qui accélèrent SANS
- * rien perdre ont été retenues.
+ *   -F              retenue : 15 % plus rapide, aucune détection perdue.
+ *                   `-O` déduit le système d'un port ouvert et d'un port
+ *                   fermé, que les 100 ports usuels fournissent déjà.
+ *   -T4, -n,        écartées : gain non mesurable (1 à 2 %), donc du
+ *   --max-retries   risque sans contrepartie.
  *
- *   -F              retenue. 15 % plus rapide sur les machines identifiées,
- *                   aucune détection perdue. `-O` déduit le système d'un
- *                   port ouvert ET d'un port fermé ; les 100 ports usuels
- *                   les fournissent, les 1 000 par défaut ne servaient qu'à
- *                   attendre. C'était pourtant l'option que je soupçonnais.
+ * `--host-timeout` est réglé très au-dessus du besoin observé (15,5 s au
+ * maximum mesuré). Une première tentative à 12 s perdait la détection sur
+ * trois machines qui en demandaient 14 : le réglage censé faire gagner du
+ * temps transformait des succès en échecs. À 25 s, il n'abrège que les
+ * machines qui n'auraient rien donné.
  *
- *   -T4             ÉCARTÉE. Aucun gain mesurable ici (−1 %). Le temps ne
- *                   part pas dans les délais d'attente mais dans le sondage
- *                   lui-même : accélérer le rythme ne change rien.
- *   -n              ÉCARTÉE. Idem, et une mesure aberrante à 12 s sur une
- *                   machine qui en demandait 2. Rien ne justifie de la
- *                   garder.
- *   --max-retries   ÉCARTÉE. Effet nul (−2 %), donc du risque sans
- *                   contrepartie.
- *
- * --host-timeout : le point le plus important
- *
- * Une première tentative fixait 12 s. Elle perdait la détection sur trois
- * machines qui en demandaient 14 : le réglage censé faire gagner du temps
- * transformait des succès en échecs. On coupe donc TRÈS au-dessus du
- * besoin observé (15,5 s au maximum mesuré). À 25 s, ce délai n'abrège que
- * les machines qui n'auraient de toute façon rien donné.
- *
- * Le délai Node reste au-dessus du délai nmap, et c'est délibéré : ainsi
- * c'est nmap qui s'arrête lui-même et RESTITUE ce qu'il a trouvé, au lieu
- * d'être tué par Node — auquel cas on paie l'attente et on repart les
- * mains vides. C'était le cas jusqu'ici pour toute machine dépassant 15 s,
- * et le parc en contient.
- * ───────────────────────────────────────────────────────────────────────
+ * Le délai Node reste au-dessus de celui de nmap, délibérément : nmap
+ * s'arrête alors lui-même et restitue ce qu'il a trouvé, au lieu d'être
+ * tué et de ne rien rendre après avoir fait attendre.
  */
 const NMAP_DELAI_HOTE_S = 25;
 
@@ -406,42 +387,23 @@ async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProg
     console.error("Registre OUI indisponible, fabricants non résolus par MAC:", err.message);
   }
 
-  // ─────────────────────────────────────────────────────────────────
-  // IDENTIFICATION PAR LOTS DE 5.
+  // Identification par lots de 5.
   //
-  // Chaque machine coûte : SNMP (1,5 s de délai d'attente si muette),
-  // nmap (jusqu'à 15 s, seulement si SNMP n'a pas conclu) et un scan de
-  // ports. En séquentiel, 25 machines actives sur un /23 demandaient
-  // plusieurs minutes — dont la quasi-totalité passée à ATTENDRE des
-  // délais d'expiration, processeur et réseau au repos.
+  // Chaque machine coûte : SNMP (1,5 s d'attente si muette), nmap
+  // (seulement si SNMP n'a pas conclu) et un scan de ports. En séquentiel,
+  // 25 machines actives demandaient plusieurs minutes, passées pour
+  // l'essentiel à attendre des délais d'expiration.
   //
-  // POURQUOI 5 ET PAS PLUS. Le facteur limitant n'est pas notre machine
-  // mais le réseau supervisé, qu'on ne doit surtout pas perturber : un
-  // outil de supervision qui dégrade ce qu'il observe est inutilisable.
-  // Chiffres réels à 5 en parallèle (détail dans RAPPORT-scan-parallele.md) :
-  //   • jusqu'à 5 processus nmap simultanés, soit ~500 à 1 500 paquets/s
-  //     au total, ~0,5 Mbit/s — 0,05 % d'un lien gigabit ;
-  //   • jusqu'à 95 connexions TCP ouvertes en pointe (19 ports × 5 hôtes),
-  //     mais brèves : 400 ms de délai d'attente, et réparties car les
-  //     hôtes d'un lot n'atteignent pas cette phase en même temps ;
-  //   • aucune charge sur les machines cibles : un SYN sur un port fermé
-  //     coûte un RST.
+  // Le facteur limitant n'est pas notre machine mais le réseau supervisé :
+  // un outil de supervision qui dégrade ce qu'il observe est inutilisable.
+  // À 5 en parallèle, on reste à ~0,5 Mbit/s et sous les seuils de
+  // déclenchement des sondes d'intrusion. Monter à 50 diviserait encore le
+  // temps mais changerait la nature du trafic — 50 balayages simultanés
+  // ressemblent à une reconnaissance hostile, que les pare-feux bloquent.
+  // Le scan rendrait alors moins de résultats en étant plus agressif.
   //
-  // Monter à 20 ou 50 diviserait encore le temps, mais changerait la
-  // NATURE du trafic : 50 balayages de ports simultanés ressemblent à une
-  // reconnaissance hostile. Les pare-feux et les sondes de détection
-  // d'intrusion les bloquent — le scan renverrait alors MOINS de
-  // résultats en étant plus agressif. 5 garde le trafic sous les seuils
-  // de déclenchement usuels tout en divisant la durée par 5.
-  //
-  // Réglable par SCAN_CONCURRENCE dans le .env, plafonné à 20 : sur un
-  // parc très large et un réseau qu'on maîtrise, monter peut se justifier.
-  // Le plafond empêche qu'une valeur saisie à la légère (500) transforme
-  // l'agent en outil d'attaque.
-  //
-  // Les lots sont séquentiels entre eux : jamais plus de 5 machines
-  // interrogées à la fois, quelle que soit la taille de la plage.
-  // ─────────────────────────────────────────────────────────────────
+  // Réglable par SCAN_CONCURRENCE, plafonné à 20 pour qu'une valeur saisie
+  // à la légère ne transforme pas l'agent en outil d'attaque.
   const CONCURRENCE_IDENTIFICATION = Number(process.env.SCAN_CONCURRENCE) > 0
     ? Math.min(20, Number(process.env.SCAN_CONCURRENCE))
     : 5;
@@ -496,7 +458,6 @@ async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProg
       const mac = arpMatch ? arpMatch.mac : null;
       const parOui = registreOui ? resoudreAvecRegistre(mac, registreOui) : null;
 
-      // ─────────────────────────────────────────────────────────────
       // PRIORITÉ DES SOURCES : SNMP > OUI > nmap.
       //
       // SNMP en premier : l'équipement se décrit lui-même, c'est le vrai
@@ -514,7 +475,6 @@ async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProg
       // Limite assumée : l'OUI identifie la CARTE réseau. Un serveur Dell
       // avec une carte Intel remontera « Intel ». D'où le champ
       // `fabricant_source`, qui permet à l'interface de nuancer.
-      // ─────────────────────────────────────────────────────────────
       let fabricant = null;
       let fabricantSource = null;
 
@@ -542,7 +502,6 @@ async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProg
         fabricant,
       });
 
-      // ─────────────────────────────────────────────────────────────
       // NOM DE LA MACHINE — même raisonnement que pour le fabricant.
       //
       // CE QUI N'ALLAIT PAS : à défaut de SNMP, le nom retombait sur
@@ -563,7 +522,6 @@ async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProg
       //
       // Voir services/nomService.js pour le détail. Les sources réseau
       // ne sont interrogées que si SNMP n'a rien donné.
-      // ─────────────────────────────────────────────────────────────
       const { nom, source: nomSource } = await resoudreNom(
         host.ip,
         snmpData ? snmpData.sysName : null
@@ -832,41 +790,21 @@ function formaterMacSnmp(valeur) {
 /**
  * Lit UNE COLONNE d'une table SNMP et renvoie { index: valeur }.
  *
- * ─────────────────────────────────────────────────────────────────────
- * POURQUOI CETTE FONCTION REMPLACE UN APPEL À `session.table()`
+ * Remplace un appel à `session.table()`, qui attend l'identifiant d'une
+ * TABLE : en lui passant une colonne, il ne trouvait rien à structurer et
+ * renvoyait un objet vide, sans erreur. Bande passante, processeur,
+ * mémoire et taux d'occupation des liens n'ont donc jamais fonctionné,
+ * sur aucun équipement. Le défaut était invisible depuis l'interface, un
+ * objet vide étant aussi ce que renvoie un équipement muet.
  *
- * La version précédente appelait `session.table(oid)` en lui passant des
- * identifiants de COLONNE — « octets reçus », « nom d'interface ». Or
- * cette méthode attend l'identifiant de la TABLE. Recevant une colonne,
- * elle ne trouvait rien à structurer et renvoyait un objet VIDE, sans
- * la moindre erreur.
+ * Vérifié sur une imprimante HP : parcours de la colonne via `table()`,
+ * 0 ligne ; parcours brut de la même colonne, 4 valeurs.
  *
- * Constaté sur une imprimante HP, mesures à l'appui :
+ * Cette version parcourt la colonne sans présumer de structure et indexe
+ * chaque valeur par ce qui suit l'identifiant de colonne.
  *
- *   parcours de la colonne « nom d'interface »  →  0 ligne
- *   parcours de la TABLE des interfaces         →  4 lignes
- *   parcours brut de la même colonne            →  4 valeurs
- *                                                  LOOPBACK, Ethernet,
- *                                                  wifi0, wifiUAP
- *
- * L'équipement répondait parfaitement. C'est notre lecture qui était
- * fausse — et elle l'était pour TOUS les équipements, sur n'importe quel
- * réseau. Bande passante, processeur, mémoire, taux d'occupation des
- * liens : rien de tout cela n'a jamais pu fonctionner.
- *
- * Le défaut était indétectable depuis l'interface, puisqu'un objet vide
- * est exactement ce que renvoie aussi un équipement muet.
- *
- * CE QUE FAIT LA NOUVELLE VERSION
- *
- * Elle parcourt la colonne demandée sans présumer d'aucune structure, et
- * indexe chaque valeur par ce qui suit l'identifiant de colonne. C'est le
- * fonctionnement le plus simple possible, donc le moins susceptible de
- * se tromper.
- *
- * `retries: 1` et non 0 : un parcours enchaîne de nombreux échanges, et
- * un seul paquet UDP perdu anéantissait auparavant la collecte entière.
- * ─────────────────────────────────────────────────────────────────────
+ * `retries: 1` et non 0 : un parcours enchaîne de nombreux échanges, et un
+ * seul paquet UDP perdu anéantissait la collecte entière.
  *
  * @returns {Promise<Object<string, *>>} valeurs indexées, {} si rien
  */
@@ -1008,38 +946,25 @@ const MOTIFS_MEMOIRE_PROBABLE = /\bmemory\b|\bmémoire\b|\bram\b/i;
 /**
  * Taux d'occupation de la mémoire vive, en pourcentage, ou null.
  *
- * ─────────────────────────────────────────────────────────────────────
- * DEUX ERREURS CORRIGÉES, DÉCOUVERTES SUR MATÉRIEL RÉEL
+ * La première version ne retenait que « physical memory », « real memory »
+ * ou le mot « ram ». Un relevé du parc a montré qu'elle se trompait dans
+ * les deux sens :
  *
- * La première version ne retenait que « physical memory », « real
- * memory » ou le mot « ram ». Un relevé du parc a montré qu'elle se
- * trompait dans LES DEUX SENS :
+ *   Canon iR-ADV C3525   RAM(main), Flash Memory, HDD — tous à 0 utilisé.
+ *     → retenu 0 %. Un disque de 78 Go « vide à 0 octet » n'existe pas :
+ *       cet agent déclare les compteurs sans les remplir.
+ *   HP NPI4DDD0A         Random Access Memory, 42 % puis 95 %.
+ *     → retenu rien. Deux mesures valables jetées parce que le libellé
+ *       de HP n'était pas dans la liste — or 95 % d'occupation est
+ *       exactement ce qu'un outil de supervision doit signaler.
  *
- *   Canon iR-ADV C3525      RAM(main)              2097152 / 0 utilisé
- *                           RAM(sub)               1048576 / 0
- *                           Flash Memory            483210 / 0
- *                           HDD                   78142806 / 0
- *     → retenu : 0 %. Un disque de 78 Go « vide à 0 octet » n'existe
- *       pas : cet agent DÉCLARE les compteurs sans les remplir. Nous
- *       affichions ce zéro comme une mesure.
+ * D'où la logique actuelle : écarter d'abord ce qui n'est pas de la
+ * mémoire vive (disques, flash, swap, caches), puis choisir la ligne la
+ * plus explicite parmi celles qui restent.
  *
- *   HP NPI4DDD0A            Random Access Memory  268435456 / 113434152
- *   HP HP694AA2             Random Access Memory  356794368 / 339501056
- *     → retenu : rien. Deux mesures parfaitement valables — 42 % et
- *       95 % — jetées parce que le libellé normalisé de HP n'était pas
- *       dans la liste. Or 95 % d'occupation est exactement ce qu'un
- *       outil de supervision doit signaler.
- *
- * D'où la logique actuelle : on ÉCARTE d'abord ce qui n'est pas de la
- * mémoire vive (disques, flash, swap, caches, tampons), puis on choisit
- * la ligne la plus explicite parmi celles qui restent.
- *
- * ET ON REFUSE UN COMPTEUR À ZÉRO. Un équipement qui répond en SNMP fait
- * tourner un système : son occupation mémoire n'est jamais nulle. Un zéro
- * signifie « l'agent ne remplit pas ce champ », pas « rien n'est
- * utilisé ». C'est la règle constante du produit — une case vide vaut
- * mieux qu'un chiffre inventé.
- * ─────────────────────────────────────────────────────────────────────
+ * Un compteur à zéro est refusé : un équipement qui répond en SNMP fait
+ * tourner un système, son occupation mémoire n'est jamais nulle. Zéro
+ * signifie « champ non rempli », pas « rien n'est utilisé ».
  */
 function tauxMemoire(colonneDescr, colonneTaille, colonneUtilise) {
   let meilleur = null;

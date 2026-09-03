@@ -2,30 +2,21 @@
  * agent/dnsGuard.js
  * Applique la politique de blocage web sur le résolveur DNS local du site.
  *
- * ─────────────────────────────────────────────────────────────────────
- * CE MODULE NE JOURNALISE AUCUNE REQUÊTE DNS.
+ * dnsmasq est configuré SANS `log-queries`, délibérément : cette option
+ * transformerait la machine de l'agent en journal de navigation complet
+ * du site, horodaté et associé à l'IP de chaque poste. Le comptage
+ * remonté à la plateforme vient de `dnsmasq --stats`, qui ne donne que
+ * des totaux.
  *
- * dnsmasq est configuré SANS `log-queries`. C'est délibéré et c'est le
- * point le plus important du fichier : cette option transformerait la
- * machine de l'agent en journal de navigation complet du site, horodaté
- * à la seconde et associé à l'adresse IP de chaque poste. Exactement ce
- * que la consigne exclut.
- *
- * Le comptage remonté à la plateforme provient de `dnsmasq --stats`,
- * qui donne des totaux et rien d'autre.
- * ─────────────────────────────────────────────────────────────────────
- *
- * PRÉREQUIS NON LOGICIELS, à traiter chez le client :
+ * Prérequis non logiciels, à traiter chez le client :
  *   1. dnsmasq installé sur la machine de l'agent ;
  *   2. le DHCP du site distribue l'IP de l'agent comme serveur DNS ;
- *   3. les règles de pare-feu anti-contournement appliquées sur le
- *      routeur (l'agent ne peut pas les poser : il n'est pas sur le
- *      chemin du trafic).
+ *   3. les règles anti-contournement posées sur le routeur — l'agent
+ *      n'est pas sur le chemin du trafic et ne peut pas les poser.
  *
- * Sans le point 2, rien n'est bloqué. Sans le point 3, tout se contourne.
+ * Sans le point 2 rien n'est bloqué ; sans le point 3 tout se contourne.
  * Le module vérifie ce qu'il peut et le dit franchement.
  */
-
 const fs = require("fs");
 const path = require("path");
 const os = require("os");

@@ -6,7 +6,6 @@ const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 /**
  * Réinitialisation des données de supervision.
  *
- * ─────────────────────────────────────────────────────────────────────
  * PARTI PRIS : CET ÉCRAN DOIT ÊTRE ENNUYEUX.
  *
  * C'est la seule fonction de la plateforme qui détruit des données. Tout
@@ -23,7 +22,6 @@ const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
  * La liste de ce qui n'est jamais touché vient du SERVEUR et non du
  * code de cette page : une promesse d'interface que le serveur ne
  * garantit pas n'est qu'un affichage rassurant.
- * ─────────────────────────────────────────────────────────────────────
  */
 export default function Reinitialisation() {
   const [apercu, setApercu] = useState(null);

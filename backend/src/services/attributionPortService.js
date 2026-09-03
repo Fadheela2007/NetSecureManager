@@ -3,46 +3,23 @@
  * Attribue la consommation d'un port de switch à la machine qui y est
  * branchée.
  *
- * ─────────────────────────────────────────────────────────────────────
- * LE PROBLÈME QUE CELA RÉSOUT
+ * La bande passante reposait sur SNMP interrogé directement sur chaque
+ * machine, or un Windows ne l'active pas par défaut : la page restait vide
+ * pour neuf machines sur dix. Le poste n'a pas besoin de savoir ce qu'il
+ * consomme — le switch le sait déjà, et le compteur du port 12 EST la
+ * consommation de la machine branchée dessus.
  *
- * La mesure de bande passante reposait sur SNMP interrogé DIRECTEMENT
- * sur chaque machine. Or la grande majorité des postes n'expose pas
- * SNMP — un Windows ne l'active pas par défaut. Sur un parc courant, la
- * page « Bande passante » restait donc vide pour neuf machines sur dix,
- * ce qui donne l'impression d'une fonction qui ne marche pas.
+ * Chaîne de correspondance :
+ *   MAC (table EQUIPEMENT) -> port du pont (dot1dTpFdbPort)
+ *   -> ifIndex (dot1dBasePortIfIndex) -> compteurs (INTERFACE_RESEAU)
  *
- * L'erreur était de chercher SNMP au mauvais endroit. Un poste n'a pas
- * besoin de savoir combien il consomme : le SWITCH le sait déjà. Le
- * compteur d'octets du port 12 EST la consommation de la machine
- * branchée sur le port 12, qu'elle expose quoi que ce soit ou non.
- *
- * Il ne manquait que la correspondance port ↔ machine. Elle se lit dans
- * la table d'apprentissage des adresses MAC du switch (BRIDGE-MIB), que
- * tout commutateur administrable expose.
- *
- * LA CHAÎNE COMPLÈTE :
- *   MAC de la machine  (déjà connue, table EQUIPEMENT)
- *     -> port du pont   (dot1dTpFdbPort)
- *     -> ifIndex        (dot1dBasePortIfIndex)
- *     -> compteurs      (déjà collectés dans INTERFACE_RESEAU)
- *
- * ─────────────────────────────────────────────────────────────────────
- * CE QUE CE SERVICE REFUSE DE FAIRE, ET POURQUOI C'EST L'ESSENTIEL
- *
- * Un port ne porte pas toujours UNE machine. Il en porte plusieurs dès
- * qu'on y branche une borne Wi-Fi, un second switch, ou un serveur de
- * machines virtuelles. Le compteur du port est alors la somme de
- * plusieurs machines, et l'attribuer à l'une d'elles produit un chiffre
- * faux — plausible, mais faux.
- *
- * C'est exactement le type de résultat qui détruit la confiance : un
- * client qui voit « le poste de la comptabilité consomme 400 Mbit/s »
- * alors que c'est le trafic de tout un étage ne reviendra pas.
- *
- * Le service détecte donc les ports à plusieurs adresses et REFUSE de
- * les attribuer. Il l'annonce plutôt que de deviner.
- * ─────────────────────────────────────────────────────────────────────
+ * Ce que le service REFUSE de faire : attribuer un port qui porte
+ * plusieurs adresses MAC — borne Wi-Fi, switch en cascade, hyperviseur.
+ * Le compteur est alors la somme de plusieurs machines, et l'attribuer à
+ * l'une d'elles donne un chiffre plausible et faux. Un client qui lit
+ * « le poste de la comptabilité consomme 400 Mbit/s » alors que c'est le
+ * trafic d'un étage ne revient pas. Le service l'annonce au lieu de
+ * deviner.
  */
 
 /** Normalise une MAC en minuscules avec deux-points : « a4:bb:6d:01:02:03 ». */

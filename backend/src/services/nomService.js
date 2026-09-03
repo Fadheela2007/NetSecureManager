@@ -2,41 +2,26 @@
  * nomService.js
  * Résolution du nom d'une machine, par sources successives.
  *
- * ─────────────────────────────────────────────────────────────────────
- * LE PROBLÈME
+ * La quasi-totalité des postes Windows n'expose pas SNMP : sans autre
+ * source, la colonne « nom » reste vide sur la majeure partie du parc, et
+ * une liste d'adresses IP ne dit à personne de quelle machine il s'agit.
  *
- * La quasi-totalité des postes Windows n'expose pas SNMP. Sans autre
- * source, la colonne « nom » restait vide sur la majeure partie du parc
- * — ce qui rend une liste d'équipements pratiquement inutilisable : une
- * suite d'adresses IP ne dit à personne de quelle machine il s'agit.
+ * Quatre sources, par ordre de confiance :
  *
- * QUATRE SOURCES, PAR ORDRE DE CONFIANCE
- *
- *   1. sysName SNMP — le nom que la machine se donne elle-même.
- *      Le plus fiable, mais rarement disponible hors équipements réseau.
- *
- *   2. DNS inverse — le nom que le réseau lui reconnaît. Fonctionne
- *      quand le serveur DHCP enregistre ses baux auprès du DNS, ce qui
- *      est la norme sur un domaine Active Directory, et l'exception sur
- *      un réseau monté autour d'une box d'opérateur.
- *
- *   3. NetBIOS — le nom que le poste annonce lui-même sur le réseau
- *      local. C'est la source qui fonctionne quand les deux autres
- *      échouent : un poste Windows répond sur le port 137 même sans
+ *   1. sysName SNMP — le nom que la machine se donne. Le plus fiable,
+ *      rarement disponible hors équipements réseau.
+ *   2. DNS inverse — suppose que le DHCP enregistre ses baux auprès du
+ *      DNS : la norme sur un domaine Active Directory, l'exception
+ *      derrière une box d'opérateur.
+ *   3. NetBIOS — un poste Windows répond sur le port 137 même sans
  *      domaine, sans DNS interne et sans SNMP.
+ *   4. mDNS — seule source pour ce qui n'est ni poste Windows ni
+ *      équipement SNMP : caméras, imprimantes, appareils Apple et
+ *      Android.
  *
- *   4. mDNS — le nom que l'appareil diffuse sur le réseau local, sans
- *      aucun serveur. C'est la seule source pour tout ce qui n'est ni
- *      poste Windows ni équipement SNMP : caméras, imprimantes,
- *      téléviseurs, appareils Apple et Android. Sur un parc composé
- *      majoritairement de ce type de matériel, c'est la source qui
- *      remplit réellement la colonne.
- *
- * Aucune de ces sources n'invente : si les quatre échouent, le nom reste
- * vide. Une case vide est honnête, un nom faux ne l'est pas.
- * ─────────────────────────────────────────────────────────────────────
+ * Aucune source n'invente : si les quatre échouent, le nom reste vide.
+ * Une case vide est honnête, un nom faux ne l'est pas.
  */
-
 const dgram = require("dgram");
 const dns = require("dns").promises;
 

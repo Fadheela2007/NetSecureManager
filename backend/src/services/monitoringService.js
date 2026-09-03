@@ -264,52 +264,28 @@ async function checkEquipement(equipement, cfg) {
  * Crée une alerte, ou incrémente celle qui existe déjà pour le même
  * problème.
  *
- * ─────────────────────────────────────────────────────────────────────
- * DÉDOUBLONNAGE — la cause de la saturation du tableau de bord.
+ * Le dédoublonnage est placé ici et non chez les appelants : un problème
+ * persistant produisait une alerte par cycle, parce que chaque scan remet
+ * le statut à `up` et réarme ainsi la transition vers `down` que surveille
+ * `checkEquipement`. Aucun appelant ne peut contourner ce point unique.
  *
- * Un problème persistant produisait une alerte par cycle. Le mécanisme :
- * `checkEquipement` ne crée une alerte que sur la TRANSITION vers `down`,
- * ce qui suffisait tant que rien ne remettait le statut à `up`. Or chaque
- * scan fait « INSERT ... ON DUPLICATE KEY UPDATE statut = 'up' » : il
- * réarme la transition, et le cycle suivant recrée une alerte pour un
- * problème déjà connu.
- *
- * Plutôt que de traquer chaque endroit qui remet le statut à `up`, le
- * dédoublonnage est placé ICI : aucun appelant ne peut le contourner.
- *
- * Une alerte est considérée comme « le même problème » si elle porte le
- * même équipement, le même type, et n'est pas résolue. Une alerte
- * ACQUITTÉE compte donc aussi : l'opérateur a dit « je sais, je m'en
- * occupe » — le problème qui persiste ne doit pas ressortir du silence.
- *
- * Seule la PREMIÈRE occurrence déclenche une notification. C'est le
- * gain principal : plus de rafale d'e-mails pour une panne qui dure.
- * ─────────────────────────────────────────────────────────────────────
+ * « Même problème » : même équipement, même type, non résolu. Une alerte
+ * acquittée compte aussi — l'opérateur a dit qu'il s'en occupait, le
+ * problème qui persiste ne doit pas ressortir du silence. Seule la
+ * première occurrence notifie, pour éviter une rafale de courriels sur
+ * une panne qui dure.
  */
+
 /**
- * ─────────────────────────────────────────────────────────────────────
- * DÉGRADATION QUAND LA MIGRATION N'EST PAS PASSÉE.
+ * Les colonnes `occurrences`, `premiere_detection` et `derniere_occurrence`
+ * viennent de la migration 2026-08-18-alertes-acquittement.sql. Absentes,
+ * MySQL renvoie ER_BAD_FIELD_ERROR (1054), et l'erreur remontait jusqu'à
+ * checkEquipement en interrompant la supervision de l'équipement. Le
+ * service repasse donc en « une alerte par détection » : bruyant, correct.
  *
- * Les colonnes `occurrences`, `premiere_detection` et
- * `derniere_occurrence` viennent de la migration
- * 2026-08-18-alertes-acquittement.sql. Tant qu'elle n'a pas été exécutée,
- * MySQL renvoie ER_BAD_FIELD_ERROR (1054).
+ * Le diagnostic n'est journalisé qu'une fois, sinon il noie la console.
  *
- * L'erreur remontait alors jusqu'à checkEquipement et interrompait la
- * supervision de l'équipement concerné — un défaut de conception de ma
- * part : une amélioration du confort d'affichage ne doit jamais pouvoir
- * arrêter la fonction principale de la plateforme.
- *
- * Le service repasse donc en mode « une alerte par détection » (le
- * comportement d'avant le dédoublonnage), qui est bruyant mais correct.
- * Le diagnostic n'est journalisé qu'UNE FOIS : répété à chaque alerte de
- * chaque équipement, il noierait la console — exactement le problème que
- * le dédoublonnage est censé résoudre.
- *
- *   null  = pas encore testé
- *   true  = colonnes présentes, dédoublonnage actif
- *   false = colonnes absentes, mode dégradé
- * ─────────────────────────────────────────────────────────────────────
+ *   null = pas encore testé · true = dédoublonnage actif · false = dégradé
  */
 let dedoublonnageDisponible = null;
 
@@ -702,38 +678,25 @@ async function cycleSupervision() {
   // Une seule lecture de la configuration pour tout le cycle.
   const cfg = await chargerConfigCycle();
 
-  // PÉRIMÈTRE DU CYCLE CENTRAL — ne superviser que ce qu'on peut atteindre.
+  // Périmètre du cycle central : ne superviser que ce qu'on peut
+  // atteindre. Le serveur pinguait auparavant tous les équipements, y
+  // compris ceux des sites distants — or l'architecture repose sur un
+  // agent local précisément parce qu'un réseau privé distant n'est pas
+  // joignable depuis le central. Ces machines étaient marquées `down` en
+  // permanence alors qu'elles fonctionnaient.
   //
-  // Le serveur central pinguait auparavant TOUS les équipements, y compris
-  // ceux des sites distants. Or l'architecture repose sur un agent local
-  // précisément parce qu'un réseau privé distant n'est pas joignable depuis
-  // le central : ces machines échouaient donc systématiquement au ping et
-  // étaient marquées `down` en permanence alors qu'elles fonctionnaient.
+  // Critère : `SITE.dernier_push`. Un site qui a déjà transmis est
+  // supervisé par son agent ; un site qui n'a jamais transmis est scanné
+  // depuis l'interface, donc joignable. Même convention que verifierAgents().
   //
-  // Critère de distinction : `SITE.dernier_push`. Un site qui a déjà transmis
-  // est supervisé par son agent, sur place. Un site qui n'a jamais transmis
-  // est scanné manuellement depuis l'interface, donc joignable depuis le
-  // central. Même convention que verifierAgents() — aucun drapeau à cocher.
-  // ─────────────────────────────────────────────────────────────────
-  // REPLI SI `SITE.dernier_push` N'EXISTE PAS.
-  //
-  // Cette colonne vient de la migration 2026-08-10. Tant qu'elle manque,
-  // la requête ci-dessous échoue avec « Unknown column 'dernier_push' »,
-  // l'exception remonte jusqu'au planificateur, et le cycle ENTIER est
-  // abandonné. Toutes les minutes. Sur tout le parc.
-  //
-  // Constaté en conditions réelles : 113 équipements, aucun relevé, aucun
-  // graphique, aucune mesure de bande passante — pour une colonne
-  // absente. La seule trace était une ligne d'erreur dans la console,
-  // noyée parmi les autres et répétée soixante fois par heure.
-  //
-  // Le repli rétablit le comportement d'AVANT la migration : superviser
-  // tous les équipements. C'est moins juste — les sites distants seront
-  // pingés en vain et risquent d'être marqués hors ligne à tort — mais
-  // infiniment préférable à ne rien superviser du tout. Une plateforme
-  // qui se trompe sur un site distant reste utile ; une plateforme
-  // muette ne l'est pas.
-  // ─────────────────────────────────────────────────────────────────
+  // Repli si la colonne manque (migration 2026-08-10 non passée) : la
+  // requête échouait, l'exception remontait au planificateur et le cycle
+  // ENTIER était abandonné, toutes les minutes. Constaté en réel :
+  // 113 équipements, aucun relevé, aucun graphique, pour une colonne
+  // absente. Le repli supervise alors tout le parc — moins juste, les
+  // sites distants risquant d'être marqués hors ligne à tort, mais une
+  // plateforme qui se trompe sur un site distant reste utile, une
+  // plateforme muette non.
   let equipements;
   try {
     [equipements] = await db.query(
@@ -758,7 +721,6 @@ async function cycleSupervision() {
     [equipements] = await db.query("SELECT * FROM EQUIPEMENT");
   }
 
-  // ─────────────────────────────────────────────────────────────────
   // GARDE-FOU : LE CYCLE QUI NE SUPERVISE PLUS RIEN, EN SILENCE.
   //
   // Le filtre ci-dessus est correct — on ne pingue pas un site distant
@@ -780,7 +742,6 @@ async function cycleSupervision() {
   // On ne corrige pas automatiquement — remettre `dernier_push` à NULL
   // couperait la supervision d'un vrai site distant. On le DIT, une
   // fois par démarrage, avec la requête exacte à exécuter.
-  // ─────────────────────────────────────────────────────────────────
   if (equipements.length === 0 && !supervisionVideSignalee) {
     const [[{ total }]] = await db.query("SELECT COUNT(*) AS total FROM EQUIPEMENT");
     if (total > 0) {

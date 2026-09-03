@@ -7,7 +7,6 @@ import { decrireErreur } from "../utils/erreurReseau";
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
 /**
- * ─────────────────────────────────────────────────────────────────────
  * CE QUE CE TABLEAU DE BORD A CESSÉ DE FAIRE
  *
  * Il affichait la liste complète des équipements et la liste complète
@@ -24,7 +23,6 @@ const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
  * CE QU'IL FAIT MAINTENANT : répondre en trois secondes à « dois-je
  * m'inquiéter, et de quoi ». Le détail vit dans les pages dédiées, où
  * il est mieux traité.
- * ─────────────────────────────────────────────────────────────────────
  */
 
 /**

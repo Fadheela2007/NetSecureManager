@@ -6,7 +6,6 @@ const { requireRole } = require("../middleware/requireRole");
 /**
  * Clés dont la valeur ne doit jamais sortir de la base.
  *
- * ─────────────────────────────────────────────────────────────────────
  * POURQUOI CE FILTRE, ALORS QUE LA TABLE NE CONTIENT AUCUN SECRET
  * AUJOURD'HUI.
  *
@@ -23,7 +22,6 @@ const { requireRole } = require("../middleware/requireRole");
  * Le filtre porte sur le NOM de la clé, pas sur une liste figée : une
  * clé future nommée `smtp_password` sera masquée sans que quiconque ait
  * à y penser. C'est le seul type de protection qui survit à l'oubli.
- * ─────────────────────────────────────────────────────────────────────
  */
 const MOTIF_CLE_SENSIBLE = /(pass|mdp|secret|token|jeton|api_?key|_key$|credential)/i;
 

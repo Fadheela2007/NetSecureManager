@@ -30,30 +30,15 @@ async function parLots(elements, taille, traiter, surLot = null) {
   // bien plus tard et bien plus mal.
   const n = Number.isFinite(taille) && taille >= 1 ? Math.floor(taille) : 1;
 
-  // ───────────────────────────────────────────────────────────────────
-  // FILE D'ATTENTE, ET NON LOTS FIGÉS.
+  // File d'attente, et non lots figés : la version précédente attendait
+  // que N éléments soient tous terminés avant d'en lancer N autres, si
+  // bien qu'un lot coûtait le temps de son élément le plus lent. Sur un
+  // scan, les durées vont de 1 s à 25 s par machine.
   //
-  // La version précédente découpait la liste en tranches de N et
-  // attendait que la tranche ENTIÈRE se termine avant d'ouvrir la
-  // suivante. Une tranche coûtait donc le temps de sa machine la plus
-  // lente, les autres places restant vides à l'attendre.
-  //
-  // Ce n'est pas un détail sur un scan : les durées par machine vont de
-  // 1 s (réponse SNMP immédiate) à 25 s (plafond nmap sur une machine
-  // qu'on n'arrive pas à identifier). Une seule machine lente immobilise
-  // quatre places pendant vingt secondes. Sur trente machines, on paie
-  // six fois le maximum au lieu de la moyenne.
-  //
-  // Ici, N ouvriers tirent dans une file commune : dès que l'un termine,
-  // il prend l'élément suivant. Il y a donc TOUJOURS N machines en cours
-  // tant qu'il en reste — jamais plus, ce qui est la garantie que ce
-  // fichier existe pour défendre, et jamais moins, ce qui est le gain.
-  //
-  // L'ordre des RÉSULTATS reste celui de l'entrée : chaque résultat est
-  // écrit à son index. Seul l'ordre d'EXÉCUTION devient dynamique. La
-  // liste des équipements d'un scan ne dépend donc toujours pas de qui a
-  // répondu le plus vite.
-  // ───────────────────────────────────────────────────────────────────
+  // N ouvriers tirent dans une file commune : toujours N en cours tant
+  // qu'il en reste, jamais plus — c'est la borne que ce fichier défend.
+  // L'ordre des résultats reste celui de l'entrée (écriture par index),
+  // seul l'ordre d'exécution est dynamique.
   const resultats = new Array(liste.length);
   let prochain = 0;
   let termines = 0;

@@ -1,38 +1,18 @@
 /**
  * EtatVide — ce qu'on affiche quand il n'y a rien à afficher.
  *
- * ─────────────────────────────────────────────────────────────────────
- * POURQUOI UN COMPOSANT DÉDIÉ
+ * « Aucun équipement trouvé », « aucun relevé disponible » : des constats
+ * exacts et inutiles, qui ne disent ni pourquoi ni quoi faire. Un écran
+ * vide sans explication est indistinguable d'une panne.
  *
- * La plateforme disait « Aucun équipement trouvé. », « Aucun relevé
- * disponible pour les dernières 24h. », « Aucune mesure sur cette
- * période. » — des constats exacts et inutiles. Aucun ne dit POURQUOI,
- * ni ce qu'il faut faire.
- *
- * C'est le principal responsable de l'impression « le produit ne marche
- * pas ». Un écran vide sans explication est indistinguable d'une panne :
- * on a passé des heures à chercher un défaut derrière « aucun relevé »
- * alors que la cause tenait en une phrase.
- *
- * ─────────────────────────────────────────────────────────────────────
- * LA DISTINCTION QUI COMPTE
- *
- * Deux vides n'ont rien à voir :
- *
- *   • « il n'y a rien parce que TOUT VA BIEN » — aucune alerte à
- *     traiter, aucun incident ouvert. C'est une bonne nouvelle et elle
- *     doit se lire comme telle.
- *
- *   • « il n'y a rien parce qu'IL MANQUE QUELQUE CHOSE » — pas encore de
- *     scan, pas de SNMP sur le parc, une migration en attente. C'est une
- *     étape à franchir, et l'écran doit dire laquelle.
- *
- * Les confondre, c'est soit alarmer sans raison, soit laisser croire que
- * tout va bien alors que rien n'est mesuré.
- * ─────────────────────────────────────────────────────────────────────
+ * Le composant sépare deux vides qui n'ont rien à voir : « rien parce que
+ * tout va bien » (aucune alerte, aucun incident) et « rien parce qu'il
+ * manque quelque chose » (pas encore de scan, pas de SNMP, migration en
+ * attente). Les confondre revient soit à alarmer sans raison, soit à
+ * laisser croire que tout va bien alors que rien n'est mesuré.
  *
  * @param {string} titre        le constat, en une ligne
- * @param {string} explication  POURQUOI c'est vide — le cœur du composant
+ * @param {string} explication  pourquoi c'est vide — le cœur du composant
  * @param {"bien"|"etape"|"neutre"} ton
  * @param {{libelle:string, onClick:function}} [action]  bouton facultatif
  * @param {string} [aide]       précision technique, plus discrète

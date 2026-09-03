@@ -124,42 +124,21 @@ router.post("/login", async (req, res) => {
 });
 
 /**
- * POST /api/auth/register
- * Création de compte. À utiliser pour créer le premier admin, puis à protéger
- * ou désactiver en production (voir note plus bas).
- * body: { nom, email, mot_de_passe, role }
- */
-/**
- * POST /api/auth/register — création du TOUT PREMIER compte, et rien d'autre.
+ * POST /api/auth/register — création du tout premier compte, et rien d'autre.
+ * body: { nom, email, mot_de_passe }
  *
- * ─────────────────────────────────────────────────────────────────────
- * ⚠ CETTE ROUTE ÉTAIT UNE PORTE OUVERTE. Correction du 21/08/2026.
+ * Cette route était accessible sans authentification — elle est montée
+ * avant le requireAuth global, comme /login — et créait un compte de rôle
+ * « admin », le rôle étant lu depuis le corps de la requête. N'importe qui
+ * pouvant joindre le serveur obtenait donc un accès administrateur en une
+ * requête, et avec lui la cartographie complète du réseau du client.
+ * Corrigé le 21/08/2026.
  *
- * Elle était accessible SANS authentification — elle est montée avant le
- * requireAuth global, comme /login — et créait un compte de rôle
- * « admin » par défaut, le rôle étant en plus lisible depuis le corps de
- * la requête.
- *
- * Conséquence : n'importe qui pouvant joindre le serveur obtenait un
- * compte administrateur en une requête. Pas de mot de passe à deviner,
- * pas de faille à exploiter — il suffisait de demander. C'est le défaut
- * le plus grave qu'une plateforme de supervision puisse avoir : elle
- * donne accès à la cartographie complète du réseau du client.
- *
- * Ce n'était pas visible à l'usage. L'interface ne propose nulle part
- * de « créer un compte », donc la route ne servait plus à rien depuis
- * que la page Utilisateurs existe — mais elle répondait toujours.
- *
- * CE QUI EST GARDÉ, ET POURQUOI. Une installation neuve n'a aucun
- * compte : sans cette route, personne ne pourrait se connecter pour
- * créer le premier. On conserve donc l'amorçage, mais UNIQUEMENT tant
- * que la table est vide. Dès qu'un compte existe, la route refuse et
- * renvoie vers l'écran Utilisateurs, réservé aux administrateurs.
- *
- * Le rôle n'est plus lu depuis la requête : le premier compte est
- * administrateur global par construction, sinon il ne pourrait pas
- * créer les suivants.
- * ─────────────────────────────────────────────────────────────────────
+ * L'amorçage est conservé, car une installation neuve n'a aucun compte et
+ * personne ne pourrait créer le premier. Mais la route ne répond que tant
+ * que la table est vide ; ensuite elle refuse et renvoie vers l'écran
+ * Utilisateurs. Le rôle n'est plus lu depuis la requête : le premier
+ * compte est administrateur par construction.
  */
 router.post("/register", async (req, res) => {
   const { nom, email, mot_de_passe } = req.body;

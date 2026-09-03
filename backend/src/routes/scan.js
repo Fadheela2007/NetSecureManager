@@ -91,7 +91,6 @@ async function enregistrerInterfaces(idEquipement, ip, communaute) {
           iface.adresseMac,
           iface.etatAdmin,
           iface.etatOperationnel,
-          // ─────────────────────────────────────────────────────────
           // COLONNE OUBLIÉE À L'ÉCRITURE.
           //
           // `vitesse_mbps` était collectée en SNMP, déclarée au schéma et
@@ -109,7 +108,6 @@ async function enregistrerInterfaces(idEquipement, ip, communaute) {
           // équipement n'expose pas sa vitesse », ce qui arrive vraiment.
           // Seule la comparaison avec la sonde SNMP — qui annonçait
           // 10 Mbit/s là où l'écran affichait « — » — l'a révélé.
-          // ─────────────────────────────────────────────────────────
           iface.vitesseMbps ?? null,
         ]
       );
@@ -509,37 +507,24 @@ router.post("/scan", requireRole("admin", "operateur"), async (req, res) => {
 
 /**
  * POST /api/scan/site
- * Scanne TOUTES les plages déclarées et actives d'un site.
+ * Scanne toutes les plages déclarées et actives d'un site.
  *
- * ─────────────────────────────────────────────────────────────────────
- * POURQUOI CETTE ROUTE EXISTE
+ * Une entreprise sépare ses réseaux — bureautique, imprimantes, serveurs,
+ * wifi — et `POST /scan` n'en prenait qu'un à la fois. Scanner « le parc »
+ * demandait donc autant d'actions manuelles que de VLAN, sans que rien ne
+ * rappelle à l'opérateur que les autres existaient : un inventaire
+ * d'apparence complète avec un trou dedans.
  *
- * Le but du produit est de superviser le parc d'une entreprise. Or une
- * entreprise sépare ses réseaux : bureautique, imprimantes, serveurs,
- * wifi. Chacun est un sous-réseau distinct, et `POST /scan` n'en prenait
- * qu'un seul à la fois.
+ * Deux choix de conception :
  *
- * Conséquence, jusqu'ici : scanner « le parc » demandait autant d'actions
- * manuelles que de VLAN, et rien ne rappelait à l'opérateur que les
- * autres existaient. Un client dont on n'avait scanné qu'un réseau voyait
- * un inventaire d'apparence complète. Un trou silencieux ressemble trait
- * pour trait à un réseau sans trou — c'est le défaut le plus coûteux pour
- * un outil dont toute la valeur tient à l'exactitude de son inventaire.
- *
- * DEUX CHOIX DE CONCEPTION
- *
- * 1. Les plages sont parcourues l'une APRÈS l'autre. En parallèle, la
+ * 1. Les plages sont parcourues l'une après l'autre. En parallèle, la
  *    limite de cinq machines simultanées serait multipliée par le nombre
- *    de plages : le scan deviendrait, vu du réseau du client, une
- *    reconnaissance massive. La borne posée dans parLots n'a de sens que
- *    si personne ne la contourne au niveau du dessus.
+ *    de plages — la borne posée dans parLots n'a de sens que si personne
+ *    ne la contourne à l'étage au-dessus.
  *
- * 2. Une plage en échec N'INTERROMPT PAS les suivantes, et son échec est
- *    RAPPORTÉ. C'est le point entier de la route : elle doit distinguer
- *    « ce réseau ne contient rien » de « ce réseau n'a pas pu être
- *    examiné ». Renvoyer 200 avec zéro équipement dans les deux cas
- *    reproduirait exactement le défaut qu'on corrige.
- * ─────────────────────────────────────────────────────────────────────
+ * 2. Une plage en échec n'interrompt pas les suivantes et son échec est
+ *    rapporté. C'est le point entier de la route : distinguer « ce réseau
+ *    ne contient rien » de « ce réseau n'a pas pu être examiné ».
  */
 router.post("/scan/site", requireRole("admin", "operateur"), async (req, res) => {
   const { id_site, snmp_community } = req.body;
@@ -1000,7 +985,6 @@ router.get("/equipements/:id/bande-passante", async (req, res) => {
     [req.params.id]
   ).catch(() => [[]]);
 
-  // ─────────────────────────────────────────────────────────────────
   // POURQUOI LE SERVEUR DIT CE QUI EST EXCLU DU TOTAL
   //
   // La boucle locale voit passer le trafic interne de la machine : elle
@@ -1014,7 +998,6 @@ router.get("/equipements/:id/bande-passante", async (req, res) => {
   //
   // La règle vient de traficService, celui-là même qui calcule le total.
   // La recopier dans le frontend garantirait qu'un jour les deux diffèrent.
-  // ─────────────────────────────────────────────────────────────────
   const detaillees = interfaces.map((i) => ({
     ...i,
     ignoree_du_total: estIgnoree(i.nom),
