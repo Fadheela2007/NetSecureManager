@@ -34,6 +34,7 @@ const cron = require("node-cron");
 const { scanRange, snmpMetrics } = require("../services/discoveryService");
 const { calculerDebitsEquipement } = require("../services/traficService");
 const dnsGuard = require("./dnsGuard");
+const pageBlocage = require("./pageBlocage");
 
 const {
   CENTRAL_API_URL,
@@ -46,41 +47,24 @@ const {
 } = process.env;
 
 /**
- * ─────────────────────────────────────────────────────────────────────
- * QUI GARDE LE COMPTEUR PRÉCÉDENT : L'AGENT.
+ * Le compteur précédent est gardé par l'AGENT, pas par le serveur.
  *
- * SNMP ne fournit qu'un compteur cumulé d'octets. Le débit se calcule par
- * différence entre deux relevés, ce qui suppose de connaître le précédent
- * ET l'intervalle exact qui les sépare.
+ * SNMP ne fournit qu'un compteur cumulé : le débit se calcule par
+ * différence entre deux relevés, ce qui suppose de connaître l'intervalle
+ * exact qui les sépare. L'agent le connaît ; le serveur central ne
+ * connaîtrait que le délai entre deux réceptions de push, latence et
+ * reprises comprises. Un push retardé de 30 s donnerait un débit
+ * plausible et faux.
  *
- * C'est ce second point qui tranche. L'agent connaît précisément le temps
- * écoulé entre ses deux lectures SNMP. Le serveur central, lui, ne
- * connaîtrait que l'intervalle entre deux réceptions de push — qui inclut
- * la latence réseau, les reprises sur erreur et les files d'attente. Un
- * push retardé de 30 secondes fausserait le débit sans que rien ne le
- * signale : on obtiendrait un chiffre plausible mais faux, le pire des
- * résultats pour un outil de diagnostic.
+ * Conséquence assumée : au redémarrage de l'agent le cache est vide et le
+ * premier cycle ne remonte pas de débit. Un relevé manquant vaut mieux
+ * qu'un relevé inventé, et le cycle suivant corrige.
  *
- * Conséquence assumée du choix : au redémarrage de l'agent, ce cache est
- * vide et le premier cycle ne remonte pas de débit (les champs restent
- * NULL). C'est le comportement honnête — on ne peut pas calculer une
- * différence sans point de départ — et il se corrige de lui-même au cycle
- * suivant. Un relevé de débit manquant est très préférable à un relevé
- * inventé.
- *
- * L'alternative (compteurs bruts envoyés au central, état gardé côté
- * serveur) aurait aussi un avantage : survivre au redémarrage de l'agent.
- * Elle a été écartée pour la raison de timing ci-dessus. À noter que le
- * problème de « distinguer les compteurs de chaque site » n'en était pas
- * un : id_equipement est unique pour toute la plateforme.
- *
- * Le calcul lui-même vit dans services/traficService.js, partagé avec le
- * cycle de supervision central : une seule implémentation, un cache indexé
- * par (équipement, interface) et non plus par équipement — sans quoi deux
- * ports du même switch écrasaient mutuellement leur compteur précédent.
- * ─────────────────────────────────────────────────────────────────────
+ * Le calcul vit dans services/traficService.js, partagé avec le cycle
+ * central. Le cache y est indexé par (équipement, interface) et non par
+ * équipement : sans quoi deux ports du même switch écrasaient
+ * mutuellement leur compteur précédent.
  */
-
 let numeroCycle = 0;
 
 /**
@@ -113,35 +97,20 @@ let dernierMotif = null;
 /**
  * Dit ce qui s'est passé — une fois par changement d'état.
  *
- * ─────────────────────────────────────────────────────────────────────
- * POURQUOI CETTE FONCTION EXISTE
- *
- * `appliquerPolitiqueWeb()` comportait TROIS sorties muettes : migration
+ * `appliquerPolitiqueWeb()` avait trois sorties muettes : migration
  * absente côté serveur, politique inactive, politique inchangée. Chacune
- * est un comportement légitime, aucune ne disait rien.
+ * est légitime, aucune ne disait rien. Résultat observé : huit cycles
+ * affichant « politique web uniquement » et rien d'autre, alors que le
+ * script d'installation annonçait une ligne « Politique web vN appliquée »
+ * qui ne pouvait pas venir. Impossible de distinguer « rien à refaire » de
+ * « le serveur n'a pas la migration ».
  *
- * Résultat observé pendant un test : huit cycles affichant
+ * Un agent qui tourne sans rien dire ressemble à un agent qui fonctionne :
+ * aucun symptôme jusqu'au jour où quelqu'un constate qu'un site interdit
+ * s'ouvre.
  *
- *     [Agent site 1] Cycle 1 — politique web uniquement.
- *     [Agent site 1] Cycle 2 — politique web uniquement.
- *     ...
- *
- * et rien d'autre. Le script d'installation venait pourtant d'écrire
- * « À surveiller : la ligne "Politique web vN appliquée" ». Cette ligne
- * ne pouvait pas venir, et rien n'expliquait pourquoi. Impossible de
- * distinguer « tout va bien, rien à refaire » de « le serveur n'a pas la
- * migration » ou de « aucune politique n'est active ».
- *
- * Un agent qui tourne sans rien dire ressemble exactement à un agent qui
- * fonctionne. C'est le défaut le plus coûteux qu'on puisse livrer à un
- * client : il ne produit aucun symptôme jusqu'au jour où quelqu'un
- * constate qu'un site interdit s'ouvre.
- *
- * ON NE RÉPÈTE PAS. Un agent tourne toutes les cinq minutes, parfois
- * pendant des mois. Réafficher « politique inchangée » sans arrêt
- * noierait les vraies informations dans le journal. On n'annonce donc
- * qu'au premier passage et à chaque CHANGEMENT d'état.
- * ─────────────────────────────────────────────────────────────────────
+ * On n'annonce qu'au premier passage et à chaque changement d'état — un
+ * agent tourne toutes les cinq minutes, parfois pendant des mois.
  */
 function annoncer(motif, message, estErreur = false) {
   if (dernierMotif === motif) return;
@@ -174,6 +143,7 @@ async function appliquerPolitiqueWeb() {
       // nulle part — impossible à diagnostiquer pour l'administrateur.
       if (versionPolitique !== null) {
         const r = await dnsGuard.retirer();
+        await pageBlocage.arreter();
         versionPolitique = null;
         annoncer(
           "retiree",
@@ -203,10 +173,25 @@ async function appliquerPolitiqueWeb() {
 
     const resultat = await dnsGuard.appliquer(data.dnsmasq);
 
+    // La page d'explication n'est servie que si le blocage est réellement
+    // posé : l'ouvrir alors que rien n'est bloqué afficherait « accès
+    // bloqué » sur une adresse que plus personne n'atteint.
+    if (resultat.applique) {
+      const p = await pageBlocage.demarrer(data.message_blocage);
+      if (!p.actif) {
+        annoncer(
+          "page-blocage-indisponible",
+          `Blocage actif, mais la page d'explication n'a pas pu être servie : ${p.erreur} ` +
+            "Les utilisateurs verront « impossible d'accéder à ce site » " +
+            "au lieu de votre message.",
+          true
+        );
+      }
+    }
+
     // On remonte le résultat RÉEL, succès comme échec. C'est ce qui
     // permet à l'interface de dire « politique reçue mais non appliquée :
     // dnsmasq absent » au lieu d'afficher un blocage imaginaire.
-    // ─────────────────────────────────────────────────────────────
     // CE COMPTE RENDU NE DOIT PAS ÉCHOUER EN SILENCE.
     //
     // Il portait un `.catch(() => {})` : si l'envoi échouait, l'agent
@@ -220,7 +205,6 @@ async function appliquerPolitiqueWeb() {
     // Le blocage, lui, EST posé. On ne fait donc pas échouer le cycle :
     // on le dit, et on continue. C'est la même règle que partout
     // ailleurs dans cet agent — signaler sans interrompre.
-    // ─────────────────────────────────────────────────────────────
     await axios
       .post(
         `${CENTRAL_API_URL}/agent/politique/etat`,
@@ -257,7 +241,6 @@ async function appliquerPolitiqueWeb() {
 
     if (resultat.applique) {
       versionPolitique = data.version;
-      // ─────────────────────────────────────────────────────────────
       // DEUX NOMBRES, PAS UN SEUL.
       //
       // `total_bloques` compte les RÈGLES écrites dans le résolveur, pas
@@ -271,7 +254,6 @@ async function appliquerPolitiqueWeb() {
       // formulation trompeuse : elle se lit « 35 000 domaines ont été
       // perdus ». Un client qui compare les deux écrans conclut à une
       // panne, et rien dans le produit ne le détrompe.
-      // ─────────────────────────────────────────────────────────────
       const regles = data.stats?.total_bloques;
       const couverts = data.stats?.domaines_categories;
       const compactes = data.stats?.compactes;
@@ -394,7 +376,6 @@ async function collecterReleves(equipements, avecInventaire) {
 async function runScanAndPush() {
   numeroCycle++;
 
-  // ─────────────────────────────────────────────────────────────────
   // MODE « POLITIQUE SEULE » (POLITIQUE_SEULE=1 dans le .env)
   //
   // N'applique que la politique web : ni scan, ni push.
@@ -408,7 +389,6 @@ async function runScanAndPush() {
   // Le symptôme serait particulièrement trompeur : tous les équipements
   // resteraient au dernier statut connu, l'interface aurait l'air
   // normale, et plus rien ne serait réellement surveillé.
-  // ─────────────────────────────────────────────────────────────────
   if (process.env.POLITIQUE_SEULE === "1") {
     console.log(`[Agent site ${ID_SITE}] Cycle ${numeroCycle} — politique web uniquement.`);
     await appliquerPolitiqueWeb();

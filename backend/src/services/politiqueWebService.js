@@ -3,14 +3,12 @@
  * Compilation d'une politique de blocage web en liste de domaines
  * effective, et génération des configurations qui l'appliquent.
  *
- * ─────────────────────────────────────────────────────────────────────
  * CE MODULE NE VOIT AUCUNE DONNÉE DE NAVIGATION.
  *
  * Il transforme une politique (catégories + règles manuelles) en
  * fichiers de configuration. Il ne reçoit ni requête DNS, ni adresse IP
  * de poste, ni nom d'utilisateur. La séparation est volontaire : le seul
  * endroit du code qui pourrait tracer quelqu'un n'existe pas.
- * ─────────────────────────────────────────────────────────────────────
  */
 
 /**

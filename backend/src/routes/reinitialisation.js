@@ -2,38 +2,22 @@
  * routes/reinitialisation.js
  * Remise à zéro des données de supervision.
  *
- * ─────────────────────────────────────────────────────────────────────
- * LA FONCTION LA PLUS DANGEREUSE DE LA PLATEFORME.
+ * Elle efface pour de bon. Cinq garde-fous, chacun pour un scénario
+ * d'accident précis :
  *
- * Elle efface des données pour de bon. Cinq garde-fous, chacun destiné à
- * un scénario précis d'accident :
+ *   1. réservée aux administrateurs ;
+ *   2. rien n'est effacé par défaut — l'appelant énumère ce qu'il veut
+ *      supprimer, un corps vide ne fait rien (plutôt que « tout ») ;
+ *   3. phrase de confirmation exacte « REINITIALISER », qu'un clic
+ *      malencontreux ou une requête rejouée ne produit pas ;
+ *   4. jamais touchés : comptes, sites, jetons d'agent, plages,
+ *      configuration, politiques web. Effacer un parc ne doit pas
+ *      déconnecter l'administrateur ni obliger à réinstaller les agents ;
+ *   5. tout est journalisé dans LOG_ACTIVITE avant exécution.
  *
- *   1. RÉSERVÉE AUX ADMINISTRATEURS. Un opérateur n'a aucune raison
- *      d'effacer un parc.
- *
- *   2. RIEN N'EST EFFACÉ PAR DÉFAUT. L'appelant doit énumérer ce qu'il
- *      veut supprimer. Un corps de requête vide ne fait rien — plutôt
- *      que « tout », qui est le pire défaut possible ici.
- *
- *   3. PHRASE DE CONFIRMATION EXACTE. Le client doit envoyer
- *      « REINITIALISER ». Un clic malencontreux, un rechargement de page
- *      ou une requête rejouée ne suffisent pas.
- *
- *   4. CE QU'ON NE TOUCHE JAMAIS : les comptes, les sites, les jetons
- *      d'agent, les plages de scan, la configuration, les politiques web
- *      et les catégories de blocage. Effacer un parc ne doit pas
- *      déconnecter l'administrateur ni obliger à réinstaller les agents.
- *
- *   5. TOUT EST JOURNALISÉ dans LOG_ACTIVITE avant exécution — avec qui,
- *      quand, et le détail de ce qui a été demandé.
- *
- * L'usage prévu : reprendre un scan propre après un essai, sans traîner
- * des équipements fantômes et des centaines d'alertes qui brouillent la
- * lecture. C'est un besoin réel en démonstration — mais c'est aussi la
+ * Usage prévu : repartir d'un scan propre après un essai. C'est aussi la
  * porte par laquelle on efface un parc de production par erreur.
- * ─────────────────────────────────────────────────────────────────────
  */
-
 const express = require("express");
 const router = express.Router();
 const db = require("../db");
@@ -119,7 +103,6 @@ const CIBLES = [
  * Portée EFFECTIVE de l'opération : celle de l'utilisateur, éventuellement
  * restreinte à un site qu'il a explicitement désigné.
  *
- * ─────────────────────────────────────────────────────────────────────
  * POURQUOI CE PARAMÈTRE EXISTE
  *
  * Sans lui, la réinitialisation était tout ou rien : un administrateur de
@@ -132,7 +115,6 @@ const CIBLES = [
  * Un administrateur rattaché au site 1 qui demanderait le site 2 est
  * refusé : sa portée reste la borne. Le champ vient du client, la portée
  * vient du jeton signé — seule la seconde fait autorité.
- * ─────────────────────────────────────────────────────────────────────
  *
  * @returns {{ site: number|null } | { erreur: string }}
  */

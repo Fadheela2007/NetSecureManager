@@ -98,7 +98,6 @@ app.use(
       if (originesAutorisees.includes(origine.replace(/\/$/, ""))) {
         return rappel(null, true);
       }
-      // ─────────────────────────────────────────────────────────────
       // UN REFUS D'ORIGINE N'EST PAS UNE PANNE.
       //
       // Sans statut, cette erreur ressortait en 500 « Erreur serveur »
@@ -110,7 +109,6 @@ app.use(
       // qui noient les vraies erreurs. Et « Erreur serveur » envoie
       // chercher un défaut du produit là où il s'agit d'une ligne de
       // configuration — FRONTEND_URL — qui n'a pas été renseignée.
-      // ─────────────────────────────────────────────────────────────
       const refus = new Error(`Origine non autorisée : ${origine}`);
       refus.status = 403;
       refus.aide =
@@ -411,7 +409,6 @@ app.get("/api/agent/politique", async (req, res) => {
     // rendre poussive en permanence.
     const politique = await chargerPolitiqueSite(site.id_site);
 
-    // ─────────────────────────────────────────────────────────────────
     // UN AGENT QUI N'A RIEN APPLIQUÉ ENVOIE UNE VERSION VIDE.
     //
     // `Number("")` vaut 0, et `Number.isFinite(0)` vaut true. Le test
@@ -424,7 +421,6 @@ app.get("/api/agent/politique", async (req, res) => {
     // Les numéros commencent aujourd'hui à 1, donc le cas ne s'est pas
     // encore produit. On ne compte pas là-dessus : la chaîne vide veut
     // dire « je n'ai rien », ce qui n'est pas un numéro.
-    // ─────────────────────────────────────────────────────────────────
     const brut = req.query.version;
     const versionAgent =
       typeof brut === "string" && brut.trim() !== "" ? Number(brut) : null;
@@ -498,7 +494,6 @@ app.post("/api/agent/politique/etat", async (req, res) => {
  * POST /api/agent/stats-blocage
  * body : { id_site, jour, compteurs: [{ categorie, nb }] }
  *
- * ─────────────────────────────────────────────────────────────────────
  * CE QUE L'AGENT A LE DROIT D'ENVOYER, ET RIEN D'AUTRE.
  *
  * L'agent voit passer toutes les requêtes DNS du site : il pourrait
@@ -509,7 +504,6 @@ app.post("/api/agent/politique/etat", async (req, res) => {
  * Un compteur par catégorie et par jour suffit à démontrer que la
  * politique fonctionne. Descendre à l'heure ou au domaine désignerait
  * quelqu'un sur un petit site aussi sûrement qu'un nom.
- * ─────────────────────────────────────────────────────────────────────
  */
 app.post("/api/agent/stats-blocage", async (req, res) => {
   try {
@@ -788,7 +782,6 @@ process.on("unhandledRejection", (raison) => {
 const server = http.createServer(app);
 
 /**
- * ─────────────────────────────────────────────────────────────────────
  * SERVEUR TEMPS RÉEL — désactivé par défaut.
  *
  * Il était instancié avec `cors: { origin: "*" }`, c'est-à-dire ouvert à
@@ -808,7 +801,6 @@ const server = http.createServer(app);
  * en paramètre d'URL se retrouve dans les journaux des serveurs
  * intermédiaires. La bonne voie est l'option `auth` du client, lue dans
  * `socket.handshake.auth` côté serveur.
- * ─────────────────────────────────────────────────────────────────────
  */
 let io = null;
 if (process.env.WEBSOCKET_ORIGINE) {

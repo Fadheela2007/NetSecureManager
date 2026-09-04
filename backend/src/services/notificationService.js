@@ -1,37 +1,23 @@
 /**
  * notificationService.js
- * Envoi des alertes par e-mail (Nodemailer).
+ * Envoi des alertes par courriel (Nodemailer).
  *
- * Dépendances : npm install nodemailer axios
- * Variables d'environnement (.env) :
- *   SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, ALERT_EMAIL_FROM
+ * Variables d'environnement : SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS,
+ * ALERT_EMAIL_FROM.
  *
- * ─────────────────────────────────────────────────────────────────────
- * POURQUOI PAS DE WHATSAPP
+ * Un envoi WhatsApp a existé ici et a été retiré. Meta n'autorise le texte
+ * libre que pendant 24 h après qu'une personne a écrit au numéro de
+ * l'entreprise ; au-delà, il faut un modèle pré-approuvé. Une alerte de
+ * supervision est exactement le cas interdit : elle part à trois heures du
+ * matin sans que personne n'ait rien écrit. Le code fonctionnait en
+ * démonstration et aurait été rejeté en exploitation. Le rétablir demande
+ * un compte Meta Business vérifié et un modèle de catégorie Utility
+ * approuvé — un travail de déploiement, à mener si un client le demande.
  *
- * Un envoi WhatsApp a existé ici, et a été retiré volontairement.
- *
- * Meta n'autorise le texte libre que pendant 24 heures après qu'une
- * personne a écrit au numéro de l'entreprise. Au-delà, tout message
- * émis par l'entreprise doit passer par un MODÈLE pré-approuvé.
- *
- * Or une alerte de supervision est exactement le cas interdit : elle
- * part à trois heures du matin, sans que personne n'ait rien écrit. Le
- * code fonctionnait en démonstration préparée et aurait été rejeté en
- * exploitation réelle — la pire des situations pour un outil vendu
- * comme dispositif d'alerte.
- *
- * Le rétablir demande : un compte Meta Business vérifié, un modèle de
- * catégorie Utility approuvé, et un jeton permanent d'utilisateur
- * système. C'est un travail de déploiement autant que de code, à mener
- * quand un client le demandera vraiment.
- * ─────────────────────────────────────────────────────────────────────
- *
- * IMPORTANT — ces fonctions ne doivent PAS être attendues (await) depuis le
- * cycle de supervision : un SMTP lent ou en échec ferait déborder le cycle
- * cron d'une minute. Utiliser notifierAlerte() en « fire and forget ».
+ * Ces fonctions ne doivent PAS être attendues depuis le cycle de
+ * supervision : un SMTP lent ferait déborder le cycle d'une minute.
+ * Utiliser notifierAlerte() sans await.
  */
-
 const nodemailer = require("nodemailer");
 const axios = require("axios");
 const db = require("../db");
@@ -138,7 +124,6 @@ async function envoyerEmails(equipement, message, destinataires, idAlerte) {
 }
 
 
-// =====================================================================
 // File d'attente : regroupement + limitation de débit + coupe-circuit
 //
 // Lors des tests, une panne simultanée de plusieurs équipements a provoqué
@@ -155,7 +140,6 @@ async function envoyerEmails(equipement, message, destinataires, idAlerte) {
 //      canal, ce canal est suspendu pendant DUREE_COUPURE_MS. Inutile de
 //      marteler un serveur qui refuse systématiquement : c'est précisément ce
 //      qui a fait verrouiller le compte Gmail.
-// =====================================================================
 
 const FENETRE_GROUPEMENT_MS = 20000; // délai d'attente avant envoi groupé
 const MAX_ENVOIS_PAR_FENETRE = 10;   // messages / minute / canal
@@ -301,7 +285,6 @@ async function sendEmailAlert(equipement, message, idAlerte = null) {
   await envoyerEmails(equipement, message, destinataires, idAlerte);
 }
 
-// =====================================================================
 // Envoi des rapports planifiés
 //
 // ARTICULATION AVEC LA LIMITATION DES ALERTES — point explicitement
@@ -324,7 +307,6 @@ async function sendEmailAlert(equipement, message, idAlerte = null) {
 //
 // Le plafond du canal rapport est volontairement bas : un rapport n'est
 // pas urgent, et rien ne justifie d'en envoyer des dizaines par minute.
-// =====================================================================
 
 const MAX_RAPPORTS_PAR_FENETRE = 20;
 

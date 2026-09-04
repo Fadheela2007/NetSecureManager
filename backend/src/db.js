@@ -9,7 +9,6 @@ function configurationManquante() {
 }
 
 /**
- * ─────────────────────────────────────────────────────────────────────
  * POURQUOI CE MODULE NE LÈVE PLUS À L'IMPORT.
  *
  * Il levait directement au chargement : `require("./db")` échouait si
@@ -28,7 +27,6 @@ function configurationManquante() {
  *     mysql2 illisible) ;
  *   • au DÉMARRAGE DU SERVEUR, via verifierConfiguration(), qui
  *     conserve le comportement « échouer tôt » là où il est utile.
- * ─────────────────────────────────────────────────────────────────────
  */
 function verifierConfiguration() {
   const manquantes = configurationManquante();

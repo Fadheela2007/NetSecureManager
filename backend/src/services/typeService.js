@@ -3,7 +3,6 @@
  * Détermine la CATÉGORIE d'un équipement, à partir de tous les signaux
  * disponibles.
  *
- * ─────────────────────────────────────────────────────────────────────
  * POURQUOI UN SERVICE DÉDIÉ
  *
  * Le type était décidé à trois endroits sans vocabulaire commun :
@@ -22,7 +21,6 @@
  * RÈGLE DIRECTRICE : mieux vaut « inconnu » qu'une catégorie fausse.
  * Un administrateur réseau qui voit « serveur » sur un poste perd
  * confiance dans toute la colonne — davantage que s'il lisait « inconnu ».
- * ─────────────────────────────────────────────────────────────────────
  */
 
 /**
@@ -73,39 +71,23 @@ function typeDepuisTexte(texte, provenance = "snmp") {
 
   // ── Équipements réseau ────────────────────────────────────────────
   //
-  // RÉSERVÉ AU TEXTE SNMP. Ces règles ne s'appliquent PLUS aux
-  // estimations de nmap, et c'est la correction la plus importante de
-  // ce fichier.
+  // Réservé au texte SNMP : ces règles ne s'appliquent pas aux
+  // estimations de nmap.
   //
-  // CE QUI S'EST PASSÉ. Sur un parc réel, treize appareils — un
-  // téléphone Honor, plusieurs Android, des objets connectés répartis
-  // sur deux sous-réseaux — ont TOUS été classés « routeur ». Tous
-  // portaient exactement la même estimation nmap :
+  // Sur un parc réel, treize appareils — téléphones Android, objets
+  // connectés — ont tous été classés « routeur ». Tous portaient la même
+  // estimation nmap, « 3Com OfficeConnect 3CRWER100-75 wireless broadband
+  // router », qui est le repli de nmap devant une petite pile réseau
+  // embarquée : le mot « router » y figurait, la règle se déclenchait.
   //
-  //     « 3Com OfficeConnect 3CRWER100-75 wireless broadband router (96%) »
+  // La faute de fond : déduire une CATÉGORIE d'un NOM DE PRODUIT. Le
+  // texte SNMP est ce que l'équipement déclare de lui-même ; l'estimation
+  // nmap est une comparaison d'empreintes, qui propose le modèle le plus
+  // ressemblant même quand rien ne ressemble vraiment.
   //
-  // Ce n'est pas une identification, c'est la réponse par défaut de
-  // nmap devant une petite pile réseau embarquée : ce modèle de routeur
-  // domestique est son repli. Le mot « router » y figurait, la règle
-  // ci-dessous s'est déclenchée, et treize téléphones sont devenus des
-  // routeurs.
-  //
-  // LA FAUTE DE FOND. On déduisait une CATÉGORIE d'un NOM DE PRODUIT.
-  // C'est la même erreur que le nom d'équipement hérité de nmap, ou que
-  // le type de service mDNS pris pour un nom de machine : une donnée
-  // réelle, rangée dans un champ qui n'est pas le sien.
-  //
-  // POURQUOI SNMP RESTE FIABLE. Le texte SNMP est ce que l'équipement
-  // DÉCLARE de lui-même. Un commutateur qui répond « Catalyst » est un
-  // commutateur. L'estimation nmap, elle, est une comparaison
-  // d'empreintes : elle propose le modèle le plus ressemblant de sa
-  // base, même quand rien ne ressemble vraiment.
-  //
-  // CE QU'ON PERD. Un vrai routeur sans SNMP retombe sur « inconnu » au
-  // lieu d'être reconnu. C'est le compromis assumé du produit — mieux
-  // vaut vide que faux — et il reste rattrapé par nmapDeviceType, qui
-  // annonce une catégorie et non un modèle, et qui est consulté AVANT
-  // cette fonction (voir determinerType).
+  // Ce qu'on perd : un vrai routeur sans SNMP retombe sur « inconnu ».
+  // Compromis assumé, rattrapé par nmapDeviceType — qui annonce une
+  // catégorie et non un modèle, et qui est consulté avant cette fonction.
   if (provenance === "snmp") {
     if (/fortigate|fortios|fortinet|palo alto|pan-os|sonicwall|watchguard|pfsense|opnsense|checkpoint|check point/.test(t))
       return TYPES.PARE_FEU;
@@ -293,31 +275,18 @@ const MOTS_VIDES = new Set([
 /**
  * Déduit un type à partir du nom du fabricant.
  *
- * ─────────────────────────────────────────────────────────────────────
- * CETTE RÈGLE NE S'EST JAMAIS DÉCLENCHÉE JUSQU'AU 22/08/2026.
- *
- * Elle faisait `TYPE_PAR_FABRICANT.get(fabricant)`, une correspondance
- * EXACTE. Or le fabricant vient du registre IEEE, qui écrit
+ * Cette règle ne s'est jamais déclenchée avant le 22/08/2026 : elle
+ * faisait une correspondance EXACTE, or le registre IEEE écrit
  * « Hangzhou Hikvision Digital Technology Co.,Ltd. » là où la table dit
- * « Hikvision ». Aucune clé ne correspondait, jamais.
+ * « Hikvision ». Aucune clé ne correspondait, jamais. Sur un parc réel,
+ * 44 équipements étaient classés « inconnu » — caméras et imprimantes
+ * comprises — et le reclassement annonçait « 0 type corrigé sur 44 », ce
+ * qui donnait l'impression qu'il n'y avait rien à corriger.
  *
- * Conséquence observée sur un parc réel : 44 équipements, tous classés
- * « inconnu » — y compris des caméras Hikvision et des imprimantes
- * parfaitement identifiées par leur adresse MAC. Le reclassement
- * annonçait « 0 type corrigé sur 44 », ce qui donnait l'impression que
- * la classification fonctionnait et n'avait rien à corriger.
- *
- * On compare désormais sur les MOTS SIGNIFICATIFS du nom, formes
- * juridiques retirées. « hikvision » se retrouve dans
- * « hangzhou hikvision digital technology co ltd », et la caméra est
- * reconnue.
- *
- * PRUDENCE CONSERVÉE : la correspondance porte sur un mot entier, jamais
- * sur un fragment. Sans cela, un fabricant contenant « axis » dans un
- * mot plus long — « Praxis Systems » — deviendrait une caméra. Cette
- * règle reste de toute façon la DERNIÈRE consultée : elle ne s'applique
- * qu'en l'absence de tout autre signal.
- * ─────────────────────────────────────────────────────────────────────
+ * On compare désormais sur les mots significatifs du nom, formes
+ * juridiques retirées. La correspondance porte sur un mot entier et
+ * jamais sur un fragment : sinon « Praxis Systems » deviendrait une
+ * caméra à cause de « axis ». Cette règle reste la dernière consultée.
  */
 function typeDepuisFabricant(fabricant) {
   if (!fabricant) return null;
@@ -377,6 +346,7 @@ function determinerType({
   nmapDeviceType = null,
   ports = null,
   fabricant = null,
+  banniereWeb = null,
 } = {}) {
   const texteSnmp = [sysDescr, sysName].filter(Boolean).join(" ");
 
@@ -385,6 +355,18 @@ function determinerType({
 
   const parPort = typeDepuisPorts(ports);
   if (parPort) return { type: parPort, source: "port" };
+
+  // Bannière web — le titre de la page d'administration de l'appareil.
+  //
+  // Provenance « banniere » et NON « snmp », délibérément : les règles
+  // d'équipement réseau (routeur, pare-feu, commutateur) sont réservées
+  // au texte SNMP, parce que ce dernier est déclaré par l'appareil
+  // lui-même. Un titre de page peut contenir « Router » sans que
+  // l'appareil en soit un — page de connexion à un portail, documentation
+  // servie par un poste. Lui donner la confiance du SNMP reproduirait le
+  // défaut des treize téléphones classés « routeur » par nmap.
+  const parBanniere = typeDepuisTexte(banniereWeb, "banniere");
+  if (parBanniere) return { type: parBanniere, source: "banniere_web" };
 
   const parNmapType = typeDepuisNmap(nmapDeviceType);
   if (parNmapType) return { type: parNmapType, source: "nmap_device" };

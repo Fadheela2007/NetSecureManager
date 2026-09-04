@@ -2,37 +2,21 @@
  * ouiService.js
  * Identification du fabricant à partir de l'adresse MAC.
  *
- * Les trois premiers octets d'une adresse MAC forment l'OUI
- * (Organizationally Unique Identifier), attribué par l'IEEE au fabricant de
- * la carte réseau. C'est un registre public, exploitable sans SNMP, sans
- * nmap, et sans aucune coopération de l'équipement — il suffit que la MAC
- * soit connue, ce qui est le cas dès qu'une communication a eu lieu sur le
- * réseau local (table ARP).
+ * Les trois premiers octets d'une MAC forment l'OUI, attribué par l'IEEE
+ * au fabricant de la carte réseau. Registre public, exploitable sans
+ * SNMP, sans nmap et sans coopération de l'équipement : il suffit que la
+ * MAC soit connue, ce qui est le cas dès qu'une communication a eu lieu
+ * sur le réseau local.
  *
- * ─────────────────────────────────────────────────────────────────────
- * SOURCE DU REGISTRE : une table en base, alimentée par un script.
+ * Le registre vit dans la table `OUI_FABRICANT`, et non dans une API en
+ * ligne ni une bibliothèque npm : il doit fonctionner sans Internet et
+ * pouvoir être mis à jour sans redéployer l'application. Un
+ * administrateur peut même le corriger en SQL.
  *
- * Deux contraintes commandaient le choix — fonctionner sans Internet, et
- * pouvoir être mis à jour sans redéployer l'application :
- *
- *   • API en ligne à la demande  -> échoue sur « sans Internet »
- *   • bibliothèque npm           -> échoue sur « sans redéployer »
- *                                   (mettre à jour = npm update + livraison)
- *   • fichier embarqué seul      -> échoue sur « sans redéployer »
- *   • TABLE EN BASE              -> satisfait les deux
- *
- * La table `OUI_FABRICANT` est donc la référence. Elle est alimentée par
- * `tools/importer-oui.js` depuis la graine `data/oui-ieee.json.gz`
- * (53 559 entrées, 517 Ko), depuis un fichier plus récent, ou directement
- * depuis l'IEEE si le serveur a un accès réseau. Un administrateur peut
- * même la corriger en SQL.
- *
- * Si la table est vide ou absente, le service retombe sur la graine lue
- * directement depuis le disque : la fonctionnalité marche donc dès le
- * premier démarrage, avant tout import.
- * ─────────────────────────────────────────────────────────────────────
+ * Table vide ou absente : le service retombe sur la graine
+ * `data/oui-ieee.json.gz` lue depuis le disque, si bien que la fonction
+ * marche dès le premier démarrage.
  */
-
 const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
@@ -107,12 +91,22 @@ async function chargerRegistre(forcer = false) {
   if (!forcer && cache && cacheExpire > Date.now()) return cache;
 
   let table = new Map();
+  let sansBase = false;
   try {
     const [rows] = await db.query("SELECT oui, fabricant FROM OUI_FABRICANT");
     table = new Map(rows.map((r) => [r.oui, r.fabricant]));
   } catch (err) {
-    // Table absente : ce n'est pas une erreur bloquante, on utilisera la graine.
-    if (err.code !== "ER_NO_SUCH_TABLE") {
+    // Deux situations normales, qui ne doivent pas s'annoncer comme des
+    // pannes : la table n'existe pas encore, ou il n'y a pas de base du
+    // tout. Le second cas est celui de l'AGENT — il n'a délibérément
+    // aucun accès à la base du serveur central, et affichait pourtant
+    // « Lecture de OUI_FABRICANT impossible » à chaque cycle. Un message
+    // d'erreur pour un fonctionnement prévu use la confiance de celui qui
+    // installe, et masque les vraies erreurs au milieu.
+    sansBase =
+      err.code === "ER_NO_SUCH_TABLE" ||
+      /variables d'environnement manquantes/i.test(err.message || "");
+    if (!sansBase) {
       console.error("Lecture de OUI_FABRICANT impossible:", err.message);
     }
   }
@@ -122,7 +116,9 @@ async function chargerRegistre(forcer = false) {
     origineCache = `table (${table.size} entrées)`;
   } else {
     cache = lireGraine();
-    origineCache = `graine embarquée (${cache.size} entrées) — table vide, lancer tools/importer-oui.js`;
+    origineCache = sansBase
+      ? `graine embarquée (${cache.size} entrées) — sans accès à la base, comportement normal pour un agent`
+      : `graine embarquée (${cache.size} entrées) — table vide, lancer tools/importer-oui.js`;
   }
 
   cacheExpire = Date.now() + DUREE_CACHE_MS;

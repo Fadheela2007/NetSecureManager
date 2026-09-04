@@ -12,11 +12,13 @@ const snmp = require("net-snmp");
 const ipLib = require("ip");
 const net = require("net");
 const dgram = require("dgram");
+const os = require("os");
 const { exec } = require("child_process");
 const { chargerRegistre, resoudreAvecRegistre } = require("./ouiService");
 const { determinerType, typeDepuisTexte } = require("./typeService");
 const { resoudreNom } = require("./nomService");
 const { parLots } = require("./parLots");
+const { lireBanniere } = require("./banniereWebService");
 
 const OID_SYS_DESCR = "1.3.6.1.2.1.1.1.0";
 const OID_SYS_OBJECT_ID = "1.3.6.1.2.1.1.2.0";
@@ -62,6 +64,87 @@ const PORTS_COURANTS = {
 function estAdresseReservee(ip) {
   const dernier = Number(String(ip).split(".")[3]);
   return dernier === 0 || dernier === 255;
+}
+
+/**
+ * Sous-réseaux auxquels ce serveur est directement raccordé.
+ *
+ * Les interfaces virtuelles ne sont pas écartées ici : sur un poste de
+ * développement elles sont nombreuses (Hyper-V, WSL, VMware), mais elles
+ * désignent de vrais réseaux joignables. La distinction utile est faite
+ * par l'appelant.
+ *
+ * @param {object} [interfaces] injectable pour les tests
+ */
+function sousReseauxLocaux(interfaces) {
+  const cartes = interfaces || os.networkInterfaces();
+  const liste = [];
+  for (const groupe of Object.values(cartes || {})) {
+    for (const c of groupe || []) {
+      // Node renvoie "IPv4" selon les versions, 4 selon d'autres.
+      if (c.family !== "IPv4" && c.family !== 4) continue;
+      if (c.internal || !c.address) continue;
+      liste.push(c.address);
+    }
+  }
+  return liste;
+}
+
+/** Vrai si ce serveur possède une adresse à l'intérieur de la plage. */
+function estDirectementAttache(cidr, adressesLocales) {
+  try {
+    const sous = ipLib.cidrSubnet(cidr);
+    return adressesLocales.some((a) => sous.contains(a));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Une plage sans équipement est-elle vide, ou hors de portée ?
+ *
+ * Les deux cas rendent zéro machine et sont indiscernables dans le
+ * résultat d'un scan. C'est le trou le plus coûteux d'un inventaire : un
+ * VLAN inatteignable ressemble trait pour trait à un VLAN vide, et le
+ * client croit son parc complet.
+ *
+ * Le seul signal utile est le RACCORDEMENT, et il ne coûte aucun paquet.
+ * Une première version repinguait la passerelle probable ; c'était inutile,
+ * puisque `scanRange` vient de pinguer TOUTES les adresses de la plage, y
+ * compris celle-là. Reposer la question ne pouvait rien apprendre.
+ *
+ * Si le serveur possède une adresse dans la plage, le réseau lui est
+ * directement raccordé : zéro machine signifie alors réellement zéro
+ * machine. Sinon, l'atteindre suppose un routage qu'on n'a aucun moyen de
+ * vérifier depuis ici — et l'absence totale de réponse s'explique alors
+ * bien plus souvent par une route absente que par un réseau désert.
+ *
+ * Le verdict négatif reste un DOUTE : un VLAN routé et réellement vide
+ * donne le même résultat. Le message le formule comme tel.
+ *
+ * @returns {{joignable: boolean|null, raison: string}}
+ */
+function diagnostiquerPortee(cidr) {
+  try {
+    ipLib.cidrSubnet(cidr);
+  } catch {
+    return { joignable: null, raison: "plage illisible" };
+  }
+
+  if (estDirectementAttache(cidr, sousReseauxLocaux())) {
+    return {
+      joignable: true,
+      raison: "réseau directement raccordé à ce serveur : il est réellement vide",
+    };
+  }
+
+  return {
+    joignable: false,
+    raison:
+      "aucune machine n'a répondu et ce réseau n'est pas raccordé à ce " +
+      "serveur. L'absence de route ou un pare-feu entre VLAN est le cas le " +
+      "plus fréquent : il faut alors un agent local sur ce réseau.",
+  };
 }
 
 function listHostsFromCidr(cidr) {
@@ -225,47 +308,28 @@ function fabricantFromOsString(osString) {
 }
 
 /**
- * Détection d'OS via nmap (signature TCP/IP), complémentaire à la détection
- * SNMP. Nécessite nmap installé sur la machine, et des droits administrateur
- * sous Windows pour la détection -O.
+ * Détection d'OS via nmap (signature TCP/IP), complémentaire à SNMP.
+ * Nécessite nmap installé, et des droits administrateur sous Windows.
  *
- * ───────────────────────────────────────────────────────────────────────
- * POURQUOI CES OPTIONS, ET POURQUOI PAS LES AUTRES
+ * nmap représente 93 % du temps d'un scan. Chaque option a été mesurée
+ * séparément sur des machines réelles ; seules celles qui accélèrent sans
+ * rien perdre sont retenues.
  *
- * nmap représente 93 % du temps d'un scan. Chaque option ci-dessous a été
- * mesurée SÉPARÉMENT sur des machines réelles du parc
- * (`tools/mesurer-nmap-options.js`), et seules celles qui accélèrent SANS
- * rien perdre ont été retenues.
+ *   -F              retenue : 15 % plus rapide, aucune détection perdue.
+ *                   `-O` déduit le système d'un port ouvert et d'un port
+ *                   fermé, que les 100 ports usuels fournissent déjà.
+ *   -T4, -n,        écartées : gain non mesurable (1 à 2 %), donc du
+ *   --max-retries   risque sans contrepartie.
  *
- *   -F              retenue. 15 % plus rapide sur les machines identifiées,
- *                   aucune détection perdue. `-O` déduit le système d'un
- *                   port ouvert ET d'un port fermé ; les 100 ports usuels
- *                   les fournissent, les 1 000 par défaut ne servaient qu'à
- *                   attendre. C'était pourtant l'option que je soupçonnais.
+ * `--host-timeout` est réglé très au-dessus du besoin observé (15,5 s au
+ * maximum mesuré). Une première tentative à 12 s perdait la détection sur
+ * trois machines qui en demandaient 14 : le réglage censé faire gagner du
+ * temps transformait des succès en échecs. À 25 s, il n'abrège que les
+ * machines qui n'auraient rien donné.
  *
- *   -T4             ÉCARTÉE. Aucun gain mesurable ici (−1 %). Le temps ne
- *                   part pas dans les délais d'attente mais dans le sondage
- *                   lui-même : accélérer le rythme ne change rien.
- *   -n              ÉCARTÉE. Idem, et une mesure aberrante à 12 s sur une
- *                   machine qui en demandait 2. Rien ne justifie de la
- *                   garder.
- *   --max-retries   ÉCARTÉE. Effet nul (−2 %), donc du risque sans
- *                   contrepartie.
- *
- * --host-timeout : le point le plus important
- *
- * Une première tentative fixait 12 s. Elle perdait la détection sur trois
- * machines qui en demandaient 14 : le réglage censé faire gagner du temps
- * transformait des succès en échecs. On coupe donc TRÈS au-dessus du
- * besoin observé (15,5 s au maximum mesuré). À 25 s, ce délai n'abrège que
- * les machines qui n'auraient de toute façon rien donné.
- *
- * Le délai Node reste au-dessus du délai nmap, et c'est délibéré : ainsi
- * c'est nmap qui s'arrête lui-même et RESTITUE ce qu'il a trouvé, au lieu
- * d'être tué par Node — auquel cas on paie l'attente et on repart les
- * mains vides. C'était le cas jusqu'ici pour toute machine dépassant 15 s,
- * et le parc en contient.
- * ───────────────────────────────────────────────────────────────────────
+ * Le délai Node reste au-dessus de celui de nmap, délibérément : nmap
+ * s'arrête alors lui-même et restitue ce qu'il a trouvé, au lieu d'être
+ * tué et de ne rien rendre après avoir fait attendre.
  */
 const NMAP_DELAI_HOTE_S = 25;
 
@@ -406,42 +470,23 @@ async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProg
     console.error("Registre OUI indisponible, fabricants non résolus par MAC:", err.message);
   }
 
-  // ─────────────────────────────────────────────────────────────────
-  // IDENTIFICATION PAR LOTS DE 5.
+  // Identification par lots de 5.
   //
-  // Chaque machine coûte : SNMP (1,5 s de délai d'attente si muette),
-  // nmap (jusqu'à 15 s, seulement si SNMP n'a pas conclu) et un scan de
-  // ports. En séquentiel, 25 machines actives sur un /23 demandaient
-  // plusieurs minutes — dont la quasi-totalité passée à ATTENDRE des
-  // délais d'expiration, processeur et réseau au repos.
+  // Chaque machine coûte : SNMP (1,5 s d'attente si muette), nmap
+  // (seulement si SNMP n'a pas conclu) et un scan de ports. En séquentiel,
+  // 25 machines actives demandaient plusieurs minutes, passées pour
+  // l'essentiel à attendre des délais d'expiration.
   //
-  // POURQUOI 5 ET PAS PLUS. Le facteur limitant n'est pas notre machine
-  // mais le réseau supervisé, qu'on ne doit surtout pas perturber : un
-  // outil de supervision qui dégrade ce qu'il observe est inutilisable.
-  // Chiffres réels à 5 en parallèle (détail dans RAPPORT-scan-parallele.md) :
-  //   • jusqu'à 5 processus nmap simultanés, soit ~500 à 1 500 paquets/s
-  //     au total, ~0,5 Mbit/s — 0,05 % d'un lien gigabit ;
-  //   • jusqu'à 95 connexions TCP ouvertes en pointe (19 ports × 5 hôtes),
-  //     mais brèves : 400 ms de délai d'attente, et réparties car les
-  //     hôtes d'un lot n'atteignent pas cette phase en même temps ;
-  //   • aucune charge sur les machines cibles : un SYN sur un port fermé
-  //     coûte un RST.
+  // Le facteur limitant n'est pas notre machine mais le réseau supervisé :
+  // un outil de supervision qui dégrade ce qu'il observe est inutilisable.
+  // À 5 en parallèle, on reste à ~0,5 Mbit/s et sous les seuils de
+  // déclenchement des sondes d'intrusion. Monter à 50 diviserait encore le
+  // temps mais changerait la nature du trafic — 50 balayages simultanés
+  // ressemblent à une reconnaissance hostile, que les pare-feux bloquent.
+  // Le scan rendrait alors moins de résultats en étant plus agressif.
   //
-  // Monter à 20 ou 50 diviserait encore le temps, mais changerait la
-  // NATURE du trafic : 50 balayages de ports simultanés ressemblent à une
-  // reconnaissance hostile. Les pare-feux et les sondes de détection
-  // d'intrusion les bloquent — le scan renverrait alors MOINS de
-  // résultats en étant plus agressif. 5 garde le trafic sous les seuils
-  // de déclenchement usuels tout en divisant la durée par 5.
-  //
-  // Réglable par SCAN_CONCURRENCE dans le .env, plafonné à 20 : sur un
-  // parc très large et un réseau qu'on maîtrise, monter peut se justifier.
-  // Le plafond empêche qu'une valeur saisie à la légère (500) transforme
-  // l'agent en outil d'attaque.
-  //
-  // Les lots sont séquentiels entre eux : jamais plus de 5 machines
-  // interrogées à la fois, quelle que soit la taille de la plage.
-  // ─────────────────────────────────────────────────────────────────
+  // Réglable par SCAN_CONCURRENCE, plafonné à 20 pour qu'une valeur saisie
+  // à la légère ne transforme pas l'agent en outil d'attaque.
   const CONCURRENCE_IDENTIFICATION = Number(process.env.SCAN_CONCURRENCE) > 0
     ? Math.min(20, Number(process.env.SCAN_CONCURRENCE))
     : 5;
@@ -496,7 +541,21 @@ async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProg
       const mac = arpMatch ? arpMatch.mac : null;
       const parOui = registreOui ? resoudreAvecRegistre(mac, registreOui) : null;
 
-      // ─────────────────────────────────────────────────────────────
+      // BANNIÈRE WEB — seulement quand SNMP n'a rien donné.
+      //
+      // Un équipement muet en SNMP sert souvent une interface
+      // d'administration sur le port 80, dont le titre porte la marque et
+      // le modèle exacts : « HP LaserJet MFP M428fdw », « DS216j ». C'est
+      // une déclaration de l'appareil, pas une déduction — d'où sa place
+      // au-dessus de nmap, qui ne donne qu'un système d'exploitation.
+      //
+      // Coût nul quand aucun port HTTP n'est ouvert (on n'ouvre alors
+      // aucune connexion), et le port est déjà connu par scanPorts.
+      let banniere = null;
+      if (!snmpData?.sysDescr) {
+        banniere = await lireBanniere(host.ip, portsOuverts);
+      }
+
       // PRIORITÉ DES SOURCES : SNMP > OUI > nmap.
       //
       // SNMP en premier : l'équipement se décrit lui-même, c'est le vrai
@@ -514,9 +573,19 @@ async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProg
       // Limite assumée : l'OUI identifie la CARTE réseau. Un serveur Dell
       // avec une carte Intel remontera « Intel ». D'où le champ
       // `fabricant_source`, qui permet à l'interface de nuancer.
-      // ─────────────────────────────────────────────────────────────
       let fabricant = null;
       let fabricantSource = null;
+
+      // La bannière web s'intercale entre l'OUI et nmap : elle nomme un
+      // MODÈLE (« HP LaserJet MFP M428 »), là où nmap ne donne qu'un
+      // système. Mais elle passe après l'OUI, car un titre de page peut
+      // avoir été personnalisé par l'exploitant, pas une adresse MAC.
+      const texteBanniere = [banniere?.titre, banniere?.serveur]
+        .filter(Boolean)
+        .join(" ");
+      const fabricantBanniere = texteBanniere
+        ? fabricantFromOsString(texteBanniere)
+        : null;
 
       if (fabricantSnmp && fabricantSnmp !== "inconnu") {
         fabricant = fabricantSnmp;
@@ -524,6 +593,9 @@ async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProg
       } else if (parOui && parOui.fabricant) {
         fabricant = parOui.fabricant;
         fabricantSource = "oui";
+      } else if (fabricantBanniere) {
+        fabricant = fabricantBanniere;
+        fabricantSource = "banniere_web";
       } else if (fabricantNmap) {
         fabricant = fabricantNmap;
         fabricantSource = "nmap";
@@ -533,6 +605,11 @@ async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProg
       // services/typeService.js pour l'ordre de confiance et sa
       // justification. Le service ne produit jamais autre chose qu'une
       // catégorie du vocabulaire fermé, ou « inconnu ».
+      //
+      // La bannière est passée dans SON PROPRE champ, et non en `sysDescr`
+      // de repli : mélangée au texte SNMP, elle hériterait de sa confiance
+      // et débloquerait les règles d'équipement réseau qui lui sont
+      // réservées.
       const classification = determinerType({
         sysDescr: snmpData ? snmpData.sysDescr : null,
         sysName: snmpData ? snmpData.sysName : null,
@@ -540,9 +617,9 @@ async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProg
         nmapDeviceType,
         ports: portsOuverts,
         fabricant,
+        banniereWeb: texteBanniere || null,
       });
 
-      // ─────────────────────────────────────────────────────────────
       // NOM DE LA MACHINE — même raisonnement que pour le fabricant.
       //
       // CE QUI N'ALLAIT PAS : à défaut de SNMP, le nom retombait sur
@@ -563,7 +640,6 @@ async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProg
       //
       // Voir services/nomService.js pour le détail. Les sources réseau
       // ne sont interrogées que si SNMP n'a rien donné.
-      // ─────────────────────────────────────────────────────────────
       const { nom, source: nomSource } = await resoudreNom(
         host.ip,
         snmpData ? snmpData.sysName : null
@@ -832,41 +908,21 @@ function formaterMacSnmp(valeur) {
 /**
  * Lit UNE COLONNE d'une table SNMP et renvoie { index: valeur }.
  *
- * ─────────────────────────────────────────────────────────────────────
- * POURQUOI CETTE FONCTION REMPLACE UN APPEL À `session.table()`
+ * Remplace un appel à `session.table()`, qui attend l'identifiant d'une
+ * TABLE : en lui passant une colonne, il ne trouvait rien à structurer et
+ * renvoyait un objet vide, sans erreur. Bande passante, processeur,
+ * mémoire et taux d'occupation des liens n'ont donc jamais fonctionné,
+ * sur aucun équipement. Le défaut était invisible depuis l'interface, un
+ * objet vide étant aussi ce que renvoie un équipement muet.
  *
- * La version précédente appelait `session.table(oid)` en lui passant des
- * identifiants de COLONNE — « octets reçus », « nom d'interface ». Or
- * cette méthode attend l'identifiant de la TABLE. Recevant une colonne,
- * elle ne trouvait rien à structurer et renvoyait un objet VIDE, sans
- * la moindre erreur.
+ * Vérifié sur une imprimante HP : parcours de la colonne via `table()`,
+ * 0 ligne ; parcours brut de la même colonne, 4 valeurs.
  *
- * Constaté sur une imprimante HP, mesures à l'appui :
+ * Cette version parcourt la colonne sans présumer de structure et indexe
+ * chaque valeur par ce qui suit l'identifiant de colonne.
  *
- *   parcours de la colonne « nom d'interface »  →  0 ligne
- *   parcours de la TABLE des interfaces         →  4 lignes
- *   parcours brut de la même colonne            →  4 valeurs
- *                                                  LOOPBACK, Ethernet,
- *                                                  wifi0, wifiUAP
- *
- * L'équipement répondait parfaitement. C'est notre lecture qui était
- * fausse — et elle l'était pour TOUS les équipements, sur n'importe quel
- * réseau. Bande passante, processeur, mémoire, taux d'occupation des
- * liens : rien de tout cela n'a jamais pu fonctionner.
- *
- * Le défaut était indétectable depuis l'interface, puisqu'un objet vide
- * est exactement ce que renvoie aussi un équipement muet.
- *
- * CE QUE FAIT LA NOUVELLE VERSION
- *
- * Elle parcourt la colonne demandée sans présumer d'aucune structure, et
- * indexe chaque valeur par ce qui suit l'identifiant de colonne. C'est le
- * fonctionnement le plus simple possible, donc le moins susceptible de
- * se tromper.
- *
- * `retries: 1` et non 0 : un parcours enchaîne de nombreux échanges, et
- * un seul paquet UDP perdu anéantissait auparavant la collecte entière.
- * ─────────────────────────────────────────────────────────────────────
+ * `retries: 1` et non 0 : un parcours enchaîne de nombreux échanges, et un
+ * seul paquet UDP perdu anéantissait la collecte entière.
  *
  * @returns {Promise<Object<string, *>>} valeurs indexées, {} si rien
  */
@@ -1008,38 +1064,25 @@ const MOTIFS_MEMOIRE_PROBABLE = /\bmemory\b|\bmémoire\b|\bram\b/i;
 /**
  * Taux d'occupation de la mémoire vive, en pourcentage, ou null.
  *
- * ─────────────────────────────────────────────────────────────────────
- * DEUX ERREURS CORRIGÉES, DÉCOUVERTES SUR MATÉRIEL RÉEL
+ * La première version ne retenait que « physical memory », « real memory »
+ * ou le mot « ram ». Un relevé du parc a montré qu'elle se trompait dans
+ * les deux sens :
  *
- * La première version ne retenait que « physical memory », « real
- * memory » ou le mot « ram ». Un relevé du parc a montré qu'elle se
- * trompait dans LES DEUX SENS :
+ *   Canon iR-ADV C3525   RAM(main), Flash Memory, HDD — tous à 0 utilisé.
+ *     → retenu 0 %. Un disque de 78 Go « vide à 0 octet » n'existe pas :
+ *       cet agent déclare les compteurs sans les remplir.
+ *   HP NPI4DDD0A         Random Access Memory, 42 % puis 95 %.
+ *     → retenu rien. Deux mesures valables jetées parce que le libellé
+ *       de HP n'était pas dans la liste — or 95 % d'occupation est
+ *       exactement ce qu'un outil de supervision doit signaler.
  *
- *   Canon iR-ADV C3525      RAM(main)              2097152 / 0 utilisé
- *                           RAM(sub)               1048576 / 0
- *                           Flash Memory            483210 / 0
- *                           HDD                   78142806 / 0
- *     → retenu : 0 %. Un disque de 78 Go « vide à 0 octet » n'existe
- *       pas : cet agent DÉCLARE les compteurs sans les remplir. Nous
- *       affichions ce zéro comme une mesure.
+ * D'où la logique actuelle : écarter d'abord ce qui n'est pas de la
+ * mémoire vive (disques, flash, swap, caches), puis choisir la ligne la
+ * plus explicite parmi celles qui restent.
  *
- *   HP NPI4DDD0A            Random Access Memory  268435456 / 113434152
- *   HP HP694AA2             Random Access Memory  356794368 / 339501056
- *     → retenu : rien. Deux mesures parfaitement valables — 42 % et
- *       95 % — jetées parce que le libellé normalisé de HP n'était pas
- *       dans la liste. Or 95 % d'occupation est exactement ce qu'un
- *       outil de supervision doit signaler.
- *
- * D'où la logique actuelle : on ÉCARTE d'abord ce qui n'est pas de la
- * mémoire vive (disques, flash, swap, caches, tampons), puis on choisit
- * la ligne la plus explicite parmi celles qui restent.
- *
- * ET ON REFUSE UN COMPTEUR À ZÉRO. Un équipement qui répond en SNMP fait
- * tourner un système : son occupation mémoire n'est jamais nulle. Un zéro
- * signifie « l'agent ne remplit pas ce champ », pas « rien n'est
- * utilisé ». C'est la règle constante du produit — une case vide vaut
- * mieux qu'un chiffre inventé.
- * ─────────────────────────────────────────────────────────────────────
+ * Un compteur à zéro est refusé : un équipement qui répond en SNMP fait
+ * tourner un système, son occupation mémoire n'est jamais nulle. Zéro
+ * signifie « champ non rempli », pas « rien n'est utilisé ».
  */
 function tauxMemoire(colonneDescr, colonneTaille, colonneUtilise) {
   let meilleur = null;
@@ -1147,6 +1190,7 @@ module.exports = {
   estAdresseReservee,
   scanRange, pingSweep, snmpProbe, snmpProbeV3, listHostsFromCidr,
   diagnosePanne, scanPorts, arpComplement, snmpMetrics, nmapFingerprint,
+  diagnostiquerPortee, sousReseauxLocaux, estDirectementAttache,
   wakeOnLan, fingerprint,
   // Attribution du trafic par port de switch — voir attributionPortService.
   tableCommutation, macDepuisOid,

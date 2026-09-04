@@ -2,7 +2,6 @@
  * routes/accesWeb.js
  * Contrôle des accès web par blocage DNS.
  *
- * ─────────────────────────────────────────────────────────────────────
  * AUCUNE ROUTE DE CE FICHIER NE PEUT RÉVÉLER LA NAVIGATION DE QUELQU'UN.
  *
  * Les statistiques renvoyées sont agrégées par (site, jour, catégorie) :
@@ -10,7 +9,6 @@
  * un filtrage appliqué à la sortie, c'est que la donnée n'existe pas en
  * base — voir le commentaire d'en-tête de la migration
  * 2026-08-19-controle-acces-web.sql.
- * ─────────────────────────────────────────────────────────────────────
  */
 
 const express = require("express");
@@ -75,9 +73,7 @@ async function chargerContenu(idPolitique) {
   return { categories, manuelles };
 }
 
-// ─────────────────────────────────────────────────────────────────────
 // LECTURE
-// ─────────────────────────────────────────────────────────────────────
 
 /**
  * GET /api/acces-web/categories
@@ -221,9 +217,7 @@ router.get("/acces-web/stats", async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────
 // ÉCRITURE — administrateurs uniquement
-// ─────────────────────────────────────────────────────────────────────
 
 /**
  * PUT /api/acces-web/politique
@@ -358,9 +352,7 @@ router.delete("/acces-web/domaine/:idRegle", requireRole("admin"), async (req, r
   res.json({ supprime: true });
 });
 
-// ─────────────────────────────────────────────────────────────────────
 // CÔTÉ AGENT
-// ─────────────────────────────────────────────────────────────────────
 
 /**
  * Construit la configuration complète d'un site. Utilisée par la route

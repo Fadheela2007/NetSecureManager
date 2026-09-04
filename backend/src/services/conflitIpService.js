@@ -2,40 +2,22 @@
  * conflitIpService.js
  * Détection des adresses IP en conflit.
  *
- * ─────────────────────────────────────────────────────────────────────
- * POURQUOI CE FICHIER EXISTE
+ * La table EQUIPEMENT interdit deux lignes avec la même adresse IP sur un
+ * site : un conflit ne se lit donc pas dans la colonne des adresses, mais
+ * dans celle des adresses matérielles. Deux IP différentes qui répondent
+ * avec la MÊME adresse MAC signalent une seule carte réseau répondant
+ * pour les deux.
  *
- * Le texte d'aide `conflit_ip` était écrit et affiché dans
- * services/suggestions.js, mais AUCUN code n'émettait jamais ce code de
- * cause. La plateforme annonçait donc une capacité qu'elle n'avait pas —
- * ce qui est pire que ne pas l'avoir : un utilisateur qui découvre une
- * fonction absente doute ensuite de toutes les autres.
+ * Ce signal produit beaucoup de faux positifs pris au pied de la lettre :
+ * au-delà d'une frontière de sous-réseau, le routeur répond pour tout ce
+ * qui est derrière lui, et sa MAC apparaît sur des dizaines d'adresses.
+ * D'où la règle centrale : une MAC vue sur beaucoup d'IP est une
+ * passerelle, vue sur deux ou trois elle est suspecte. Le seuil sépare le
+ * routage du conflit.
  *
- * COMMENT UN CONFLIT SE VOIT
- *
- * La table EQUIPEMENT interdit deux lignes avec la même adresse IP sur
- * un site. Un conflit ne se lit donc pas dans la colonne des adresses,
- * mais dans celle des adresses MATÉRIELLES : quand deux adresses IP
- * différentes répondent avec la MÊME adresse matérielle, une seule carte
- * réseau répond pour les deux.
- *
- * LE PIÈGE, ET LA RAISON PRINCIPALE DE CE MODULE
- *
- * Ce signal produit énormément de faux positifs si on le prend au pied
- * de la lettre. Lorsqu'on scanne au-delà d'une frontière de sous-réseau,
- * le ROUTEUR répond pour toutes les machines situées derrière lui : sa
- * propre adresse matérielle apparaît alors sur des dizaines d'adresses
- * IP. C'est du fonctionnement normal, pas un conflit.
- *
- * D'où la règle centrale : une adresse matérielle vue sur BEAUCOUP
- * d'adresses IP est une passerelle ; vue sur DEUX OU TROIS, c'est
- * suspect. Le seuil sépare le routage du conflit.
- *
- * Le service ne signale donc qu'un doute, jamais une certitude — la
- * décision finale demande de regarder les machines concernées.
- * ─────────────────────────────────────────────────────────────────────
+ * Le service ne signale qu'un doute : la décision demande de regarder les
+ * machines concernées.
  */
-
 const { normaliserMac, estMacTechnique } = require("./attributionPortService");
 
 /**

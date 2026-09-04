@@ -386,6 +386,67 @@ option {
 .scan-launcher .error { color: var(--color-crit); font-size: 0.875rem; margin: 0.75rem 0 0; }
 .scan-launcher .success { color: var(--color-ok); font-size: 0.875rem; margin: 0.75rem 0 0; }
 
+/* Le bouton « Scanner tout le site » est l'action principale : il précède
+   le formulaire de plage unique et s'en détache par une séparation. */
+.scan-launcher > button {
+  margin-bottom: 0.375rem;
+}
+
+.scan-launcher > form {
+  border-top: 1px solid var(--color-line);
+  padding-top: 1rem;
+  margin-top: 1rem;
+}
+
+/* Texte d'accompagnement : il expliquait l'action mais s'affichait à la
+   taille du corps de page, plus gros que le bouton qu'il commentait. */
+.aide {
+  font-size: 12px;
+  color: var(--color-mute);
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* Résultat d'un scan de site : une ligne par plage. La distinction entre
+   « vide » et « non examinée » est ce qui empêche de croire un inventaire
+   complet — elle doit donc se voir, pas se lire entre les lignes. */
+.resultat-scan-site {
+  margin-top: 1rem;
+}
+
+.detail-plages {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.detail-plages li {
+  font-size: 0.8125rem;
+  color: var(--color-mute);
+  background: var(--color-surface-2);
+  border-left: 2px solid var(--color-line);
+  border-radius: 0.25rem;
+  padding: 0.4rem 0.625rem;
+}
+
+.detail-plages li strong {
+  color: var(--color-ink);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-weight: 500;
+}
+
+.detail-plages li.echec {
+  border-left-color: var(--color-crit);
+  color: var(--color-crit);
+}
+
+.detail-plages li.echec strong {
+  color: var(--color-crit);
+}
+
 @media (max-width: 640px) {
   .scan-launcher form { flex-direction: column; align-items: stretch; }
   .scan-launcher button { width: 100%; }
@@ -415,4 +476,27 @@ option {
     background-size: 2rem 100%;
     background-attachment: local, local;
   }
+}
+
+/* ---------------------------------------------------------------------
+   Badges flottants de la page d'accueil (Accueil.jsx).
+   Amplitude volontairement faible (4-5px) : au-delà, ça distrait du
+   texte au lieu d'attirer l'œil vers les chiffres qu'ils portent.
+   Deux durées différentes pour que les deux badges ne se figent pas dans
+   le même mouvement, ce qui les ferait lire comme un seul bloc.
+   --------------------------------------------------------------------- */
+@keyframes flotter {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-5px); }
+}
+@keyframes flotter-lent {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(4px); }
+}
+
+.animate-flotter      { animation: flotter 3.2s ease-in-out infinite; }
+.animate-flotter-lent { animation: flotter-lent 4s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-flotter, .animate-flotter-lent { animation: none; }
 }

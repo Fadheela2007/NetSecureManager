@@ -1,34 +1,19 @@
 /**
  * NetworkMark — la marque de NetSecureManager.
  *
- * ─────────────────────────────────────────────────────────────────────
- * CE QUE LE SYMBOLE RACONTE
- *
  * Un nœud central relié à trois satellites, entouré d'un anneau dont un
- * quart est plein : c'est littéralement l'architecture du produit — un
- * serveur central qui surveille des équipements — et l'arc en cours de
- * parcours évoque le balayage périodique.
+ * quart est plein : l'architecture du produit, et l'arc évoque le
+ * balayage périodique. Le bouclier a été écarté — employé par tous les
+ * produits de sécurité, il rendait la marque indistinguable.
  *
- * Le choix s'est fait contre trois autres pistes. Le bouclier, immédiat
- * mais employé par tous les produits de sécurité, aurait rendu la marque
- * indistinguable. Le tracé de battement cardiaque appartient autant aux
- * applications de santé qu'à la métrologie.
- *
- * ─────────────────────────────────────────────────────────────────────
- * TROIS CONTRAINTES QUI ONT DICTÉ LE DESSIN
- *
- * 1. LISIBLE À 24 PIXELS. Un logo se voit surtout en favicon d'onglet et
- *    en icône d'application, pas en grand. D'où trois satellites et non
- *    six : au-delà, la couronne devient une bouillie de points.
- *
- * 2. MONOCHROME. Une seule couleur, celle de l'accent. Le logo doit
- *    fonctionner en noir sur une facture imprimée et en blanc sur un
- *    fond sombre. Un dégradé aurait interdit les deux.
- *
- * 3. TRAITS ÉPAIS ET ESPACÉS. Un trait fin disparaît au rendu réduit,
- *    et deux éléments trop proches fusionnent. Les rayons du dessin
- *    précédent, pointillés et fins, s'effaçaient complètement en favicon.
- * ─────────────────────────────────────────────────────────────────────
+ * Trois contraintes ont dicté le dessin :
+ *   1. lisible à 24 pixels, car un logo se voit surtout en favicon. D'où
+ *      trois satellites et non six, au-delà la couronne devient une
+ *      bouillie de points ;
+ *   2. monochrome, pour fonctionner en noir sur une facture imprimée
+ *      comme en blanc sur fond sombre ;
+ *   3. traits épais et espacés — les rayons fins du dessin précédent
+ *      s'effaçaient complètement en favicon.
  */
 export default function NetworkMark({ size = 40, animated = true, couleur }) {
   // `currentColor` par défaut : la marque hérite de la couleur du texte

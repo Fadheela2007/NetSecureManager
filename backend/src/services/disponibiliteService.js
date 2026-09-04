@@ -1,45 +1,27 @@
 /**
  * disponibiliteService.js
- * Calcul du taux de disponibilité par équipement sur une période donnée.
+ * Taux de disponibilité par équipement sur une période donnée.
  *
- * ─────────────────────────────────────────────────────────────────────
- * MÉTHODE RETENUE : les ALERTES font foi, les RELEVÉS mesurent la confiance.
+ * Le calcul additionne les durées des alertes `equipement_down` plutôt que
+ * de compter les relevés reçus par rapport au nombre attendu. Raison
+ * décisive : si le backend est resté arrêté deux jours, compter les
+ * relevés conclut que TOUT le parc était indisponible deux jours — on
+ * confond « je n'ai pas regardé » avec « c'était en panne ».
  *
- * Deux approches étaient possibles :
+ * Angles morts, tous rendus explicites dans la réponse :
+ *   • une panne plus courte que `seuil_echecs_avant_alerte` (3 min par
+ *     défaut) ne crée pas d'alerte : le taux est un majorant ;
+ *   • un équipement récent n'a pas d'historique sur toute la période, le
+ *     calcul est ramené à sa durée d'existence ;
+ *   • un backend arrêté ne se voit pas dans les alertes, d'où le contrôle
+ *     de couverture : on compte les heures où AU MOINS UN équipement a
+ *     produit un relevé, ce qui sépare « celui-ci était en panne » de
+ *     « le backend ne tournait pas ».
  *
- *   A. Compter les relevés enregistrés par rapport au nombre attendu.
- *   B. Additionner les durées des alertes `equipement_down`.
- *
- * J'ai retenu B pour le calcul, avec A comme indicateur de fiabilité.
- * Raison décisive : si le backend est resté arrêté deux jours, la méthode A
- * conclut que TOUS les équipements ont été indisponibles deux jours. C'est la
- * réponse la plus fausse possible — on confond « je n'ai pas regardé » avec
- * « c'était en panne ». La méthode B, elle, ne voit aucune alerte et ne
- * conclut rien.
- *
- * Mais B a ses propres angles morts, tous rendus explicites dans la réponse :
- *
- *   • Une panne plus courte que `seuil_echecs_avant_alerte` cycles (3 min par
- *     défaut) ne crée pas d'alerte : elle est invisible. Le taux est donc un
- *     majorant — la disponibilité réelle est au mieux celle affichée.
- *   • Un équipement découvert récemment n'a pas d'historique sur toute la
- *     période : on ramène le calcul à sa durée d'existence réelle.
- *   • Si le backend n'a pas tourné, B ne le sait pas. D'où le contrôle de
- *     couverture ci-dessous.
- *
- * CONTRÔLE DE COUVERTURE — c'est le rôle des relevés.
- * On compte les heures distinctes où AU MOINS UN équipement du parc a produit
- * un relevé. Peu importe lequel : ce qui est mesuré, c'est « le backend
- * tournait-il ». Cela sépare proprement « cet équipement était en panne »
- * (les autres ont des relevés) de « le backend était arrêté » (personne n'en a).
- * ─────────────────────────────────────────────────────────────────────
- *
- * ⚠ LIMITE ARCHITECTURALE À CONNAÎTRE — voir le rapport.
- * Le cycle de supervision pingue TOUS les équipements depuis le serveur
- * central, y compris ceux des sites distants. Si ces machines sont sur un
- * réseau privé inaccessible depuis le central, elles apparaissent en panne
- * permanente et leur taux de disponibilité est dénué de sens. Le champ
- * `avertissements` le signale quand le cas est détecté.
+ * Limite architecturale : le cycle pingue tous les équipements depuis le
+ * serveur central, y compris ceux des sites distants. Sur un réseau privé
+ * inaccessible depuis le central, ils apparaissent en panne permanente et
+ * leur taux perd son sens. Le champ `avertissements` le signale.
  */
 
 const db = require("../db");

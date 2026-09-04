@@ -2,39 +2,23 @@
  * limiteurConnexion.js
  * Freine les tentatives de connexion répétées.
  *
- * ─────────────────────────────────────────────────────────────────────
- * LE PROBLÈME
+ * `POST /api/auth/login` acceptait un nombre illimité de tentatives, sur
+ * le point d'entrée le plus exposé de la plateforme.
  *
- * `POST /api/auth/login` acceptait un nombre illimité de tentatives. Un
- * programme peut essayer des milliers de mots de passe par minute sur le
- * point d'entrée le plus exposé de la plateforme, sans que rien ne le
- * ralentisse ni ne laisse de trace exploitable.
+ * Deux compteurs, aux rôles distincts :
  *
- * DEUX COMPTEURS, ET POURQUOI PAS UN SEUL
+ *   • par ADRESSE — défense principale. Un attaquant opère depuis un
+ *     nombre limité de machines ; bloquer l'adresse arrête l'attaque.
+ *   • par COMPTE — volontairement plus permissif. Bloquer un compte après
+ *     cinq échecs permettrait à n'importe qui de verrouiller votre
+ *     administrateur en saisissant de faux mots de passe : la protection
+ *     deviendrait l'attaque. Ce compteur ralentit, il ne ferme jamais.
  *
- * Par ADRESSE — défense principale. Un attaquant qui essaie des mots de
- * passe le fait depuis un nombre limité de machines. Bloquer l'adresse
- * arrête l'attaque à la source.
- *
- * Par COMPTE — défense secondaire, volontairement plus PERMISSIVE, et
- * c'est le point important : bloquer un compte après cinq échecs
- * permettrait à n'importe qui de verrouiller votre administrateur à
- * volonté, simplement en saisissant de faux mots de passe. La protection
- * deviendrait l'attaque. Le compteur par compte ralentit donc — il ne
- * ferme jamais la porte.
- *
- * CE QUE CE MODULE NE FAIT PAS
- *
- * Il garde son état en mémoire. Un redémarrage du serveur remet les
- * compteurs à zéro, et deux serveurs derrière un répartiteur de charge
- * ne les partagent pas. C'est une limite assumée : à l'échelle visée —
- * un serveur, quelques dizaines d'utilisateurs — une dépendance externe
- * (Redis) coûterait plus qu'elle n'apporterait. Le jour où la plateforme
- * tourne sur plusieurs serveurs, c'est ce fichier qu'il faudra changer,
- * et lui seul.
- * ─────────────────────────────────────────────────────────────────────
+ * L'état est en mémoire : un redémarrage remet les compteurs à zéro, et
+ * deux serveurs ne les partagent pas. Limite assumée à l'échelle visée —
+ * le jour où la plateforme tourne sur plusieurs serveurs, c'est ce
+ * fichier qu'il faudra changer, et lui seul.
  */
-
 /** Fenêtre d'observation : au-delà, les échecs anciens sont oubliés. */
 const FENETRE_MS = 15 * 60 * 1000;
 
