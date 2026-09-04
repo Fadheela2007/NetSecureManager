@@ -399,10 +399,20 @@ CREATE TABLE IF NOT EXISTS CONFIGURATION (
 
 -- ---------------------------------------------------------------------
 -- PLAGE_SCAN — plages CIDR à scanner par site.
--- C'est ici que vivent les identifiants SNMPv3 (et non dans SITE).
--- Aucune requête du code ne lit cette table à ce jour : les CIDR sont
--- saisis à la main dans ScanLauncher et dans le .env de chaque agent,
--- et les identifiants SNMPv3 ne sont donc jamais utilisés.
+-- C'est ici que vivent les identifiants SNMPv3 (et non dans SITE), parce
+-- qu'ils sont propres à un sous-réseau et non à un site entier : un VLAN
+-- d'imprimantes et un VLAN de serveurs n'ont pas les mêmes.
+--
+-- Lue par routes/scan.js à deux endroits :
+--   • POST /scan/site      parcourt toutes les plages actives d'un site ;
+--   • resoudreParametresScan  retrouve la communauté SNMP d'un CIDR donné,
+--     de sorte qu'un scan lancé à la main hérite des paramètres déclarés.
+--
+-- Les clés SNMPv3 sont stockées en clair : elles doivent être renvoyées
+-- au moteur de scan pour ouvrir la session. Elles sont masquées dans les
+-- réponses de l'API pour les rôles non administrateurs (routes/plages.js),
+-- mais un accès à la base les expose — à traiter le jour où le chiffrement
+-- au repos deviendra une exigence client.
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS PLAGE_SCAN (
   id_plage          INT AUTO_INCREMENT PRIMARY KEY,

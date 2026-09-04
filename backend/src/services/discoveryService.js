@@ -18,6 +18,7 @@ const { chargerRegistre, resoudreAvecRegistre } = require("./ouiService");
 const { determinerType, typeDepuisTexte } = require("./typeService");
 const { resoudreNom } = require("./nomService");
 const { parLots } = require("./parLots");
+const { lireBanniere } = require("./banniereWebService");
 
 const OID_SYS_DESCR = "1.3.6.1.2.1.1.1.0";
 const OID_SYS_OBJECT_ID = "1.3.6.1.2.1.1.2.0";
@@ -540,6 +541,21 @@ async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProg
       const mac = arpMatch ? arpMatch.mac : null;
       const parOui = registreOui ? resoudreAvecRegistre(mac, registreOui) : null;
 
+      // BANNIÈRE WEB — seulement quand SNMP n'a rien donné.
+      //
+      // Un équipement muet en SNMP sert souvent une interface
+      // d'administration sur le port 80, dont le titre porte la marque et
+      // le modèle exacts : « HP LaserJet MFP M428fdw », « DS216j ». C'est
+      // une déclaration de l'appareil, pas une déduction — d'où sa place
+      // au-dessus de nmap, qui ne donne qu'un système d'exploitation.
+      //
+      // Coût nul quand aucun port HTTP n'est ouvert (on n'ouvre alors
+      // aucune connexion), et le port est déjà connu par scanPorts.
+      let banniere = null;
+      if (!snmpData?.sysDescr) {
+        banniere = await lireBanniere(host.ip, portsOuverts);
+      }
+
       // PRIORITÉ DES SOURCES : SNMP > OUI > nmap.
       //
       // SNMP en premier : l'équipement se décrit lui-même, c'est le vrai
@@ -560,12 +576,26 @@ async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProg
       let fabricant = null;
       let fabricantSource = null;
 
+      // La bannière web s'intercale entre l'OUI et nmap : elle nomme un
+      // MODÈLE (« HP LaserJet MFP M428 »), là où nmap ne donne qu'un
+      // système. Mais elle passe après l'OUI, car un titre de page peut
+      // avoir été personnalisé par l'exploitant, pas une adresse MAC.
+      const texteBanniere = [banniere?.titre, banniere?.serveur]
+        .filter(Boolean)
+        .join(" ");
+      const fabricantBanniere = texteBanniere
+        ? fabricantFromOsString(texteBanniere)
+        : null;
+
       if (fabricantSnmp && fabricantSnmp !== "inconnu") {
         fabricant = fabricantSnmp;
         fabricantSource = "snmp";
       } else if (parOui && parOui.fabricant) {
         fabricant = parOui.fabricant;
         fabricantSource = "oui";
+      } else if (fabricantBanniere) {
+        fabricant = fabricantBanniere;
+        fabricantSource = "banniere_web";
       } else if (fabricantNmap) {
         fabricant = fabricantNmap;
         fabricantSource = "nmap";
@@ -575,6 +605,11 @@ async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProg
       // services/typeService.js pour l'ordre de confiance et sa
       // justification. Le service ne produit jamais autre chose qu'une
       // catégorie du vocabulaire fermé, ou « inconnu ».
+      //
+      // La bannière est passée dans SON PROPRE champ, et non en `sysDescr`
+      // de repli : mélangée au texte SNMP, elle hériterait de sa confiance
+      // et débloquerait les règles d'équipement réseau qui lui sont
+      // réservées.
       const classification = determinerType({
         sysDescr: snmpData ? snmpData.sysDescr : null,
         sysName: snmpData ? snmpData.sysName : null,
@@ -582,6 +617,7 @@ async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProg
         nmapDeviceType,
         ports: portsOuverts,
         fabricant,
+        banniereWeb: texteBanniere || null,
       });
 
       // NOM DE LA MACHINE — même raisonnement que pour le fabricant.

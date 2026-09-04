@@ -42,7 +42,7 @@ export default function Login({ onLogin }) {
         <div className="login-mark">
           <NetworkMark size={24} />
         </div>
-        
+
         <h1 className="login-title">NetSecureManager</h1>
         <p className="login-subtitle">Supervision réseau multi-sites</p>
 
@@ -58,7 +58,15 @@ export default function Login({ onLogin }) {
           </label>
 
           <label className="login-field">
-            Mot de passe
+            <span className="login-field-ligne">
+              Mot de passe
+              {/* Pas un lien vers une réinitialisation qui n'existe pas :
+                  aucune réinitialisation en libre-service n'est câblée. Le
+                  vrai chemin est humain — un administrateur change le mot
+                  de passe depuis la page Utilisateurs — donc c'est ce qui
+                  est dit, en texte et non en lien cliquable. */}
+              <span className="login-aide-inline">contactez votre administrateur</span>
+            </span>
             <input
               type="password"
               value={password}
@@ -70,6 +78,7 @@ export default function Login({ onLogin }) {
           <button type="submit" className="login-submit" disabled={loading}>
             {loading ? "Connexion..." : "Se connecter"}
           </button>
+
           <p className="login-footnote">
             Accès réservé aux équipes autorisées à superviser leur réseau.
           </p>

@@ -346,6 +346,7 @@ function determinerType({
   nmapDeviceType = null,
   ports = null,
   fabricant = null,
+  banniereWeb = null,
 } = {}) {
   const texteSnmp = [sysDescr, sysName].filter(Boolean).join(" ");
 
@@ -354,6 +355,18 @@ function determinerType({
 
   const parPort = typeDepuisPorts(ports);
   if (parPort) return { type: parPort, source: "port" };
+
+  // Bannière web — le titre de la page d'administration de l'appareil.
+  //
+  // Provenance « banniere » et NON « snmp », délibérément : les règles
+  // d'équipement réseau (routeur, pare-feu, commutateur) sont réservées
+  // au texte SNMP, parce que ce dernier est déclaré par l'appareil
+  // lui-même. Un titre de page peut contenir « Router » sans que
+  // l'appareil en soit un — page de connexion à un portail, documentation
+  // servie par un poste. Lui donner la confiance du SNMP reproduirait le
+  // défaut des treize téléphones classés « routeur » par nmap.
+  const parBanniere = typeDepuisTexte(banniereWeb, "banniere");
+  if (parBanniere) return { type: parBanniere, source: "banniere_web" };
 
   const parNmapType = typeDepuisNmap(nmapDeviceType);
   if (parNmapType) return { type: parNmapType, source: "nmap_device" };
