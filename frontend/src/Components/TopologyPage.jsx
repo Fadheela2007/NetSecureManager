@@ -108,7 +108,19 @@ export default function TopologyPage({ idSite }) {
         <EtatVide
           titre="Aucun raccordement connu"
           ton="etape"
+          /* DIRE CE QU'ON SAIT, PAS SEULEMENT CE QU'ON IGNORE.
+
+             L'écran annonçait « aucun raccordement connu » sans rappeler
+             que le parc, lui, est parfaitement inventorié et supervisé.
+             Un utilisateur qui arrive là conclut que la plateforme ne
+             fonctionne pas, alors qu'il lui manque un équipement réseau —
+             ce qui n'est pas la même conversation. */
           explication={
+            (couverture
+              ? `Les ${couverture.equipements} équipement(s) de ce site sont bien ` +
+                "inventoriés et supervisés ; c'est leur emplacement physique qui " +
+                "reste inconnu. "
+              : "") +
             "Les liens entre machines se lisent dans la table d'adresses des " +
             "commutateurs, en SNMP. Aucun commutateur administrable n'a encore " +
             "été interrogé sur ce site."
