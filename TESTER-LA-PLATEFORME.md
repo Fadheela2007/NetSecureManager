@@ -1,6 +1,8 @@
 # Tester NetSecureManager
 
-Parcours complet de vérification. Comptez **40 minutes**.
+Parcours complet de vérification. Comptez **55 minutes** — 40 pour les
+parties 0 à 5, un quart d'heure pour la partie 6 (corrections de l'audit
+du 8 septembre).
 
 Chaque test indique ce que vous devez voir, et quoi faire sinon. Faites-les
 dans l'ordre : un test qui échoue rend les suivants inexploitables.
@@ -44,7 +46,7 @@ de colonne inconnue, et vous chercheriez la panne ailleurs.
 pas un échec — le texte dit quoi faire.
 
 Il contrôle la configuration, les 21 tables, les colonnes dont l'absence
-casse une fonction entière, la cohérence des données et les 190 tests
+casse une fonction entière, la cohérence des données et les 286 tests
 unitaires.
 
 **Ne passez à la suite que si cette commande est propre.** Tout ce qui suit
@@ -537,6 +539,248 @@ que sur le réseau du client.
 | T21 listes | | |
 | T22 thèmes | | |
 | **T23 serveur arrêté** | | |
+
+---
+
+# Partie 7 — Ce que l'audit du 8 septembre a changé
+
+Ces six tests portent sur des défauts trouvés pendant l'audit et corrigés
+depuis. Chacun est décrit avec **ce qu'il vérifie** et **pourquoi ça compte** :
+ce sont exactement les questions qu'un acheteur pose, et vous devez pouvoir y
+répondre sans hésiter.
+
+Cinq d'entre eux sont déjà couverts par `node tools\verifier-tout.js` (section 7)
+— celui-ci lit le code et exécute les fonctions concernées. Ce qui suit vérifie
+le **comportement réel**, ce qu'aucun programme ne peut faire à votre place.
+
+### T24. Un administrateur de site ne touche pas au blocage web d'un autre site
+
+**Ce que ça vérifie.** Le cloisonnement en ÉCRITURE. Jusqu'au 8 septembre, trois
+routes du contrôle d'accès web recevaient un identifiant de *politique* — jamais
+un identifiant de *site* — et ne vérifiaient rien. Un administrateur du site 2
+pouvait, en changeant un nombre dans l'URL, débloquer une catégorie chez un
+autre client.
+
+**Pourquoi ça compte.** C'est LA question d'un prestataire informatique qui gère
+plusieurs clients avec votre plateforme. S'il ne peut pas cloisonner, il ne
+l'achète pas.
+
+**Comment faire.** Il faut deux comptes : un administrateur **global**
+(`id_site` à NULL) et un administrateur **rattaché au site 2**. Créez le second
+depuis l'écran Utilisateurs avec le premier.
+
+Connectez-vous avec l'administrateur rattaché, puis dans les outils du
+navigateur (F12 → Console) :
+
+```js
+// Remplacez 1 par l'identifiant d'une politique appartenant à un AUTRE site.
+await fetch("http://localhost:5000/api/acces-web/politique/1/domaine", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Authorization: "Bearer " + localStorage.getItem("token"),
+  },
+  body: JSON.stringify({ domaine: "test-audit.example", action: "bloquer" }),
+}).then((r) => r.status);
+```
+
+**Attendu : `403` ou `404`.** Jamais `200`.
+
+Refaites l'essai avec l'administrateur **global** : là, `200` est correct — il a
+le droit.
+
+**Troisième volet.** Toujours avec l'administrateur rattaché, appelez
+`PUT /api/acces-web/politique` **sans champ `id_site`**. C'était le cas le plus
+piégeux : `id_site` vaut `null` par défaut, `null` désigne la politique appliquée
+à TOUS les sites, et l'ancien test ne se déclenchait jamais dessus.
+
+**Attendu : `403`**, avec un message disant que seul un administrateur global
+peut modifier la politique par défaut.
+
+### T25. Une plage trop large est refusée au lieu de faire tomber le serveur
+
+**Ce que ça vérifie.** Qu'une faute de frappe dans un masque ne tue pas la
+supervision. `10.0.0.0/8` au lieu de `10.0.0.0/24` — un caractère — demandait la
+construction d'une liste de 16,7 millions d'adresses. Le processus dépassait la
+mémoire et **toute la supervision s'arrêtait**, y compris pour les sites qui
+n'avaient rien demandé.
+
+**Pourquoi ça compte.** Ce n'est pas un scénario d'attaquant : c'est une erreur
+d'opérateur légitime, un jour de démonstration.
+
+**Comment faire.** Dans l'écran de scan, saisissez `10.0.0.0/8` et lancez.
+
+**Attendu :** un refus immédiat — moins d'une seconde — avec un message qui
+indique le nombre d'adresses, la limite, et quoi faire. Le serveur continue de
+tourner : vérifiez que la fenêtre du backend n'affiche aucune erreur et que
+l'interface répond toujours.
+
+**Puis relancez un scan normal sur votre `/24` habituel** : il doit fonctionner
+exactement comme avant. Le plafond ne doit rien avoir cassé.
+
+### T26. Le journal montre enfin qui touche aux comptes et aux jetons
+
+**Ce que ça vérifie.** Avant le 8 septembre, la création, la modification et la
+suppression de comptes, la régénération d'un jeton d'agent, la création d'un
+site et les changements de réglages **ne laissaient aucune trace**. L'écran
+« Journal d'activité » existait et ne montrait rien de tout cela.
+
+**Pourquoi ça compte.** C'est la première chose qu'un audit d'acheteur vérifie.
+Et en exploitation courante, c'est ce qui permet de répondre « qui a régénéré ce
+jeton » six mois plus tard, quand un site ne remonte plus et que personne ne se
+souvient d'avoir cliqué.
+
+**Comment faire.** Enchaînez ces cinq actions, puis ouvrez l'écran Journal :
+
+1. créez un compte de test (écran Utilisateurs) ;
+2. changez son rôle ;
+3. supprimez-le ;
+4. régénérez le jeton d'agent d'un site (écran Sites → Mise en service) ;
+5. modifiez un seuil dans Configuration.
+
+**Attendu :** cinq lignes, chacune avec votre nom, l'heure et une description
+qui dit **ce qui a changé** — « rôle → operateur », et non « compte modifié ».
+La ligne du jeton doit dire que l'ancien est révoqué, et ne doit **pas** contenir
+le jeton lui-même.
+
+### T27. Le total de bande passante est un vrai total
+
+**Ce que ça vérifie.** Le bloc en haut de l'écran Bande passante calculait une
+**moyenne** en l'appelant « total ». Sur vingt machines mesurées, il affichait
+environ un vingtième du débit réel du parc.
+
+**Pourquoi ça compte.** C'est la pire catégorie d'erreur sur un outil de mesure :
+le chiffre était petit, plausible, et rien ne signalait l'anomalie. Un client qui
+dimensionne sa connexion Internet sur cette valeur se trompe d'un ordre de
+grandeur — et c'est votre produit qu'il tiendra pour responsable.
+
+**Comment faire.** Ouvrez l'écran Bande passante. Comparez le chiffre
+« Descendant — total du parc » à la somme des colonnes du classement en dessous.
+
+**Attendu :** le total est **supérieur ou égal** à la plus grosse ligne du
+classement, et du même ordre de grandeur que la somme des lignes. S'il est plus
+PETIT que la première ligne du classement, le défaut est revenu.
+
+**Second volet — le pic.** L'étiquette doit dire « pic simultané ». Ce chiffre
+est le plus fort débit **au même instant**, calculé minute par minute : deux
+machines qui saturent le lien à des heures différentes ne l'ont jamais saturé
+ensemble. Un pic simultané supérieur à la somme des moyennes est normal ; un pic
+égal à la somme de tous les pics individuels serait le signe que le calcul est
+revenu en arrière.
+
+### T28. Les titres de colonnes tiennent au défilement
+
+**Ce que ça vérifie.** Le fond de l'en-tête collant était déclaré sur `<thead>`.
+Or, dans le mode de rendu utilisé par les tableaux, Firefox et les versions de
+Chrome antérieures à la 91 **ne peignent pas** ce fond. Combiné à l'en-tête
+collant, les lignes défilaient **derrière** les titres, qui devenaient illisibles.
+
+**Comment faire.** Écran Équipements, avec assez de machines pour que la liste
+défile. Faites défiler jusqu'en bas.
+
+**Attendu :** les six titres (Statut, Nom, Adresse IP, Fabricant, Type, Dernière
+découverte) restent visibles en haut, sur un fond opaque, sans qu'aucune ligne
+n'apparaisse au travers.
+
+**À refaire dans Firefox si vous l'avez** — c'est le navigateur où le défaut se
+voyait, et celui qu'un client peut très bien utiliser.
+
+⚠ **Avant ce test, recompilez** : `cd frontend` puis `npm run build`. Si vous
+testez avec `npm run preview`, vous regardez la dernière version compilée — qui
+peut dater d'avant les corrections. Rechargez ensuite avec **Ctrl + Maj + R**
+pour vider le cache.
+
+### T29. Le scan a gagné en vitesse
+
+**Ce que ça vérifie.** nmap représente environ 93 % de la durée d'un scan, et le
+réglage qui décide de tout est le nombre de machines analysées **en même temps**.
+Il valait 5, il vaut 10.
+
+**Comment faire.** Chronométrez un scan complet de votre `/24` habituel, sur un
+parc où les machines n'ont jamais été identifiées (ou juste après une
+réinitialisation des équipements).
+
+**Attendu :** environ deux fois plus rapide qu'avant — de l'ordre d'une minute
+quarante pour 44 machines actives, contre trois minutes.
+
+**Si vous voulez aller plus vite :** ajoutez `SCAN_CONCURRENCE=16` dans
+`backend/.env` et redémarrez. À réserver aux réseaux sans sonde d'intrusion, ou
+aux scans de nuit — 16 sondes simultanées restent modestes, mais c'est un choix
+qui appartient à l'exploitant.
+
+**Ce qui n'est PAS corrigé, et qu'il faut savoir avant de conclure.** Un
+**rescan** peut rester aussi lent que le premier. Le code évite normalement nmap
+sur une machine déjà identifiée, mais seulement si son adresse MAC est connue —
+or le serveur ne connaît les MAC que du réseau auquel il est **directement
+raccordé**. Sur un VLAN routé, aucune MAC n'est vue et chaque scan repaie nmap
+en entier. Si votre rescan est aussi long que le premier scan, c'est cela, pas
+une régression.
+
+---
+
+### T30. L'interface bouge toute seule
+
+**Ce que ça vérifie.** Un outil de supervision devant lequel on appuie sur F5
+pour faire apparaître ce qu'on vient de provoquer se disqualifie en démonstration.
+
+Deux mécanismes se complètent : les **événements** (le serveur émet `cycle`,
+`scan`, `equipement`, `alerte` ; cinq écrans les écoutent) rafraîchissent dans la
+seconde, et une **scrutation de secours** toutes les 60 secondes garantit un
+plancher si le temps réel est désactivé. La scrutation s'arrête quand l'onglet
+est caché — un poste de supervision reste ouvert toute la journée — et rafraîchit
+immédiatement au retour sur l'onglet.
+
+**⚠ À FAIRE AVANT CE TEST.** Recompilez :
+
+```powershell
+cd C:\Users\LENOVO\Documents\NetSecureManager\frontend
+npm run build
+```
+
+Le temps réel a été ajouté le 8 septembre. Une version compilée antérieure ne
+contient tout simplement pas `socket.io-client` : l'interface ne peut pas bouger,
+quel que soit le réglage serveur. C'est vérifiable — cherchez `socket.io` dans
+`dist/assets/*.js`, il doit s'y trouver.
+
+**Comment faire.** Ouvrez la page Alertes et laissez-la. Dans une autre fenêtre,
+lancez un scan, ou attendez la fin d'un cycle de supervision.
+
+**Attendu :** la page se met à jour **sans que vous la rechargiez**. Au démarrage
+du backend, le journal doit dire « Temps réel activé pour l'origine … » ; s'il dit
+« Temps réel désactivé », `WEBSOCKET_ORIGINE` manque dans `.env` — la scrutation
+prend alors le relais et l'écran bouge quand même, avec une minute de retard.
+
+### T31. Le débit du parc dans le temps
+
+**Ce que ça vérifie.** Les trois tuiles de total répondent « combien », la courbe
+répond « quand ». Une moyenne sur 24 h noie la demi-heure de sauvegarde qui met
+le lien à genoux tous les soirs — et c'est celle-là qu'un exploitant cherche.
+
+**Comment faire.** Écran Bande passante, bloc « Débit du parc dans le temps ».
+
+**Attendu :** une courbe entrant/sortant sur la période choisie, qui se complète
+toute seule à chaque cycle. Changez de période (1 h, 24 h, 7 j) : la granularité
+s'adapte, environ 200 points quelle que soit la durée.
+
+**Ce qui n'est PAS un défaut :** le message « un seul point de mesure pour
+l'instant ». Le débit se calcule par **différence entre deux relevés SNMP** : il
+faut donc deux cycles avant le premier chiffre. Avec un intervalle à 5 minutes,
+comptez 10 minutes. Pour tester plus vite, passez `intervalle_scan_minutes` à 1
+dans l'écran Configuration.
+
+## Grille pour la Partie 7
+
+| Test | OK / KO | Ce que vous avez observé |
+|---|---|---|
+| T24 cloisonnement blocage web | | |
+| T25 plage trop large refusée | | |
+| T26 journal des comptes et jetons | | |
+| T27 total de bande passante | | |
+| T28 titres de colonnes au défilement | | |
+| T29 vitesse du scan | | |
+| T30 interface dynamique | | |
+| T31 courbe du débit global | | |
+
 
 Envoyez-moi la grille remplie, même partiellement. Les échecs
 m'intéressent plus que les réussites — et une case « pas compris » est

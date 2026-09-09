@@ -1,198 +1,377 @@
-# Démonstration — 20 minutes, client non technique
+# Démonstration — déroulé complet, 20 minutes
 
 Document de travail. À garder hors du dépôt public (voir la fin).
 
+Pour chaque partie : **ce que ça fait**, **comment ça se passe**, **ce que
+vous dites**, et **ce qui peut mal tourner**.
+
+| | Partie | Durée |
+|---|---|---|
+| 0 | Avant d'ouvrir quoi que ce soit | 2 min |
+| 1 | Il trouve tout seul | 4 min |
+| 2 | Il sait ce que c'est | 3 min |
+| 3 | Il prévient avant vos employés | 4 min |
+| 4 | Vous décidez ce qui est accessible | 4 min |
+| 5 | Plusieurs agences *(à sauter si un seul site)* | 2 min |
+| 6 | Fermez avec ses propres mots | 2 min |
+
 ---
 
-## La règle qui commande tout
+## Deux publics, deux cadrages
 
-Votre client ne veut pas voir un logiciel. Il veut savoir **ce qu'il ne sait pas
-aujourd'hui**, et combien ça lui coûte.
+Le déroulé est le même. **Le cadrage change.**
 
-Trois mots à ne jamais prononcer : *SNMP*, *CIDR*, *scan réseau*.
-Trois mots à dire à la place : **« le parc »**, **« la plage d'adresses »**,
-**« l'inventaire »**.
+Devant un **dirigeant**, vous parlez de ce qu'il ignore et de ce que ça
+lui coûte. Devant un **responsable informatique**, la même phrase sonne
+comme une accusation : *« vous ne maîtrisez pas votre réseau »*. Il
+défendra son territoire et trouvera dix raisons techniques de dire non.
 
-Et une règle de survie : **ne montrez jamais un écran que vous n'avez pas ouvert
-la veille.** Une démonstration qui plante ne se rattrape pas.
+Retournez-la. **L'outil travaille pour lui, pas contre lui** : il apprend
+les pannes avant que la direction ne l'appelle, il a un inventaire à jour
+sans le tenir à la main, et des chiffres à montrer quand il demande un
+budget.
+
+Vocabulaire : avec un dirigeant, jamais *SNMP*, *CIDR*, *scan*. Avec un
+technicien, parlez normalement — traduire vous ferait passer pour
+quelqu'un qui récite.
 
 ---
 
-## Avant qu'il arrive — 15 minutes de préparation
+## Avant qu'ils arrivent
 
 À faire le matin même, pas la veille :
 
-1. Backend démarré, agent lancé, un **scan complet déjà passé** (le parc doit
-   être plein quand vous ouvrez l'écran).
-2. Un onglet de navigateur, **un seul**. Pas de terminal visible, pas de code,
-   pas de VS Code dans la barre des tâches.
-3. La politique de blocage **active**, avec `neverssl.com` en règle manuelle.
-4. Un appareil que vous pouvez **débrancher** — une imprimante, une caméra, un
-   petit switch. C'est votre meilleur moment de démonstration.
-5. Vérifiez que vous êtes connectée en **administrateur**.
+1. **Redémarrez tout depuis zéro** : backend, base, agent si vous montrez
+   le blocage web.
+2. **Vérifiez que la supervision tourne.** Au démarrage du backend, aucun
+   avertissement « supervision centrale à l'arrêt » ne doit apparaître.
+   C'est arrivé jeudi : les 135 équipements n'étaient surveillés par
+   personne, et rien ne le disait à l'écran.
+3. **Un scan complet déjà passé**, pour que le parc soit rempli à
+   l'ouverture.
+4. **Un onglet de navigateur, un seul.** Pas de terminal, pas de VS Code
+   dans la barre des tâches.
+5. **Un appareil que vous pouvez débrancher** — imprimante, caméra, petit
+   switch. C'est votre meilleur moment.
+6. Connectée en **administrateur**.
 
-Si le réseau du client est instable ou inconnu, **faites la démonstration sur
-votre propre réseau** et dites-le : « je vous montre sur mon parc, on installera
-chez vous ensuite ». Personne ne s'en formalise. Une démonstration qui échoue
-parce que leur wifi est capricieux, si.
+Si leur réseau est inconnu ou instable, **faites la démonstration sur le
+vôtre** et dites-le : *« je vous montre sur mon parc, on installera chez
+vous ensuite »*. Personne ne s'en formalise. Une démonstration qui échoue
+à cause de leur wifi, si.
 
 ---
 
-## 0 — Ne commencez pas par le produit (2 min)
+# Partie 0 — Avant d'ouvrir quoi que ce soit
 
-N'ouvrez rien. Posez trois questions et écoutez.
+**2 minutes. Aucun écran.**
 
-> « Aujourd'hui, si je vous demande combien d'appareils sont branchés sur votre
-> réseau — ordinateurs, imprimantes, caméras, téléphones — vous auriez le
+### Ce que ça fait
+
+Installe le problème dans leur tête **avant** la solution. Sans elle, tout
+ce qui suit est une liste de fonctions. Avec elle, chaque écran répond à
+une question qu'ils se sont posée eux-mêmes.
+
+Vous y récoltez aussi un chiffre qu'ils ont donné — et un chiffre qu'on a
+donné soi-même, on ne le conteste pas.
+
+### Comment ça se passe
+
+Écran fermé. Un papier devant vous. Vous posez trois questions et vous
+**écoutez** — la tentation est de répondre à leur place.
+
+**Devant un dirigeant :**
+
+> « Si je vous demande combien d'appareils sont branchés sur votre réseau
+> — ordinateurs, imprimantes, caméras, téléphones — vous auriez le
 > chiffre ? »
+>
+> « Quand une imprimante ou une caméra tombe en panne, vous l'apprenez
+> comment ? Quelqu'un vient vous le dire ? »
+>
+> « Et si un appareil qui n'est pas à vous se branchait sur votre réseau,
+> vous le verriez ? »
 
-> « Quand une imprimante ou une caméra tombe en panne, vous l'apprenez comment ?
-> C'est quelqu'un qui vient vous le dire ? »
+**Devant un responsable informatique** — même diagnostic, autre angle :
 
-> « Et si un appareil qui n'est pas à vous se branchait sur votre réseau, vous
-> le verriez ? »
+> « Combien de temps vous prend la mise à jour de votre inventaire ? »
+>
+> « Vous apprenez les pannes par vos utilisateurs ou par un outil ? »
+>
+> « Si votre direction vous demandait demain la liste exacte de ce qui
+> tourne sur le réseau, vous mettriez combien de temps ? »
 
-Presque personne ne sait répondre. **C'est votre démonstration.** Tout ce qui
-suit répond à ces trois questions, dans l'ordre.
+S'ils donnent un chiffre, **notez-le sur le papier devant eux.** Le geste
+le rend officiel.
 
-Notez leurs réponses sur un papier, devant eux. Vous vous en resservirez à la
-fin.
+### Ce qui peut mal tourner
+
+Ils répondent « je sais très bien ce qu'il y a sur mon réseau ». Ne
+contredisez pas. Répondez : *« alors on va vérifier ensemble, ça prend une
+minute »* — et enchaînez sur la partie 1. Le scan tranchera.
 
 ---
 
-## 1 — « Il trouve tout seul » (4 min)
+# Partie 1 — Il trouve tout seul
 
-**Écran :** Sites → bouton *Scanner tout le site*.
+**4 minutes.**
 
-Ne préparez rien. Lancez devant lui. Pendant que ça tourne :
+### Ce que ça fait
 
-> « Je ne lui ai rien dit. Aucune liste, aucune adresse, aucun mot de passe
-> d'équipement. Il est en train de regarder le réseau et de trouver ce qui est
-> branché dessus. »
+Démontre la découverte automatique. Trois preuves d'un coup : ça marche
+sans configuration, c'est rapide, et le parc réel est plus grand que ce
+qu'on croit.
 
-Quand ça finit — **83 équipements, 72 secondes** sur votre parc :
+### Comment ça se passe
 
-> « 508 adresses possibles, examinées en une minute et douze secondes.
+**Écran : Sites → « Scanner tout le site ».** Ne préparez rien, lancez
+devant eux. Ça tourne plus d'une minute — il faut parler pendant.
+
+> « Je ne lui ai rien dit. Aucune liste, aucune adresse, aucun identifiant
+> d'équipement. Il regarde le réseau et il trouve ce qui est branché
+> dessus. »
+
+L'avancement défile machine par machine. **Le délai est un atout** : il
+rend visible qu'un vrai travail se fait. Commentez-le, ne vous en excusez
+pas.
+
+À la fin :
+
+> « 508 adresses possibles, examinées en soixante-douze secondes.
 > 83 appareils trouvés. »
 
-Puis la phrase qui vend :
+Puis, s'ils ont donné un chiffre en partie 0 :
 
-> « Vous m'avez dit tout à l'heure que vous pensiez en avoir une trentaine. »
+> « Vous m'avez dit tout à l'heure que vous pensiez en avoir une
+> trentaine. »
 
-*(Ne dites cela que s'il a effectivement donné un chiffre plus bas. Sinon :
-« la plupart des gens à qui je montre ça sous-estiment de moitié. » — c'est vrai,
-c'est arrivé sur votre propre réseau : 35 machines visibles au lieu de 101.)*
+Sinon, le fait vécu :
 
-**Le geste à ne pas rater :** si une plage n'a rien donné, montrez la ligne
-*hors de portée* :
+> « Sur mon propre réseau, je croyais avoir 35 machines. Il y en avait
+> 101. La moitié ne rentrait pas dans la plage que j'avais déclarée. »
 
-> « Et là, il ne me dit pas « zéro appareil ». Il me dit qu'il n'a pas pu
-> regarder ce réseau-là. C'est la différence entre un outil qui vous rassure et
-> un outil qui vous informe. »
+### Le geste qui vous distingue
 
----
+Si une plage rend zéro équipement :
 
-## 2 — « Il sait ce que c'est » (3 min)
+> « Là, il ne me dit pas "zéro appareil". Il me dit qu'il n'a pas pu
+> regarder ce réseau-là, et pourquoi. C'est la différence entre un outil
+> qui rassure et un outil qui informe. »
 
-**Écran :** Équipements → cliquez sur une machine bien identifiée.
+### Ce qui peut mal tourner
 
-> « Pour chacun, il a trouvé le nom, le fabricant, et de quel type d'appareil il
-> s'agit : un poste, une imprimante, une caméra. Sans que personne ne l'ait
-> saisi. »
-
-**Puis, volontairement, ouvrez-en un marqué « inconnu ».** C'est contre-intuitif
-et c'est votre meilleur argument :
-
-> « Celui-ci, il ne sait pas. Et il le dit. Il aurait pu deviner — beaucoup
-> d'outils le font — mais un inventaire faux est pire qu'un inventaire
-> incomplet. Quand cette case est remplie, vous pouvez vous y fier. »
-
-Un client non technique retient ça. C'est la phrase qui vous distingue.
+Le scan plus long que prévu sur un réseau inconnu. Phrase prête :
+*« sur votre réseau je découvre, comptez une à deux minutes »*.
 
 ---
 
-## 3 — « Il prévient avant vos employés » (4 min)
+# Partie 2 — Il sait ce que c'est
 
-**C'est le moment le plus fort de la démonstration. Ne le ratez pas.**
+**3 minutes.**
 
-Débranchez l'appareil que vous avez préparé. Devant lui, physiquement.
+### Ce que ça fait
 
-> « Je viens de débrancher l'imprimante. Personne ne l'a signalé. Personne ne
-> s'en est rendu compte. Regardons. »
+La partie 1 prouvait qu'il **trouve**. Celle-ci prouve qu'il
+**comprend** — nom, fabricant, type, sans saisie. C'est ce qui sépare un
+inventaire utilisable d'une liste d'adresses IP.
 
-Parlez pendant l'attente — le cycle prend quelques minutes. C'est le bon moment
-pour la question du coût :
+Et c'est là que vous placez l'argument qui vous distingue, en montrant ce
+que le produit **ne sait pas**.
 
-> « Combien de temps, chez vous, entre le moment où quelque chose tombe et le
-> moment où quelqu'un vous le dit ? Une heure ? Une matinée ? »
+### Comment ça se passe
 
-**Écran :** Alertes → l'alerte apparaît.
+**Écran : Équipements → une machine bien identifiée** (imprimante, switch).
 
-> « Il ne vous envoie pas dix messages pour la même panne. Un seul, et il compte
-> les fois où le problème revient. Vous pouvez dire « je sais, je m'en occupe »,
-> et il se tait sans oublier. »
+> « Pour chacun : le nom, le fabricant, le type d'appareil. Sans saisie. »
+
+Ne détaillez les sources que si on vous le demande. Réponse alors :
+
+> « Par ordre de confiance. D'abord ce que l'équipement déclare lui-même
+> en SNMP. Sinon les trois premiers octets de son adresse matérielle, qui
+> identifient le constructeur de la carte réseau. Sinon la page
+> d'administration qu'il sert lui-même. Et en dernier recours seulement,
+> l'empreinte de sa pile réseau. »
+
+**Puis ouvrez volontairement un « inconnu » :**
+
+> « Celui-ci, il ne sait pas. Et il le dit.
+>
+> Il aurait pu deviner — beaucoup d'outils le font, ils remplissent avec
+> la supposition la plus probable. On a fait le choix inverse. Un
+> inventaire faux est plus dangereux qu'un inventaire incomplet, parce
+> qu'on s'y fie.
+>
+> Quand cette case est remplie, vous pouvez vous appuyer dessus. »
+
+Enchaînez immédiatement, sinon vous laissez une impression de manque :
+
+> « Et ce qu'il ne sait pas, vous, vous le savez. »
+
+Montrez **Nommer**, saisissez un nom devant eux, validez. Trente secondes.
+
+### Ce qui peut mal tourner
+
+**Aucun « inconnu »** : n'en fabriquez pas. Dites *« ici tout est
+identifié ; sur un parc plus large il reste toujours des appareils muets,
+et dans ce cas la case reste vide plutôt que remplie au hasard »*.
+
+**Beaucoup trop d'inconnus** : ne fuyez pas l'écran, proposez le nommage.
+
+---
+
+# Partie 3 — Il prévient avant vos employés
+
+**4 minutes. C'est le moment le plus fort — ne le ratez pas.**
+
+### Ce que ça fait
+
+Démontre la vraie valeur : la panne connue **avant** la plainte. Et ça ne
+se joue pas à l'écran, ça se joue par un geste physique.
+
+### Comment ça se passe
+
+**Débranchez l'appareil préparé, devant eux.**
+
+> « Je viens de débrancher l'imprimante. Personne ne l'a signalé, personne
+> ne s'en est rendu compte. Regardons. »
+
+L'alerte met environ trois minutes — l'équipement doit rater trois
+passages consécutifs, pour qu'un simple paquet perdu ne réveille personne
+à trois heures du matin.
+
+**Parlez pendant l'attente.** C'est le bon moment pour la question du
+coût :
+
+> « Combien de temps, chez vous, entre le moment où quelque chose tombe et
+> le moment où quelqu'un vous le dit ? Une heure ? Une matinée ? »
+
+Puis faites-leur calculer : nombre de personnes bloquées × durée × coût
+horaire. Ils produisent eux-mêmes le chiffre qui justifie votre prix.
+
+**Écran : Alertes → l'alerte apparaît.**
+
+> « Il ne vous envoie pas dix messages pour la même panne. Un seul, et il
+> compte les fois où le problème revient. Vous pouvez dire "je sais, je
+> m'en occupe", et il se tait sans oublier. »
 
 Rebranchez, montrez que ça se referme.
 
-> « Et l'historique reste. Dans six mois, vous saurez quel appareil vous a lâchée
-> le plus souvent. C'est ce qui décide un remplacement. »
+> « Et l'historique reste. Dans six mois, vous saurez quel appareil vous a
+> lâché le plus souvent. C'est ce qui décide un remplacement. »
+
+### Ce qui peut mal tourner
+
+**L'alerte ne monte pas.** Cause la plus probable : la supervision est à
+l'arrêt. Vérifiez-le avant, c'est au point 2 de la préparation.
+
+**L'attente est trop longue et le silence s'installe.** Ayez la question
+du coût prête ; elle remplit exactement ce temps.
 
 ---
 
-## 4 — « Vous décidez ce qui est accessible » (4 min)
+# Partie 4 — Vous décidez ce qui est accessible
 
-**Écran :** Contrôle d'accès web.
+**4 minutes.**
 
-Montrez les **catégories**, pas les listes.
+### Ce que ça fait
 
-> « Vous cochez ce que vous ne voulez pas sur votre réseau. Là, ça représente
-> près de 79 000 sites. Vous n'avez aucune liste à écrire ni à tenir à jour. »
+Démontre le contrôle d'accès web. Attention : deux besoins différents, que
+le client confond.
 
-**Ne faites jamais défiler les noms de domaines à l'écran.** Montrez le
-compteur, pas le contenu.
+**Bloquer ce qui est illégal ou dangereux** — personne ne discute.
+**Bloquer ce qui fait perdre du temps** — c'est une décision de
+management. Vous fournissez l'outil, le client choisit la politique.
+
+### Comment ça se passe
+
+**Écran : Contrôle d'accès web.** Montrez les **catégories**, jamais les
+listes.
+
+> « Vous cochez ce que vous ne voulez pas sur votre réseau. Là, ça
+> représente près de 79 000 sites. Vous n'avez aucune liste à écrire ni à
+> tenir à jour. »
+
+**Ne faites jamais défiler les noms de domaines à l'écran.** Compteur, pas
+contenu.
 
 Puis le champ du message :
 
-> « Et quand quelqu'un tombe dessus, il ne voit pas une erreur. Il voit ce que
-> vous écrivez ici. »
+> « Et quand quelqu'un tombe dessus, il ne voit pas une erreur. Il voit ce
+> que vous écrivez ici. »
 
-**Écran :** un navigateur, `http://neverssl.com` → la page « Accès bloqué ».
+**Écran : un navigateur → `http://neverssl.com`** → la page « Accès
+bloqué ».
 
-> « Voilà ce que voit votre employé. Pas « la connexion a échoué » — votre
+> « Voilà ce que voit votre employé. Pas "la connexion a échoué" — votre
 > message. Ça vous économise les appels au support. »
 
-**Si le client demande « et sur les autres sites ? »** — répondez franchement :
+### Ce qui peut mal tourner
 
-> « Sur les sites sécurisés, la majorité aujourd'hui, le navigateur affiche sa
-> propre erreur avant de nous laisser parler. Le site est bloqué, mais le message
-> ne s'affiche pas. Pour aller plus loin il faut un équipement en coupure, ce
-> qui est un autre budget. »
+**« Et sur les autres sites ? »** — répondez franchement :
 
-Cette honnêteté vaut plus que la fonction elle-même. Un client qui vous prend en
-défaut plus tard ne signe pas.
+> « Sur les sites sécurisés, la majorité aujourd'hui, le navigateur
+> affiche sa propre erreur avant de nous laisser parler. Le site est
+> bloqué, mais le message ne s'affiche pas. Pour aller plus loin il faut
+> un équipement en coupure, ce qui est un autre budget. »
+
+**« Vous voyez quels sites mes employés visitent ? »** — et c'est un
+argument, pas un aveu :
+
+> « Non, et c'est délibéré. Le résolveur n'enregistre aucune requête. La
+> plateforme vous dit qui consomme de la bande passante, pas ce qu'il
+> regarde. Si vous cherchez à surveiller la navigation nominative de votre
+> personnel, ce n'est pas ce produit. »
 
 ---
 
-## 5 — « Plusieurs agences » (2 min)
+# Partie 5 — Plusieurs agences
 
-À ne faire **que** si le client a plusieurs sites. Sinon, sautez.
+**2 minutes. À sauter si le client n'a qu'un site.**
 
-> « Chaque agence a un petit boîtier qui surveille son réseau et remonte ici.
-> Et une personne rattachée à une agence ne voit que la sienne — pas par
+### Ce que ça fait
+
+Démontre le multi-sites et surtout le **cloisonnement**, qui décide si une
+entreprise multi-agences signe.
+
+### Comment ça se passe
+
+> « Chaque agence a un petit service qui surveille son réseau et remonte
+> ici. On ne peut pas scanner un réseau privé distant depuis l'extérieur —
+> il faut un point d'entrée sur place. Et c'est lui qui appelle le
+> serveur, jamais l'inverse : aucun port à ouvrir en entrée chez vous. »
+>
+> « Une personne rattachée à une agence ne voit que la sienne. Pas par
 > politesse d'affichage : le serveur refuse de lui donner le reste. »
 
+Devant un technicien, ajoutez :
+
+> « Un accès direct par identifiant à un équipement d'un autre site
+> renvoie 404, pas 403 — on ne confirme même pas que la ressource
+> existe. »
+
 ---
 
-## 6 — Fermez avec ses propres mots (2 min)
+# Partie 6 — Fermez avec leurs propres mots
+
+**2 minutes.**
+
+### Ce que ça fait
+
+Boucle la démonstration sur la partie 0. Ce ne sont plus vos arguments,
+ce sont leurs réponses.
+
+### Comment ça se passe
 
 Reprenez le papier du début.
 
-> « Vous m'avez dit que vous ne saviez pas combien d'appareils vous aviez : il y
-> en a 83. Que vous l'appreniez par vos employés : maintenant vous le savez avant
-> eux. Et qu'un appareil inconnu pouvait se brancher sans que vous le voyiez :
-> il apparaîtrait dans cette liste au prochain passage. »
+> « Vous m'avez dit que vous ne saviez pas combien d'appareils vous aviez :
+> il y en a 83. Que vous l'appreniez par vos employés : maintenant vous le
+> savez avant eux. Et qu'un appareil inconnu pouvait se brancher sans que
+> vous le voyiez : il apparaîtrait dans cette liste au prochain passage. »
 
-Puis taisez-vous. Laissez-le parler le premier.
+**Puis taisez-vous.** Laissez-les parler les premiers. C'est difficile et
+c'est décisif — le premier qui parle après une proposition est en position
+de faiblesse.
 
 ---
 
@@ -201,7 +380,7 @@ Puis taisez-vous. Laissez-le parler le premier.
 | À éviter | Pourquoi |
 |---|---|
 | La page Réinitialisation | Vous montrez le bouton qui efface tout. Aucun intérêt, gros malaise. |
-| Un terminal, du code, VS Code | Il achète un produit, pas un chantier. |
+| Un terminal, du code, VS Code | Ils achètent un produit, pas un chantier. |
 | Les listes de domaines bloqués | Contenu embarrassant à l'écran. |
 | La page Journal | Utile en exploitation, illisible en démonstration. |
 | Un graphique vide | S'il n'y a pas de données, n'ouvrez pas l'écran. |
@@ -209,41 +388,50 @@ Puis taisez-vous. Laissez-le parler le premier.
 
 ---
 
-## Les trois questions qui vont tomber
+## Les questions qui vont tomber
 
 **« Combien ça coûte ? »**
-Ne bricolez pas un prix en direct. « Ça dépend du nombre de sites et
-d'appareils. Je vous envoie une proposition chiffrée demain. » Puis envoyez-la
-le lendemain, vraiment.
+Ne bricolez pas un prix en direct. *« Ça dépend du nombre de sites et
+d'appareils, je vous envoie une proposition chiffrée demain. »* Puis
+envoyez-la le lendemain, vraiment.
 
 **« Et si ça tombe en panne ? »**
-« Le logiciel est installé sur votre serveur, chez vous. Vos données ne sortent
-pas. S'il s'arrête, votre réseau continue de fonctionner normalement — c'est un
-observateur, il n'est pas sur le chemin. »
+*« Le logiciel est installé sur votre serveur, chez vous. Vos données ne
+sortent pas. S'il s'arrête, votre réseau continue de fonctionner — c'est
+un observateur, il n'est pas sur le chemin. »*
 
 **« Il faut changer quelque chose sur mon réseau ? »**
-« Non pour l'inventaire et les pannes. Pour la mesure de consommation par poste
-et pour le blocage, il faut un équipement réseau administrable — je vérifie ça
-chez vous avant de m'engager. » **Ne promettez pas ces deux fonctions avant
-d'avoir vu leur matériel.**
+*« Non pour l'inventaire et les pannes. Pour la consommation par poste et
+pour le blocage, il faut un équipement réseau administrable — je vérifie
+ça chez vous avant de m'engager. »* **Ne promettez pas ces deux fonctions
+avant d'avoir vu leur matériel.**
+
+**« C'est chiffré entre l'agence et le serveur ? »**
+*« Pas imposé aujourd'hui : l'architecture cible un agent sur le réseau
+local ou un tunnel. Avant tout déploiement d'un agent qui traverse
+Internet, il faut du HTTPS — c'est identifié, pas encore fait. »*
+
+**« Vous avez d'autres clients ? »**
+Si non, dites-le. *« Vous seriez le premier. C'est pour ça que je suis
+présente à l'installation et que le prix en tient compte. »* Un mensonge
+sur ce point se vérifie en un appel.
 
 ---
 
 ## Répétition
 
-Jouez-la **à voix haute, seule, chronomètre en main**, au moins une fois avant
-le client. Pas dans votre tête : à voix haute. Vous découvrirez que la partie 3
-est trop longue et que vous cherchez vos mots en 4.
+Jouez-la **à voix haute, seule, chronomètre en main**, au moins une fois.
+Pas dans votre tête : à voix haute. Vous découvrirez que la partie 3 est
+trop longue et que vous cherchez vos mots en 4.
 
-Le but n'est pas d'apprendre par cœur. C'est de ne jamais être surprise par
-votre propre écran.
+Le but n'est pas d'apprendre par cœur. C'est de ne jamais être surprise
+par votre propre écran.
 
 ---
 
 ## À faire de ce fichier
 
-Il ne doit pas partir sur GitHub — c'est un document commercial, pas un
-livrable. Ajoutez à `.gitignore` :
+Document commercial, pas un livrable. Ajoutez à `.gitignore` :
 
 ```
 DEMONSTRATION-*.md
