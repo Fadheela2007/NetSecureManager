@@ -1,13 +1,36 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
+import EtatVide from "./EtatVide";
 
 import { decrireErreur } from "../utils/erreurReseau";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
-// Rattachées aux variables de thème : ces trois couleurs étaient codées en
-// dur et restaient donc celles du thème sombre même en thème clair, où le
-// vert et le rose pâles devenaient illisibles sur fond blanc.
+/**
+ * Topologie réseau — les raccordements RÉELLEMENT établis.
+ *
+ * CE QUE CETTE PAGE FAISAIT, ET POURQUOI ÇA NE SERVAIT À RIEN
+ *
+ * Elle dessinait une étoile : le centre était l'équipement dont l'adresse
+ * se termine par .1, .254 ou .155 — une supposition — et tous les autres
+ * y étaient reliés. Ces liens n'existaient nulle part : ni en base, ni sur
+ * le réseau. Le dessin était joli et ne disait rien.
+ *
+ * Il ne pouvait donc pas répondre à la seule question qui justifie une
+ * carte réseau : « si ce commutateur tombe, qui perd le réseau ? »
+ *
+ * CE QU'ELLE MONTRE MAINTENANT
+ *
+ * Les liens lus dans la table d'apprentissage des adresses MAC des
+ * commutateurs (BRIDGE-MIB) — la même source que la bande passante par
+ * machine. Un lien affiché signifie : cette machine est branchée sur ce
+ * port, constaté par le commutateur lui-même.
+ *
+ * Ce qui n'est pas connu est compté et laissé de côté, jamais rattaché
+ * d'office à un nœud. Un lien inventé est pire qu'un lien absent, parce
+ * qu'on s'en sert pour décider d'une intervention.
+ */
+
 const COULEUR_STATUT = {
   up: "var(--color-ok)",
   down: "var(--color-crit)",
@@ -15,71 +38,54 @@ const COULEUR_STATUT = {
 };
 
 export default function TopologyPage({ idSite }) {
-  const [equipements, setEquipements] = useState([]);
-  const [survole, setSurvole] = useState(null);
+  const [liens, setLiens] = useState([]);
+  const [couverture, setCouverture] = useState(null);
+  const [chargement, setChargement] = useState(true);
   const [erreur, setErreur] = useState(null);
 
   useEffect(() => {
     setErreur(null);
-    axios.get(`${API_URL}/equipements`, { params: { id_site: idSite } })
-      .then(({ data }) => setEquipements(data))
-      .catch((err) => setErreur(decrireErreur(err, "La topologie")));
+    setChargement(true);
+    axios
+      .get(`${API_URL}/topologie`, { params: { id_site: idSite } })
+      .then(({ data }) => {
+        setLiens(data?.liens ?? []);
+        setCouverture(data?.couverture ?? null);
+      })
+      .catch((err) => setErreur(decrireErreur(err, "La topologie")))
+      .finally(() => setChargement(false));
   }, [idSite]);
 
-  // Le nœud central : l'équipement dont l'IP se termine par .1, .254 ou .155
-  // (heuristique simple pour repérer une passerelle probable), sinon le premier de la liste
-  const passerelle =
-    equipements.find((e) => /\.(1|254|155)$/.test(e.adresse_ip)) || equipements[0];
+  // Un commutateur, ses ports, et ce qui est branché dessus.
+  const parSwitch = liens.reduce((acc, l) => {
+    if (!acc[l.id_switch]) {
+      acc[l.id_switch] = {
+        id: l.id_switch,
+        libelle: l.switch_libelle || l.switch_nom || l.switch_ip,
+        ip: l.switch_ip,
+        ports: [],
+      };
+    }
+    acc[l.id_switch].ports.push(l);
+    return acc;
+  }, {});
+  const commutateurs = Object.values(parSwitch);
 
-  // Ne garder que les équipements vus récemment (24h) pour éviter une vue
-  // surchargée par tous les tests accumulés au fil du temps
-  const maintenant = Date.now();
-  const recents = equipements.filter((e) => {
-    if (!e.derniere_decouverte) return false;
-    const age = maintenant - new Date(e.derniere_decouverte).getTime();
-    return age < 24 * 60 * 60 * 1000;
-  });
-  const autres = recents.filter((e) => e !== passerelle);
-
-  const largeur = 900;
-  const hauteur = 600;
-  const centreX = largeur / 2;
-  const centreY = hauteur / 2;
-  const rayon = Math.min(largeur, hauteur) / 2 - 60;
-
-  const positions = autres.map((eq, i) => {
-    const angle = (2 * Math.PI * i) / Math.max(autres.length, 1);
-    return {
-      eq,
-      x: centreX + rayon * Math.cos(angle),
-      y: centreY + rayon * Math.sin(angle),
-    };
-  });
-
-  // L'échec passe avant le test de liste vide : « aucun équipement à
-  // afficher — lancez un scan » envoyait lancer un scan qui, serveur
-  // arrêté, ne pouvait pas aboutir.
   if (erreur) {
     return (
       <div className="space-y-5">
-        <div>
-          <h1 className="font-[var(--font-display)] text-xl font-semibold">Topologie réseau</h1>
-          <p className="text-sm text-[var(--color-crit)] mt-0.5">{erreur.titre}</p>
-          <p className="text-sm text-[var(--color-mute)] mt-1">{erreur.detail}</p>
-        </div>
+        <h1 className="font-[var(--font-display)] text-xl font-semibold">Topologie réseau</h1>
+        <p className="text-sm text-[var(--color-crit)]">{erreur.titre}</p>
+        <p className="text-sm text-[var(--color-mute)]">{erreur.detail}</p>
       </div>
     );
   }
 
-  if (equipements.length === 0) {
+  if (chargement) {
     return (
       <div className="space-y-5">
-        <div>
-          <h1 className="font-[var(--font-display)] text-xl font-semibold">Topologie réseau</h1>
-          <p className="text-sm text-[var(--color-mute)] mt-0.5">
-            Aucun équipement à afficher — lancez d'abord un scan depuis le tableau de bord.
-          </p>
-        </div>
+        <h1 className="font-[var(--font-display)] text-xl font-semibold">Topologie réseau</h1>
+        <p className="text-sm text-[var(--color-mute)]">Chargement…</p>
       </div>
     );
   }
@@ -89,99 +95,91 @@ export default function TopologyPage({ idSite }) {
       <div>
         <h1 className="font-[var(--font-display)] text-xl font-semibold">Topologie réseau</h1>
         <p className="text-sm text-[var(--color-mute)] mt-0.5">
-          Vue schématique des équipements vus dans les dernières 24h, autour de la passerelle détectée
+          Raccordements constatés par les commutateurs eux-mêmes — quelle machine
+          est branchée sur quel port.
         </p>
       </div>
 
-      <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl p-4 overflow-auto">
-        {/* viewBox + largeur 100 % : le schéma se réduit proportionnellement
-            au lieu de déborder.
-
-            La hauteur passe par le CSS et NON par l'attribut `height`.
-            `height="auto"` n'est pas une valeur SVG valide — un attribut
-            SVG attend une longueur — et le navigateur le rejetait :
-
-              Error: <svg> attribute height: Expected length, "auto"
-
-            Le schéma s'affichait quand même, mais la console crachait une
-            erreur à chaque rendu. Sur une démonstration où l'on ouvre les
-            outils de développement, c'est le genre de détail qui fait
-            douter du reste. */}
-        {/* UN SEUL attribut `style`. En JSX, deux `style` sur le même
-            élément ne fusionnent pas : le second écrase silencieusement
-            le premier. La hauteur automatique était donc perdue, et le
-            schéma retrouvait la déformation qu'on venait de corriger —
-            sans erreur ni avertissement. */}
-        <svg
-          viewBox={`0 0 ${largeur} ${hauteur}`}
-          width="100%"
-          preserveAspectRatio="xMidYMid meet"
-          className="mx-auto block max-w-full"
-          style={{ height: "auto", minWidth: "18rem" }}
-        >
-          {/* Lignes de connexion */}
-          {positions.map(({ eq, x, y }) => (
-            <line
-              key={`ligne-${eq.id_equipement}`}
-              x1={centreX} y1={centreY} x2={x} y2={y}
-              stroke="var(--color-line)"
-              strokeWidth="1.5"
-              strokeDasharray={eq.statut === "down" ? "4 4" : "none"}
-            />
-          ))}
-
-          {/* Nœud central (passerelle) */}
-          {passerelle && (
-            <g>
-              <circle cx={centreX} cy={centreY} r="26" fill="var(--color-signal)" />
-              <text x={centreX} y={centreY + 45} textAnchor="middle" fontSize="12" fill="var(--color-ink)">
-                {passerelle.nom || passerelle.adresse_ip}
-              </text>
-            </g>
+      {commutateurs.length === 0 ? (
+        /* PAS DE DESSIN PLUTÔT QU'UN DESSIN FAUX.
+           Sans commutateur administrable, aucun raccordement n'est
+           connaissable : le réseau ne le déclare nulle part. On dit ce
+           qui manque et pourquoi, au lieu d'inventer une étoile. */
+        <EtatVide
+          titre="Aucun raccordement connu"
+          ton="etape"
+          explication={
+            "Les liens entre machines se lisent dans la table d'adresses des " +
+            "commutateurs, en SNMP. Aucun commutateur administrable n'a encore " +
+            "été interrogé sur ce site."
+          }
+          aide={
+            "Un commutateur non administrable ne déclare rien : l'inventaire et " +
+            "les pannes continuent de fonctionner, la carte des liens non."
+          }
+        />
+      ) : (
+        <>
+          {couverture && (
+            <p className="text-sm text-[var(--color-mute)]">
+              <span className="text-[var(--color-ink)] font-medium">
+                {couverture.raccordes} équipement(s) localisé(s)
+              </span>{" "}
+              sur {couverture.equipements}. Les autres sont bien supervisés, mais
+              leur point de raccordement n'est pas déclaré par un commutateur.
+            </p>
           )}
 
-          {/* Équipements autour */}
-          {positions.map(({ eq, x, y }) => (
-            <g
-              key={eq.id_equipement}
-              onMouseEnter={() => setSurvole(eq)}
-              onMouseLeave={() => setSurvole(null)}
-              style={{ cursor: "pointer" }}
-            >
-              <circle
-                cx={x} cy={y} r="12"
-                fill={COULEUR_STATUT[eq.statut] || COULEUR_STATUT.inconnu}
-                stroke={survole?.id_equipement === eq.id_equipement ? "var(--color-signal)" : "none"}
-                strokeWidth="3"
-              />
-              {survole?.id_equipement === eq.id_equipement && (
-                <text
-                  x={x} y={y + 24}
-                  textAnchor="middle"
-                  fontSize="10"
-                  fill="var(--color-ink)"
-                >
-                  {(eq.nom || eq.adresse_ip).slice(0, 20)}
-                </text>
-              )}
-            </g>
-          ))}
-        </svg>
-      </div>
+          <div className="space-y-4">
+            {commutateurs.map((sw) => (
+              <div
+                key={sw.id}
+                className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl p-5"
+              >
+                <div className="flex items-baseline justify-between gap-3 mb-3">
+                  <h2 className="font-medium text-[var(--color-ink)]">{sw.libelle}</h2>
+                  <span className="text-xs text-[var(--color-mute)] font-[var(--font-mono)]">
+                    {sw.ip}
+                  </span>
+                </div>
 
-      {survole && (
-        <div className="bg-[var(--color-surface-2)] border border-[var(--color-line)] rounded-lg px-4 py-3 text-sm">
-          <p className="text-[var(--color-ink)] font-medium">{survole.nom || survole.adresse_ip}</p>
-          <p className="text-xs text-[var(--color-mute)] font-[var(--font-mono)]">{survole.adresse_ip}</p>
-          <p className="text-xs text-[var(--color-mute)]">Fabricant : {survole.fabricant || "inconnu"} — Statut : {survole.statut}</p>
-        </div>
+                {/* La question à laquelle cette page doit répondre. */}
+                <p className="text-xs text-[var(--color-mute)] mb-3">
+                  Si ce commutateur tombe, {sw.ports.length} machine(s) perdent le réseau.
+                </p>
+
+                <ul className="space-y-1">
+                  {sw.ports.map((p) => (
+                    <li
+                      key={`${p.id_switch}-${p.port}`}
+                      className="flex items-center gap-3 text-xs bg-[var(--color-surface-2)] rounded px-3 py-2"
+                    >
+                      <span className="font-[var(--font-mono)] text-[var(--color-mute)] w-20 shrink-0">
+                        port {p.port}
+                      </span>
+                      <span
+                        className="w-1.5 h-1.5 rounded-full shrink-0"
+                        style={{ background: COULEUR_STATUT[p.statut] || COULEUR_STATUT.inconnu }}
+                      />
+                      <span className="text-[var(--color-ink)] truncate">
+                        {p.equipement_nom || p.adresse_ip}
+                      </span>
+                      <span className="text-[var(--color-mute)] font-[var(--font-mono)] shrink-0">
+                        {p.adresse_ip}
+                      </span>
+                      {p.type_equipement && (
+                        <span className="text-[var(--color-mute)] ml-auto shrink-0">
+                          {p.type_equipement}
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </>
       )}
-
-      <div className="flex gap-4 text-xs text-[var(--color-mute)]">
-        <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full" style={{ background: COULEUR_STATUT.up }} /> En ligne</span>
-        <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full" style={{ background: COULEUR_STATUT.down }} /> Hors ligne</span>
-        <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full" style={{ background: COULEUR_STATUT.inconnu }} /> Inconnu</span>
-      </div>
     </div>
   );
 }

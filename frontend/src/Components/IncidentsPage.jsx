@@ -3,6 +3,8 @@ import axios from "axios";
 import EtatVide from "./EtatVide";
 import { decrireErreur } from "../utils/erreurReseau";
 
+import { brancherRafraichissement } from "../utils/tempsReel";
+
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
 const STATUTS = [
@@ -85,6 +87,15 @@ export default function IncidentsPage() {
   useEffect(() => {
     rafraichir();
   }, []);
+
+  // Rafraîchissement automatique, SILENCIEUX : on appelle `charger` et non
+  // `rafraichir`, pour que l'écran ne repasse pas par « Chargement… »
+  // toutes les minutes. Un incident qui apparaît doit se voir sans que la
+  // page clignote.
+  useEffect(
+    () => brancherRafraichissement(() => charger().catch(() => {}), ["cycle", "alerte"]),
+    []
+  );
 
   // Liste réservée aux rôles admin/opérateur : un lecteur reçoit un 403 et
   // le menu d'assignation ne s'affiche simplement pas.

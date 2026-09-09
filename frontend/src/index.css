@@ -500,3 +500,54 @@ option {
 @media (prefers-reduced-motion: reduce) {
   .animate-flotter, .animate-flotter-lent { animation: none; }
 }
+
+/* Libellé de champ avec une aide alignée à droite. Vit ici et non dans
+   Login.css : ce dernier n'est importé que par la page de connexion, et
+   la classe n'aurait rien fait ailleurs. */
+.champ-ligne {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* ---------------------------------------------------------------------
+   Détection des réseaux du serveur (ScanLauncher).
+   Le bouton se présente comme un lien : c'est une aide à la saisie, pas
+   une action de même poids que « Scanner ».
+   --------------------------------------------------------------------- */
+.lien-detecter {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--color-signal);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.lien-detecter:disabled {
+  color: var(--color-mute);
+  text-decoration: none;
+  cursor: default;
+}
+
+.reseaux-detectes {
+  margin-top: 0.75rem;
+}
+
+/* Les plages proposées sont cliquables : on annule le style de bouton
+   pour qu'elles se lisent comme la ligne de résultat qu'elles sont. */
+.detail-plages li button {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.detail-plages li button:hover strong {
+  color: var(--color-signal);
+}

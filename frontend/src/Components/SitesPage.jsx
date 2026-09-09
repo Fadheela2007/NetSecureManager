@@ -16,10 +16,39 @@ export default function SitesPage() {
   // création. Sans lui, un serveur injoignable affichait « aucun site »,
   // et l'utilisateur en créait un second alors que le premier existait.
   const [erreurChargement, setErreurChargement] = useState(null);
+  // Site dont le mode de supervision est en cours de changement : évite
+  // qu'un double clic envoie deux requêtes contradictoires.
+  const [modeEnCours, setModeEnCours] = useState(null);
 
   async function charger() {
     const { data } = await axios.get(`${API_URL}/sites`);
     setSites(data);
+  }
+
+  /**
+   * Change qui supervise un site : le serveur central, ou son agent local.
+   *
+   * On recharge la liste depuis le serveur au lieu de modifier l'état
+   * local : c'est le serveur qui fait foi, et une base non migrée renvoie
+   * un 409 explicite qu'il faut afficher plutôt que d'ignorer.
+   */
+  async function basculerSupervision(idSite, parAgent) {
+    setModeEnCours(idSite);
+    setErreur(null);
+    try {
+      await axios.patch(`${API_URL}/sites/${idSite}/supervision`, {
+        supervision_par_agent: parAgent,
+      });
+      rafraichir();
+    } catch (err) {
+      setErreur(
+        err.response?.data?.aide ||
+          err.response?.data?.error ||
+          "Changement de mode de supervision impossible"
+      );
+    } finally {
+      setModeEnCours(null);
+    }
   }
 
   function rafraichir() {
@@ -100,6 +129,7 @@ export default function SitesPage() {
               <th className="pb-2 font-medium">Nom</th>
               <th className="pb-2 font-medium">Ville</th>
               <th className="pb-2 font-medium">Agent</th>
+              <th className="pb-2 font-medium">Supervisé par</th>
               <th className="pb-2 font-medium text-right">Actions</th>
             </tr>
           </thead>
@@ -124,6 +154,24 @@ export default function SitesPage() {
                       />
                       {s.agent?.libelle || "Jamais connecté"}
                     </span>
+                  </td>
+                  {/* QUI SUPERVISE CE SITE.
+                      Ce mode était DÉDUIT du dernier envoi d'un agent : lancer
+                      un agent une fois, pour un essai, sortait un site local de
+                      la supervision pour de bon, sans que rien ne l'affiche.
+                      Il est désormais déclaré, visible, et réversible d'un clic. */}
+                  <td className="py-2.5">
+                    <label className="inline-flex items-center gap-2 text-xs cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(s.supervision_par_agent)}
+                        disabled={modeEnCours === s.id_site}
+                        onChange={(e) => basculerSupervision(s.id_site, e.target.checked)}
+                      />
+                      <span className="text-[var(--color-mute)]">
+                        {s.supervision_par_agent ? "agent local" : "serveur central"}
+                      </span>
+                    </label>
                   </td>
                   <td className="py-2.5 text-right">
                     <button

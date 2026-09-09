@@ -6,6 +6,8 @@ import EtatVide from "./EtatVide";
 import { decrireErreur } from "../utils/erreurReseau";
 import EquipementDetail from "./EquipementDetail";
 
+import { brancherRafraichissement } from "../utils/tempsReel";
+
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
 /**
@@ -68,6 +70,8 @@ export default function EquipementsPage({ idSite }) {
   const [tri, setTri] = useState({ colonne: "adresse_ip", sens: "asc" });
   const [selection, setSelection] = useState(null);
   const [resolution, setResolution] = useState({ enCours: false, message: null });
+  // Provenance du registre des fabricants (GET /oui/etat).
+  const [etatOui, setEtatOui] = useState(null);
 
   /**
    * Échec de chargement.
@@ -92,6 +96,24 @@ export default function EquipementsPage({ idSite }) {
       .catch((err) => setErreur(decrireErreur(err, "La liste des équipements")))
       .finally(() => setChargement(false));
   }
+
+  // Rafraîchissement automatique : événements du serveur, plus une
+  // scrutation de secours si le temps réel n'est pas activé côté serveur.
+  // Silencieux — pas d'indicateur de chargement, l'écran garde ses données.
+  // SILENCIEUX : on appelle `charger` et non `rafraichir`. `rafraichir`
+  // repasse par « Chargement… », ce qui ferait clignoter la liste toutes
+  // les minutes et donnerait l'impression d'une plateforme instable. Une
+  // erreur de rafraîchissement est ignorée : garder à l'écran la liste
+  // d'il y a une minute vaut mieux que la remplacer par un message
+  // d'erreur alors que rien n'est perdu.
+  useEffect(
+    () =>
+      brancherRafraichissement(
+        () => charger().catch(() => {}),
+        ["cycle", "scan", "equipement"]
+      ),
+    []
+  );
 
   useEffect(() => {
     rafraichir();
@@ -177,6 +199,24 @@ export default function EquipementsPage({ idSite }) {
 
   const sansFabricant = equipements.filter((e) => !e.fabricant).length;
 
+  /* ÉTAT DU REGISTRE DES FABRICANTS.
+
+     Quand des équipements restent « sans fabricant », la question suivante
+     est toujours la même : le registre est-il chargé, et d'où vient-il ?
+     La réponse existait — GET /oui/etat — et n'était affichée nulle part.
+
+     Chargé seulement quand il manque des fabricants : sur un parc complet,
+     ce détail n'apprend rien et n'a pas à occuper l'écran. */
+  useEffect(() => {
+    if (sansFabricant === 0) { setEtatOui(null); return; }
+    axios
+      .get(`${API_URL}/oui/etat`)
+      .then(({ data }) => setEtatOui(data))
+      // Diagnostic facultatif : son absence ne doit pas être signalée
+      // comme une panne de la page.
+      .catch(() => setEtatOui(null));
+  }, [sansFabricant]);
+
   async function resoudreFabricants() {
     setResolution({ enCours: true, message: null });
     try {
@@ -256,6 +296,24 @@ export default function EquipementsPage({ idSite }) {
       </div>
 
       {resolution.message && <p className="text-sm text-[var(--color-ok)]">{resolution.message}</p>}
+
+      {/* D'OÙ VIENNENT LES FABRICANTS.
+          « Graine embarquée » signifie que la table OUI_FABRICANT est vide :
+          le registre fonctionne, mais avec la liste livrée avec le produit,
+          plus ancienne que celle de l'IEEE. C'est la première chose à
+          vérifier quand des fabricants restent inconnus — et la réponse
+          était disponible sans être affichée. */}
+      {etatOui && (
+        <p className="text-xs text-[var(--color-mute)]">
+          Registre des fabricants : {Number(etatOui.entrees || 0).toLocaleString("fr-FR")}{" "}
+          entrées — {etatOui.origine}
+          {String(etatOui.origine || "").includes("graine") && (
+            <span className="block mt-0.5">
+              Pour une liste à jour : <span className="font-[var(--font-mono)]">node tools/importer-oui.js</span> côté serveur.
+            </span>
+          )}
+        </p>
+      )}
 
       {/* ── FILTRES ──
           Les onglets de statut portent leur compteur : on voit d'un coup
@@ -352,7 +410,27 @@ export default function EquipementsPage({ idSite }) {
                 {/* En-tête collant : sur 500 lignes, on perd sinon le nom
                     des colonnes dès le premier défilement, et on ne sait
                     plus ce qu'on regarde. */}
-                <thead className="sticky top-0 bg-[var(--color-surface)] z-10">
+                {/* LE FOND VA SUR LES CELLULES, PAS SUR <thead>.
+
+                    Un tableau se rend avec `border-collapse: collapse`
+                    (c'est ce que pose la base de Tailwind). Dans ce mode,
+                    plusieurs navigateurs — Firefox, et Chrome avant la
+                    version 91 — NE PEIGNENT PAS le fond déclaré sur
+                    <thead> ni sur <tr>. La règle est écrite, elle est
+                    même lue par les outils de développement, et rien ne
+                    s'affiche.
+
+                    Combiné à `position: sticky`, le résultat est
+                    exactement le symptôme observé : l'en-tête reste en
+                    place, transparent, et les lignes du tableau défilent
+                    DERRIÈRE les titres. Les deux textes se superposent et
+                    l'en-tête devient illisible — on croit que les
+                    colonnes ont disparu.
+
+                    Le fond posé sur chaque <th> est peint partout, sans
+                    exception. C'est le contournement habituel des
+                    en-têtes collants, et il ne coûte rien. */}
+                <thead className="sticky top-0 z-10">
                   <tr className="text-left text-[11px] uppercase tracking-wide text-[var(--color-mute)] border-b border-[var(--color-line)]">
                     {/* `pr-4` : sans espacement horizontal, les libellés se
                         touchent et se lisent comme un seul mot — l'en-tête
@@ -360,7 +438,10 @@ export default function EquipementsPage({ idSite }) {
                         suffit pas, une cellule de tableau n'a pas de marge
                         par défaut. */}
                     {COLONNES.map((c) => (
-                      <th key={c.cle} className="pb-2 pt-1 pr-4 font-medium whitespace-nowrap">
+                      <th
+                        key={c.cle}
+                        className="bg-[var(--color-surface)] pb-2 pt-1 pr-4 font-medium whitespace-nowrap"
+                      >
                         <button
                           onClick={() => basculerTri(c.cle)}
                           className="flex items-center gap-1 hover:text-[var(--color-ink)] transition uppercase"
@@ -404,6 +485,34 @@ export default function EquipementsPage({ idSite }) {
                               </span>
                             )}
                           </>
+                        ) : eq.fabricant ? (
+                          /* PAS DE NOM ? ON MONTRE CE QU'ON SAIT.
+
+                             Sur un réseau d'entreprise, la plupart des
+                             machines ont un nom : SNMP, DNS inverse ou
+                             NetBIOS en fournissent un. Sur un réseau où
+                             ces trois-là sont absents — un wifi domestique,
+                             un VLAN invité, un parc de téléphones — la
+                             colonne se remplissait de tirets, et l'écran
+                             donnait l'impression que le scan avait échoué
+                             alors qu'il avait tout trouvé.
+
+                             Le fabricant, lui, est connu : il vient de
+                             l'adresse matérielle, qu'aucun appareil ne peut
+                             cacher. « Appareil Samsung » ne dit pas QUI
+                             c'est, mais dit CE QUE c'est — et c'est déjà ce
+                             qu'on cherche en parcourant une liste.
+
+                             ÉCRIT EN GRIS ET EN ITALIQUE, DÉLIBÉRÉMENT.
+                             Ce n'est pas un nom de machine : c'est un
+                             repère. La distinction doit rester visible à
+                             l'œil, sinon on croit que l'appareil s'appelle
+                             ainsi. Et rien n'est écrit en base — la colonne
+                             `nom` reste vide, la recherche et le tri
+                             continuent de porter sur les vrais noms. */
+                          <span className="italic text-[var(--color-mute)]">
+                            Appareil {eq.fabricant}
+                          </span>
                         ) : (
                           "—"
                         )}

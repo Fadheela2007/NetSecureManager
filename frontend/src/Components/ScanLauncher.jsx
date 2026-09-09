@@ -29,6 +29,29 @@ export default function ScanLauncher({ idSite }) {
   const [loading, setLoading] = useState(null); // "site" | "plage" | null
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+  const [reseaux, setReseaux] = useState(null);
+  const [detection, setDetection] = useState(false);
+
+  /**
+   * Propose les plages déduites des interfaces du serveur.
+   *
+   * On PROPOSE, on ne remplit pas d'office : une machine porte souvent
+   * plusieurs réseaux — Hyper-V, WSL, VMware — dont un seul est le vrai.
+   * Choisir à la place de l'exploitant reviendrait à scanner une plage
+   * devinée, et scanner n'est jamais un acte neutre.
+   */
+  async function detecter() {
+    setDetection(true);
+    setError(null);
+    try {
+      const { data } = await axios.get(`${API_URL}/reseaux-detectes`);
+      setReseaux(data.reseaux || []);
+    } catch (err) {
+      setError(err.response?.data?.error || "Détection impossible");
+    } finally {
+      setDetection(false);
+    }
+  }
 
   async function appeler(chemin, corps, quoi) {
     setLoading(quoi);
@@ -66,7 +89,17 @@ export default function ScanLauncher({ idSite }) {
 
       <form onSubmit={scannerUnePlage}>
         <label>
-          Scanner une seule plage (CIDR)
+          <span className="champ-ligne">
+            Scanner une seule plage (CIDR)
+            <button
+              type="button"
+              onClick={detecter}
+              disabled={detection || loading !== null}
+              className="lien-detecter"
+            >
+              {detection ? "détection…" : "détecter mon réseau"}
+            </button>
+          </span>
           <input
             type="text"
             placeholder="192.168.1.0/24"
@@ -87,6 +120,39 @@ export default function ScanLauncher({ idSite }) {
           {loading === "plage" ? "Scan en cours..." : "Scanner cette plage"}
         </button>
       </form>
+
+      {/* Réseaux détectés : une ligne par plage, à cliquer pour remplir le
+          champ. Les adaptateurs d'hyperviseur sont montrés mais signalés —
+          les cacher priverait des essais sur une machine virtuelle, les
+          mélanger aux vrais ferait douter de toute la suggestion. */}
+      {reseaux && (
+        <div className="reseaux-detectes">
+          {reseaux.length === 0 ? (
+            <p className="aide">
+              Aucune plage exploitable détectée sur les interfaces de ce serveur.
+            </p>
+          ) : (
+            <>
+              <p className="aide">
+                Déduit des cartes réseau du serveur. Cliquez pour remplir le champ.
+              </p>
+              <ul className="detail-plages">
+                {reseaux.map((r) => (
+                  <li key={r.cidr}>
+                    <button type="button" onClick={() => setCidr(r.cidr)}>
+                      <strong>{r.cidr}</strong>
+                    </button>{" "}
+                    <span className="aide">
+                      {r.interface} · {r.nb_adresses} adresses
+                      {r.virtuelle && " · réseau virtuel"}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+      )}
 
       {error && <p className="error">{error}</p>}
 

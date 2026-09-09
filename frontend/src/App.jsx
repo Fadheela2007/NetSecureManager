@@ -2,6 +2,7 @@ import { useState, useEffect, lazy, Suspense } from "react";
 import axios from "axios";
 import Login from "./Components/Login";
 import Accueil from "./Components/Accueil";
+import { connecter, deconnecter } from "./utils/tempsReel";
 import Sidebar from "./Components/Sidebar";
 import SearchBar from "./Components/SearchBar";
 import BasculeTheme from "./Components/BasculeTheme";
@@ -106,6 +107,16 @@ function App() {
       handleLogout();
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
+
+  // Connexion temps réel : ouverte avec la session, fermée avec elle.
+  // Facultative — si le serveur ne l'a pas activée, l'application
+  // fonctionne à l'identique, en rechargement manuel.
+  useEffect(() => {
+    if (!user) return;
+    const jeton = localStorage.getItem("token");
+    connecter(jeton);
+    return () => deconnecter();
   }, [user]);
 
   function handleLogin(userData, token) {

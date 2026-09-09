@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
 } from "recharts";
+
+import { brancherRafraichissement } from "../utils/tempsReel";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
@@ -65,8 +67,56 @@ function BarreProportion({ valeur, maximum }) {
   );
 }
 
+/* ── LA LARGEUR EST OBSERVÉE, PLUS DEVINÉE ──
+
+   Les deux graphiques de cet écran mesuraient leur conteneur dans un
+   effet déclenché par des états choisis à la main — le panneau de
+   détail, la période, les données. Cela revenait à parier sur l'instant
+   où le conteneur existe. Le pari a été perdu sur la fiche d'un
+   équipement : l'effet s'exécutait pendant que l'écran affichait encore
+   « aucun relevé », le conteneur n'existait pas, et comme les états
+   surveillés ne rebougeaient plus, la mesure n'avait jamais lieu. La
+   largeur restait à zéro, le graphique n'était pas construit, et
+   l'utilisateur voyait un titre suivi de rien.
+
+   Une référence de rappel supprime le pari : React l'appelle au moment
+   exact où il attache le nœud au document. Le ResizeObserver prend
+   ensuite le relais pour tout changement de taille. Aucune liste de
+   dépendances à tenir à jour, donc aucune à oublier. */
+function useLargeurObservee() {
+  const observateur = useRef(null);
+  const [largeur, setLargeur] = useState(0);
+
+  const attacher = useCallback((el) => {
+    if (observateur.current) {
+      observateur.current.disconnect();
+      observateur.current = null;
+    }
+    if (!el) return;
+
+    const mesurer = () => {
+      const l = el.getBoundingClientRect().width;
+      // Une largeur nulle n'est jamais retenue : elle survient pendant
+      // les transitions et ferait clignoter le graphique.
+      if (l > 0) setLargeur(Math.round(l));
+    };
+
+    mesurer();
+    if (typeof ResizeObserver !== "undefined") {
+      observateur.current = new ResizeObserver(mesurer);
+      observateur.current.observe(el);
+    }
+  }, []);
+
+  return [attacher, largeur];
+}
+
 export default function BandePassantePage({ idSite }) {
   const [heures, setHeures] = useState(24);
+  // Horodatage du dernier rafraîchissement réussi : sur un écran qui se
+  // met à jour tout seul, savoir DE QUAND datent les chiffres vaut autant
+  // que les chiffres.
+  const [maj, setMaj] = useState(null);
   const [donnees, setDonnees] = useState(null);
   const [chargement, setChargement] = useState(true);
   const [erreur, setErreur] = useState(null);
@@ -101,49 +151,79 @@ export default function BandePassantePage({ idSite }) {
      avait cassé le composant. À mutualiser quand le protocole de test
      sera terminé, pas au milieu.
      ───────────────────────────────────────────────────────────────── */
-  const conteneurGraphique = useRef(null);
-  const [largeurGraphique, setLargeurGraphique] = useState(0);
+  const [conteneurGraphique, largeurGraphique] = useLargeurObservee();
+  const [conteneurGlobal, largeurGlobale] = useLargeurObservee();
+  const [historique, setHistorique] = useState(null);
+
+  /* ── CHARGEMENT, PUIS RAFRAÎCHISSEMENT SILENCIEUX ──
+
+     Le premier chargement affiche « Chargement… » : l'écran est vide, il
+     faut dire qu'il travaille. Les rafraîchissements suivants ne le font
+     PAS. Un écran qui clignote « Chargement… » toutes les minutes est
+     illisible, et l'utilisateur finit par croire à une instabilité alors
+     que la plateforme fait exactement son travail.
+
+     Même raison pour l'erreur : une requête de rafraîchissement qui
+     échoue n'efface pas les chiffres déjà affichés. Des données d'il y a
+     une minute valent mieux qu'un écran vide, tant qu'on ne prétend pas
+     qu'elles sont fraîches — c'est ce que dit l'horodatage plus bas. */
+  const chargerClassement = useCallback(
+    (silencieux = false) => {
+      if (!silencieux) {
+        setChargement(true);
+        setErreur(null);
+      }
+      /* LES DEUX APPELS PARTENT ENSEMBLE.
+
+         L'historique suit exactement le même cycle de vie que le
+         classement : même période, même rafraîchissement, même
+         cloisonnement côté serveur. Les enchaîner ferait attendre le
+         second que le premier revienne, pour rien.
+
+         L'historique est facultatif : s'il échoue, le classement et les
+         totaux restent affichés. Un graphique manquant vaut mieux qu'un
+         écran vide. */
+      return Promise.all([
+        axios.get(`${API_URL}/bande-passante/classement`, { params: { heures, limite: 20 } }),
+        axios
+          .get(`${API_URL}/bande-passante/historique`, { params: { heures } })
+          .catch(() => null),
+      ])
+        .then(([reponseClassement, reponseHistorique]) => {
+          const data = reponseClassement.data;
+          setHistorique(reponseHistorique?.data ?? null);
+          setDonnees(data);
+          setMaj(new Date());
+          setErreur(null);
+        })
+        .catch((err) => {
+          if (!silencieux) setErreur(err.response?.data?.error || "Classement indisponible");
+        })
+        .finally(() => {
+          if (!silencieux) setChargement(false);
+        });
+    },
+    [heures]
+  );
 
   useEffect(() => {
-    function mesurer() {
-      const el = conteneurGraphique.current;
-      if (!el) return;
-      const l = el.getBoundingClientRect().width;
-      if (l > 0) setLargeurGraphique(Math.round(l));
-    }
-    mesurer();
-    // Seconde mesure après le rendu : au premier passage, le panneau
-    // vient d'apparaître et sa largeur définitive n'est pas encore posée.
-    const differee = setTimeout(mesurer, 60);
-    window.addEventListener("resize", mesurer);
-    return () => {
-      clearTimeout(differee);
-      window.removeEventListener("resize", mesurer);
-    };
-    // `selection` et `detailEnCours` : le panneau change de taille quand
-    // on passe d'un équipement à l'autre, et quand le chargement se
-    // termine. Sans eux, la largeur resterait celle du premier affichage.
-  }, [selection, detailEnCours, heures]);
+    chargerClassement(false);
+  }, [chargerClassement, idSite]);
 
-  useEffect(() => {
-    let annule = false;
-    setChargement(true);
-    setErreur(null);
+  /* ── CE QUI REND CET ÉCRAN VIVANT ──
 
-    axios
-      .get(`${API_URL}/bande-passante/classement`, { params: { heures, limite: 20 } })
-      .then(({ data }) => {
-        if (!annule) setDonnees(data);
-      })
-      .catch((err) => {
-        if (!annule) setErreur(err.response?.data?.error || "Classement indisponible");
-      })
-      .finally(() => {
-        if (!annule) setChargement(false);
-      });
+     « cycle » est l'événement de fin de cycle de supervision : c'est lui
+     qui annonce de nouvelles mesures. Les événements « equipement » ne
+     partent que sur un changement d'état — une machine qui tombe — et ne
+     couvrent donc jamais le cas normal, celui où cent relevés sont écrits
+     sans que rien ne change d'état.
 
-    return () => { annule = true; };
-  }, [heures, idSite]);
+     « scan » est ajouté parce qu'un scan peut faire apparaître des
+     équipements qui n'étaient pas au classement. */
+  useEffect(
+    () => brancherRafraichissement(() => chargerClassement(true), ["cycle", "scan"]),
+    [chargerClassement]
+  );
 
   useEffect(() => {
     if (!selection) { setDetail(null); return; }
@@ -179,8 +259,22 @@ export default function BandePassantePage({ idSite }) {
     }));
   }, [detail, heures]);
 
+  /* La courbe globale : un point par tranche de temps, débit du parc
+     entier. `dateCourte` prend la période en compte — sur 24 h on lit une
+     heure, sur 30 jours une date ; afficher l'heure sur un mois donnerait
+     deux cents étiquettes illisibles. */
+  const courbeGlobale = useMemo(() => {
+    if (!historique?.points) return [];
+    return historique.points.map((p) => ({
+      t: dateCourte(p.instant, heures),
+      entrant: p.entrant === null ? null : Number(p.entrant),
+      sortant: p.sortant === null ? null : Number(p.sortant),
+    }));
+  }, [historique, heures]);
+
   const selectionne = classement.find((r) => r.id_equipement === selection);
   const couverture = donnees?.couverture;
+  const total = donnees?.total;
 
   return (
     <div className="space-y-5">
@@ -215,6 +309,179 @@ export default function BandePassantePage({ idSite }) {
         des postes de travail n'activent pas. Sans cette phrase, la
         plateforme a l'air cassée alors qu'elle est simplement honnête.
       */}
+      {/* TOTAL GLOBAL.
+          Placé avant le classement : la première question est « combien
+          consomme-t-on », la seconde « qui ». Les équipements de transit
+          (routeurs, switches, pare-feu) sont exclus du calcul côté
+          serveur — leur compteur est la somme des machines branchées
+          dessus, les additionner compterait deux fois le même trafic.
+          Le mot « mesuré » est délibéré : ce n'est pas la consommation du
+          site tant que tout le parc n'expose pas de compteur. */}
+      {/* DE QUAND DATENT CES CHIFFRES.
+          Sur un écran qui se met à jour tout seul, c'est la question qui
+          vient juste après « combien ». Sans horodatage, l'utilisateur ne
+          sait pas s'il regarde la mesure de l'instant ou celle d'avant la
+          coupure réseau — et il rechargera la page pour en avoir le cœur
+          net, ce que le rafraîchissement automatique était censé éviter. */}
+      {maj && (
+        <p className="text-xs text-[var(--color-mute)]">
+          Mis à jour à {maj.toLocaleTimeString("fr-FR")} — cet écran se rafraîchit tout seul.
+        </p>
+      )}
+
+      {total && total.equipements_comptes > 0 && (
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div className="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-4 py-3">
+            <div className="text-xs text-[var(--color-mute)]">
+              Descendant — total du parc
+            </div>
+            <div className="text-xl font-semibold text-[var(--color-ink)] mt-1">
+              {formaterDebit(total.moy_entrant)}
+            </div>
+            {/* « simultané » n'est pas un détail de vocabulaire : le
+                serveur regroupe désormais les relevés par minute avant de
+                sommer, donc ce pic correspond à un instant qui a
+                réellement eu lieu. La somme de pics isolés donnerait un
+                chiffre que le parc n'a jamais atteint. */}
+            <div className="text-xs text-[var(--color-mute)] mt-0.5">
+              pic simultané {formaterDebit(total.pic_entrant)}
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-4 py-3">
+            <div className="text-xs text-[var(--color-mute)]">
+              Montant — total du parc
+            </div>
+            <div className="text-xl font-semibold text-[var(--color-ink)] mt-1">
+              {formaterDebit(total.moy_sortant)}
+            </div>
+            <div className="text-xs text-[var(--color-mute)] mt-0.5">
+              pic simultané {formaterDebit(total.pic_sortant)}
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-4 py-3">
+            <div className="text-xs text-[var(--color-mute)]">Calculé sur</div>
+            <div className="text-xl font-semibold text-[var(--color-ink)] mt-1">
+              {total.equipements_comptes} équipement
+              {total.equipements_comptes > 1 ? "s" : ""}
+            </div>
+            <div className="text-xs text-[var(--color-mute)] mt-0.5">
+              {total.partiel
+                ? "hors équipements de transit — total partiel"
+                : "hors équipements de transit"}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── LE DÉBIT DU PARC DANS LE TEMPS ──
+
+          Trois chiffres ne disent pas QUAND ça sature. Une moyenne sur
+          24 h noie la demi-heure de sauvegarde qui met le lien à genoux
+          tous les soirs — et c'est exactement celle-là qu'un exploitant
+          cherche. La courbe la montre ; la moyenne la cache.
+
+          Elle se rafraîchit avec le reste de l'écran : à chaque fin de
+          cycle de supervision, et au pire toutes les minutes. */}
+      {courbeGlobale.length > 0 && (
+        <div className="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-4 py-4">
+          <div className="flex flex-wrap items-baseline justify-between gap-2 mb-3">
+            <h2 className="text-sm font-medium text-[var(--color-ink)]">
+              Débit du parc dans le temps
+            </h2>
+            <span className="text-xs text-[var(--color-mute)]">
+              somme de toutes les machines mesurées, hors équipements de transit
+              {historique?.pas_minutes > 1 && ` — un point toutes les ${historique.pas_minutes} min`}
+            </span>
+          </div>
+
+          {/* Un seul point ne fait pas une courbe : le tracé serait vide
+              et l'utilisateur conclurait à une panne. On dit plutôt ce
+              qu'il manque et pourquoi. */}
+          {courbeGlobale.length < 2 ? (
+            <p className="text-xs text-[var(--color-mute)]">
+              Un seul point de mesure pour l'instant. Le débit se calcule par
+              différence entre deux relevés : il faut deux cycles de supervision
+              avant que la courbe démarre.
+            </p>
+          ) : (
+            <div ref={conteneurGlobal} className="w-full" style={{ minHeight: 200 }}>
+              {largeurGlobale > 0 && (
+                <AreaChart
+                  data={courbeGlobale}
+                  width={largeurGlobale}
+                  height={200}
+                  margin={{ top: 4, right: 8, bottom: 0, left: 0 }}
+                >
+                  <defs>
+                    <linearGradient id="grad-global-entrant" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="var(--color-signal)" stopOpacity={0.35} />
+                      <stop offset="100%" stopColor="var(--color-signal)" stopOpacity={0} />
+                    </linearGradient>
+                    <linearGradient id="grad-global-sortant" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="var(--color-ok)" stopOpacity={0.3} />
+                      <stop offset="100%" stopColor="var(--color-ok)" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid stroke="var(--color-line)" strokeDasharray="3 3" vertical={false} />
+                  <XAxis
+                    dataKey="t"
+                    tick={{ fontSize: 11, fill: "var(--color-mute)" }}
+                    tickLine={false}
+                    axisLine={false}
+                    minTickGap={24}
+                  />
+                  <YAxis
+                    tick={{ fontSize: 11, fill: "var(--color-mute)" }}
+                    tickLine={false}
+                    axisLine={false}
+                    width={70}
+                    tickFormatter={formaterDebit}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      background: "var(--color-surface-2)",
+                      border: "1px solid var(--color-line)",
+                      borderRadius: 8,
+                      fontSize: 12,
+                      color: "var(--color-ink)",
+                    }}
+                    formatter={(v, n) => [formaterDebit(v), n === "entrant" ? "Entrant" : "Sortant"]}
+                  />
+                  {/* Mêmes choix que la courbe d'un équipement :
+                      `connectNulls={false}` pour qu'un trou de mesure se
+                      voie comme un trou, et animation coupée — React
+                      StrictMode interrompt l'animation d'apparition et
+                      laisse le tracé figé dans son état initial, donc
+                      invisible. */}
+                  <Area
+                    type="monotone"
+                    dataKey="entrant"
+                    stroke="var(--color-signal)"
+                    strokeWidth={2}
+                    fill="url(#grad-global-entrant)"
+                    connectNulls={false}
+                    dot={false}
+                    isAnimationActive={false}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="sortant"
+                    stroke="var(--color-ok)"
+                    strokeWidth={2}
+                    fill="url(#grad-global-sortant)"
+                    connectNulls={false}
+                    dot={false}
+                    isAnimationActive={false}
+                  />
+                </AreaChart>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {couverture && couverture.avec_mesure < couverture.equipements && (
         <div className="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-4 py-3 text-sm text-[var(--color-mute)]">
           <span className="text-[var(--color-ink)] font-medium">

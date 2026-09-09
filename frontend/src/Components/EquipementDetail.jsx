@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
 import EtatVide from "./EtatVide";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip } from "recharts";
@@ -52,6 +52,9 @@ function tauxLien(i) {
 
 export default function EquipementDetail({ equipement, onClose, onRenomme }) {
   const [releves, setReleves] = useState([]);
+  // État de la supervision, renseigné seulement quand il n'y a aucun
+  // relevé : sert à ne pas accuser SNMP quand le cycle est à l'arrêt.
+  const [supervision, setSupervision] = useState(null);
   const [loading, setLoading] = useState(true);
   const [reveilEnCours, setReveilEnCours] = useState(false);
   const [reveilMessage, setReveilMessage] = useState(null);
@@ -76,24 +79,53 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
      mise en page. Une largeur nulle n'est jamais retenue : elle
      survient pendant les transitions et ferait clignoter le graphique.
      ------------------------------------------------------------------ */
-  const conteneurGraphique = useRef(null);
+  /* ── ON N'ESSAIE PLUS DE DEVINER QUAND MESURER : ON OBSERVE ──
+
+     LE DÉFAUT, ET IL ÉTAIT INVISIBLE.
+
+     La mesure vivait dans un effet déclenché par `loading`. Elle supposait
+     donc que le conteneur du graphique existe au moment précis où le
+     chargement se termine. Il suffisait que l'état des relevés soit posé
+     dans un rendu et `loading` dans un autre — deux `.then` successifs
+     d'une même promesse — pour que l'effet s'exécute alors que la branche
+     affichée était encore l'écran « aucun relevé ». Le conteneur n'existait
+     pas, la mesure ne donnait rien, et l'effet ne se rejouait JAMAIS
+     puisque `loading` ne rebougeait plus.
+
+     Résultat à l'écran : `largeurGraphique` restait à 0, la condition
+     `largeurGraphique > 0` empêchait le graphique d'être construit, et
+     l'utilisateur voyait un titre suivi de RIEN. Pas un graphique vide —
+     un graphique absent. Indiscernable d'une absence de données, alors
+     que la base contenait quatre relevés parfaitement valides.
+
+     LA CORRECTION. Une référence de rappel : React l'appelle au moment
+     exact où il attache le nœud au document, quel que soit l'ordre des
+     états. On mesure là, puis on confie la suite à un ResizeObserver, qui
+     signale tout changement de taille — ouverture de la fiche, rotation
+     d'un téléphone, fenêtre redimensionnée. Plus aucun instant à deviner. */
+  const observateur = useRef(null);
   const [largeurGraphique, setLargeurGraphique] = useState(0);
 
-  useEffect(() => {
-    function mesurer() {
-      const el = conteneurGraphique.current;
-      if (!el) return;
-      const l = el.getBoundingClientRect().width;
-      if (l > 0) setLargeurGraphique(Math.round(l));
+  const conteneurGraphique = useCallback((el) => {
+    if (observateur.current) {
+      observateur.current.disconnect();
+      observateur.current = null;
     }
-    mesurer();
-    const differee = setTimeout(mesurer, 60);
-    window.addEventListener("resize", mesurer);
-    return () => {
-      clearTimeout(differee);
-      window.removeEventListener("resize", mesurer);
+    if (!el) return;
+
+    const mesurer = () => {
+      const l = el.getBoundingClientRect().width;
+      // Une largeur nulle n'est jamais retenue : elle survient pendant les
+      // transitions d'ouverture et ferait clignoter le graphique.
+      if (l > 0) setLargeurGraphique(Math.round(l));
     };
-  }, [loading]);
+
+    mesurer();
+    if (typeof ResizeObserver !== "undefined") {
+      observateur.current = new ResizeObserver(mesurer);
+      observateur.current.observe(el);
+    }
+  }, []);
 
   // Nom personnalisé. Gardé en état local plutôt que relu depuis la
   // liste : après enregistrement, la fiche doit se mettre à jour
@@ -166,8 +198,20 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
   useEffect(() => {
     setLoading(true);
     axios.get(`${API_URL}/equipements/${equipement.id_equipement}/releves`, { params: { heures: 24 } })
-      .then(({ data }) => setReleves(data))
-      .catch(() => setReleves([]))
+      .then(({ data }) => {
+        // La route renvoyait un tableau nu ; elle renvoie désormais
+        // { releves, supervision }. On accepte les deux formes : un
+        // frontend à jour ne doit pas casser face à un serveur qui ne
+        // l'est pas encore — le cas se produit à chaque déploiement.
+        if (Array.isArray(data)) {
+          setReleves(data);
+          setSupervision(null);
+        } else {
+          setReleves(data?.releves ?? []);
+          setSupervision(data?.supervision ?? null);
+        }
+      })
+      .catch(() => { setReleves([]); setSupervision(null); })
       .finally(() => setLoading(false));
   }, [equipement.id_equipement]);
 
@@ -440,17 +484,30 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
           </div>
         )}
 
+        {/* SERVICES EXPOSÉS, ET NON « VULNÉRABILITÉS ».
+            Le titre disait « vulnérabilités potentielles détectées ». Un
+            scan de ports ne détecte pas de vulnérabilité : il constate
+            qu'un service répond. Telnet n'a pas de faille, il transmet
+            les mots de passe en clair par conception — c'est un risque
+            d'exposition, pas une CVE. Annoncer l'un pour l'autre devant
+            un responsable informatique ferait douter de tout le reste. */}
         {vulnerabilites.length > 0 && (
           <div className="mb-5 bg-[var(--color-crit)]/5 border border-[var(--color-crit)]/30 rounded-lg p-4">
-            <h3 className="text-xs uppercase tracking-wide text-[var(--color-crit)] mb-2 font-medium">
-              ⚠ Vulnérabilités potentielles détectées ({vulnerabilites.length})
+            <h3 className="text-xs uppercase tracking-wide text-[var(--color-crit)] mb-1 font-medium">
+              Services exposés à risque ({vulnerabilites.length})
             </h3>
+            <p className="text-[11px] text-[var(--color-mute)] mb-3">
+              Constaté depuis les ports ouverts. Ce sont des risques liés au
+              protocole lui-même, pas des failles logicielles : aucune
+              version n'a été testée.
+            </p>
             <ul className="space-y-2">
               {vulnerabilites.map((v) => (
                 <li key={v.id_vuln} className="text-xs">
-                  <span className="font-[var(--font-mono)] text-[var(--color-crit)]">{v.cve_id}</span>
-                  {" — "}
-                  <span className="text-[var(--color-ink)]">{v.service} (port {v.port})</span>
+                  <span className="text-[var(--color-ink)] font-medium">
+                    {v.service}
+                  </span>{" "}
+                  <span className="text-[var(--color-mute)]">port {v.port}</span>
                   <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] uppercase bg-[var(--color-crit)]/20 text-[var(--color-crit)]">
                     {v.severite}
                   </span>
@@ -684,20 +741,42 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
              MySQL renvoie 1 ou 0 pour un booléen, jamais true/false :
              `Boolean()` évite qu'un 0 soit lu comme vrai le jour où la
              condition serait écrite autrement. */
-          <EtatVide
-            titre="Aucun relevé sur les dernières 24 heures"
-            ton={Boolean(equipement.expose_snmp) ? "neutre" : "etape"}
-            explication={
-              equipement.expose_snmp
-                ? "Cet équipement répond en SNMP mais n'a pas encore été mesuré. Les relevés arrivent au prochain cycle de supervision, dans une minute."
-                : "Cet équipement n'expose pas SNMP. Processeur, mémoire et débit ne peuvent donc pas être lus — un poste Windows ne l'active pas par défaut."
-            }
-            aide={
-              equipement.expose_snmp
-                ? undefined
-                : "Sa disponibilité reste surveillée par ping : seules les mesures de charge manquent."
-            }
-          />
+          /* DEUX CAUSES POSSIBLES, ET IL FAUT LES SÉPARER.
+             Ce message accusait toujours SNMP. C'est vrai la plupart du
+             temps, et faux précisément quand ça coûte cher : si le cycle
+             de supervision est arrêté, AUCUN équipement n'a de relevé —
+             y compris ceux qui exposent parfaitement SNMP. On envoyait
+             alors chercher un problème d'équipement là où toute la
+             plateforme était à l'arrêt. Le serveur tranche désormais. */
+          supervision && supervision.active === false ? (
+            <EtatVide
+              titre="La supervision ne tourne pas"
+              ton="etape"
+              explication={
+                supervision.dernier_releve_parc
+                  ? `Aucun relevé sur l'ensemble du parc depuis le ${new Date(
+                      supervision.dernier_releve_parc
+                    ).toLocaleString("fr-FR")}. Ce n'est pas propre à cet équipement.`
+                  : "Aucun relevé n'a jamais été enregistré sur ce parc. Ce n'est pas propre à cet équipement."
+              }
+              aide="Vérifiez le message affiché au démarrage du serveur : un site marqué « pris en charge par un agent » est exclu du cycle central."
+            />
+          ) : (
+            <EtatVide
+              titre="Aucun relevé sur les dernières 24 heures"
+              ton={Boolean(equipement.expose_snmp) ? "neutre" : "etape"}
+              explication={
+                equipement.expose_snmp
+                  ? "Cet équipement répond en SNMP mais n'a pas encore été mesuré. Les relevés arrivent au prochain cycle de supervision, dans une minute."
+                  : "Cet équipement n'expose pas SNMP. Processeur, mémoire et débit ne peuvent donc pas être lus — un poste Windows ne l'active pas par défaut."
+              }
+              aide={
+                equipement.expose_snmp
+                  ? undefined
+                  : "Sa disponibilité reste surveillée par ping : seules les mesures de charge manquent."
+              }
+            />
+          )
         ) : (
           <div className="space-y-6">
             <div>

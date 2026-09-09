@@ -1,4 +1,5 @@
 import { useEffect, useState, useMemo } from "react";
+import { ecouter } from "../utils/tempsReel";
 import axios from "axios";
 import ScanLauncher from "./ScanLauncher";
 import StatusDot from "./StatusDot";
@@ -84,9 +85,14 @@ function Signal({ libelle, valeur, unite, ton = "neutre", note }) {
 export default function Dashboard({ idSite = 1 }) {
   const [equipements, setEquipements] = useState([]);
   const [alertes, setAlertes] = useState([]);
+  // Totaux agrégés côté serveur. `alertes` ne contient plus que les cinq
+  // affichées : compter dessus donnerait « 5 alertes » sur un parc qui en
+  // a deux cents.
+  const [resumeAlertes, setResumeAlertes] = useState(null);
   const [couverture, setCouverture] = useState(null);
   const [chargement, setChargement] = useState(true);
   const [exportEnCours, setExportEnCours] = useState(null);
+  const [erreurExport, setErreurExport] = useState(null);
 
   /**
    * Échec de chargement.
@@ -109,12 +115,21 @@ export default function Dashboard({ idSite = 1 }) {
     setErreur(null);
     try {
       // Le jeton est porté par axios.defaults (défini dans App.jsx).
-      const [eqRes, alRes, bpRes] = await Promise.all([
+      const [eqRes, alRes, resumeRes, bpRes] = await Promise.all([
         axios.get(`${API_URL}/equipements`, { params: { id_site: idSite } }),
         // Seules les alertes NON acquittées comptent comme « à traiter » :
         // c'est ce qui vide le tableau de bord quand l'opérateur a fait
         // son tri, sans rien supprimer de l'historique.
-        axios.get(`${API_URL}/alertes`, { params: { statut: "active" } }),
+        //
+        // LIMITE À 5 : cet écran n'en affiche que cinq. On téléchargeait
+        // le parc entier d'alertes pour en montrer cinq et compter le
+        // reste — supportable à dix alertes, pas à mille lors d'une
+        // coupure générale, et le temps réel relance à chaque événement.
+        axios.get(`${API_URL}/alertes`, { params: { statut: "active", limite: 5 } }),
+        // Les totaux viennent du résumé, agrégé côté serveur. C'est
+        // exactement ce pour quoi cette route existait — elle n'était
+        // appelée par personne.
+        axios.get(`${API_URL}/alertes/resume`).catch(() => ({ data: null })),
         // Couverture de la mesure : combien d'équipements sont réellement
         // mesurables. Sans ce chiffre, un écran vide passe pour une panne.
         axios
@@ -124,6 +139,7 @@ export default function Dashboard({ idSite = 1 }) {
 
       setEquipements(eqRes.data);
       setAlertes(alRes.data);
+      setResumeAlertes(resumeRes.data?.active ?? null);
       setCouverture(bpRes.data?.couverture ?? null);
     } catch (err) {
       console.error("Chargement du tableau de bord impossible", err);
@@ -138,8 +154,24 @@ export default function Dashboard({ idSite = 1 }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [idSite]);
 
+  /* Rafraîchissement sans rechargement.
+     L'événement ne porte aucune donnée : il dit qu'il y a du neuf, et on
+     relit par les routes normales — celles qui appliquent déjà le
+     cloisonnement et les rôles. Sans temps réel côté serveur, `ecouter`
+     ne fait rien et l'écran se comporte comme avant. */
+  useEffect(() => {
+    const arreterAlerte = ecouter("alerte", () => chargerDonnees());
+    const arreterEquipement = ecouter("equipement", () => chargerDonnees());
+    return () => {
+      arreterAlerte();
+      arreterEquipement();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idSite]);
+
   async function telechargerRapport(format) {
     setExportEnCours(format);
+    setErreurExport(null);
     try {
       const response = await axios.get(`${API_URL}/rapport/${format}`, {
         params: { id_site: idSite },
@@ -154,7 +186,20 @@ export default function Dashboard({ idSite = 1 }) {
       lien.remove();
       window.URL.revokeObjectURL(url);
     } catch (err) {
+      // L'ÉCHEC ÉTAIT MUET.
+      //
+      // L'erreur ne partait qu'en console : l'utilisateur cliquait, le
+      // bouton tournait, s'arrêtait, et rien ne se passait. Aucun fichier,
+      // aucun message. C'est le même défaut que les écrans vides sans
+      // explication — une panne qui ressemble à un produit qui ne fait rien.
+      //
+      // La cause la plus fréquente est un parc sans données sur la période,
+      // ou une génération PDF en échec côté serveur. On le dit.
       console.error("Téléchargement du rapport impossible", err);
+      setErreurExport(
+        err.response?.data?.error ||
+          "Le rapport n'a pas pu être produit. Vérifiez qu'il existe des relevés sur la période, puis réessayez."
+      );
     } finally {
       setExportEnCours(null);
     }
@@ -169,7 +214,11 @@ export default function Dashboard({ idSite = 1 }) {
     const inconnus = equipements.filter((e) => e.statut === "inconnu").length;
     const total = equipements.length;
 
-    const critiques = alertes.filter((a) => a.niveau === "critical").length;
+    // Totaux : le résumé serveur s'il a répondu, sinon la liste — qui est
+    // limitée à cinq et sous-estimerait. Le repli reste préférable à un
+    // écran vide, et le cas ne se produit que si /alertes/resume échoue.
+    const totalAlertes = resumeAlertes?.total ?? alertes.length;
+    const critiques = resumeAlertes?.critical ?? alertes.filter((a) => a.niveau === "critical").length;
     const observables = up + down;
 
     return {
@@ -178,6 +227,7 @@ export default function Dashboard({ idSite = 1 }) {
       inconnus,
       total,
       critiques,
+      totalAlertes,
       // Disponibilité calculée sur les seuls équipements OBSERVABLES.
       // Compter les « inconnu » comme hors ligne ferait chuter le taux
       // pour une raison qui n'est pas une panne.
@@ -187,7 +237,7 @@ export default function Dashboard({ idSite = 1 }) {
         return d && (!max || d > max) ? d : max;
       }, null),
     };
-  }, [equipements, alertes]);
+  }, [equipements, alertes, resumeAlertes]);
 
   /**
    * Le verdict, en une phrase.
@@ -302,6 +352,12 @@ export default function Dashboard({ idSite = 1 }) {
         </div>
       </div>
 
+      {erreurExport && (
+        <p className="text-sm" style={{ color: "var(--color-crit)" }}>
+          {erreurExport}
+        </p>
+      )}
+
       {/* ── LE VERDICT ── */}
       {verdict && (
         <div
@@ -369,8 +425,8 @@ export default function Dashboard({ idSite = 1 }) {
         />
         <Signal
           libelle="Alertes à traiter"
-          valeur={alertes.length}
-          ton={bilan.critiques > 0 ? "critique" : alertes.length > 0 ? "attention" : "ok"}
+          valeur={bilan.totalAlertes}
+          ton={bilan.critiques > 0 ? "critique" : bilan.totalAlertes > 0 ? "attention" : "ok"}
           note={bilan.critiques > 0 ? `dont ${bilan.critiques} critique(s)` : "acquittées exclues"}
         />
         {/* ── LE CHIFFRE QUI ÉVITE UN MALENTENDU ──
@@ -410,7 +466,7 @@ export default function Dashboard({ idSite = 1 }) {
             À traiter en priorité
           </h2>
 
-          {alertes.length === 0 ? (
+          {bilan.totalAlertes === 0 ? (
             <p className="text-sm text-[var(--color-mute)]">
               Rien à traiter. Les alertes acquittées restent consultables dans
               l'onglet correspondant de la page Alertes.
@@ -455,9 +511,9 @@ export default function Dashboard({ idSite = 1 }) {
                   </li>
                 ))}
               </ul>
-              {alertes.length > prioritaires.length && (
+              {bilan.totalAlertes > prioritaires.length && (
                 <p className="text-xs text-[var(--color-mute)] mt-4 pt-3 border-t border-[var(--color-line)]">
-                  {alertes.length - prioritaires.length} autre(s) alerte(s) — voir la page Alertes.
+                  {bilan.totalAlertes - prioritaires.length} autre(s) alerte(s) — voir la page Alertes.
                 </p>
               )}
             </>

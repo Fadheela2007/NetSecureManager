@@ -1,4 +1,5 @@
 import { useEffect, useState, useMemo } from "react";
+import { ecouter } from "../utils/tempsReel";
 import axios from "axios";
 import EtatVide from "./EtatVide";
 import { decrireErreur } from "../utils/erreurReseau";
@@ -75,6 +76,16 @@ export default function AlertesPage() {
   useEffect(() => {
     setSelection(new Set());
     charger();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statut]);
+
+  /* Une alerte qui naît pendant qu'on regarde la page doit apparaître.
+     La sélection en cours n'est PAS vidée ici : l'opérateur peut être en
+     train de cocher des lignes pour les acquitter, et les lui reprendre
+     au milieu serait pire que de ne pas rafraîchir. */
+  useEffect(() => {
+    const arreter = ecouter("alerte", () => charger());
+    return arreter;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statut]);
 

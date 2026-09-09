@@ -28,6 +28,20 @@ export default function AccesWebPage({ idSite }) {
   const [chargement, setChargement] = useState(true);
   const [indisponible, setIndisponible] = useState(null);
   const [retour, setRetour] = useState(null);
+  // Compteurs de requêtes bloquées, remontés par l'agent depuis dnsmasq.
+  // La donnée existait et n'était affichée nulle part : c'est pourtant
+  // elle qui prouve au client que le blocage travaille réellement.
+  const [stats, setStats] = useState(null);
+
+  useEffect(() => {
+    axios
+      .get(`${API_URL}/acces-web/stats`, { params: { jours: 30 } })
+      .then(({ data }) => setStats(data?.stats ?? []))
+      // Échec silencieux ASSUMÉ : c'est un complément d'information, pas
+      // un écran. L'absence de statistiques ne doit pas faire croire que
+      // la page est en panne.
+      .catch(() => setStats([]));
+  }, []);
   const [nouveauDomaine, setNouveauDomaine] = useState("");
   const [nouvelleAction, setNouvelleAction] = useState("bloquer");
   const [nouveauCommentaire, setNouveauCommentaire] = useState("");
@@ -265,6 +279,51 @@ export default function AccesWebPage({ idSite }) {
             </p>
           )}
         </div>
+
+        {/* CE QUE LE BLOCAGE A RÉELLEMENT FAIT.
+            Sans ces chiffres, rien ne distingue une politique qui travaille
+            d'une politique qui n'est appliquée nulle part : l'écran affiche
+            « active » dans les deux cas. C'est la preuve que le client
+            demandera, et elle existait déjà en base sans être montrée. */}
+        {stats && stats.length > 0 && (
+          <div className="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] p-4">
+            <p className="text-xs uppercase tracking-wide text-[var(--color-mute)] mb-2">
+              Requêtes bloquées — 30 derniers jours
+            </p>
+            <p className="text-2xl font-semibold text-[var(--color-ink)] tabular-nums">
+              {stats
+                .reduce((total, l) => total + Number(l.nb || 0), 0)
+                .toLocaleString("fr-FR")}
+            </p>
+            <ul className="mt-3 space-y-1">
+              {/* Cumul par catégorie, les cinq premières : la liste complète
+                  ferait défiler sans rien apprendre de plus. */}
+              {Object.entries(
+                stats.reduce((acc, l) => {
+                  const cle = l.libelle || l.code || "Non catégorisé";
+                  acc[cle] = (acc[cle] || 0) + Number(l.nb || 0);
+                  return acc;
+                }, {})
+              )
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 5)
+                .map(([libelle, nb]) => (
+                  <li
+                    key={libelle}
+                    className="flex justify-between text-xs text-[var(--color-mute)]"
+                  >
+                    <span>{libelle}</span>
+                    <span className="tabular-nums">{nb.toLocaleString("fr-FR")}</span>
+                  </li>
+                ))}
+            </ul>
+            <p className="text-[11px] text-[var(--color-mute)] mt-3">
+              Compteurs remontés par l'agent. Aucune requête n'est enregistrée
+              individuellement : ce sont des totaux, jamais un historique de
+              navigation.
+            </p>
+          </div>
+        )}
 
         <label className="block">
           <span className="block text-xs uppercase tracking-wide text-[var(--color-mute)] mb-1">
