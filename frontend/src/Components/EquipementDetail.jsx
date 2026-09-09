@@ -473,6 +473,36 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
           </div>
         </dl>
 
+        {/* ── POURQUOI CETTE MACHINE EST À L'INVENTAIRE ──
+
+            La ligne qu'aucun autre outil n'affiche. Zabbix, Nagios,
+            Centreon et Checkmk montrent un hôte et son état ; aucun ne
+            dit sur quelle PREUVE cet hôte figure dans la liste.
+
+            C'est par ce trou qu'une adresse fantôme entre : le balayage
+            lisait le cache ARP du système — un souvenir des machines
+            vues il y a quelques minutes — et l'inscrivait comme un
+            équipement. Checkmk connaît encore ce défaut, forum à l'appui.
+
+            Ici, chaque machine porte sa preuve et sa date. Un client qui
+            conteste une ligne a sa réponse en une phrase. */}
+        {equipement.preuve_detail && (
+          <div className="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-4 py-3">
+            <div className="text-[11px] uppercase tracking-wide text-[var(--color-mute)]">
+              Pourquoi cette machine est à l'inventaire
+            </div>
+            <div className="text-[13px] text-[var(--color-ink)] mt-1">
+              {equipement.preuve_detail}
+            </div>
+            {equipement.date_preuve && (
+              <div className="text-[11px] text-[var(--color-mute)] mt-1">
+                Constaté le{" "}
+                {new Date(equipement.date_preuve).toLocaleString("fr-FR")}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Dit explicitement que le contrôle n'a pas eu lieu, plutôt que
             de laisser une absence passer pour un feu vert. */}
         {vulnErreur && (

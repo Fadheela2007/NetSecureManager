@@ -14,6 +14,7 @@ const { snmpProbe, diagnosePanne, snmpMetrics } = require("./discoveryService");
 const { passagePlanificateur } = require("./rapportPlanifieService");
 const { diffuser } = require("./tempsReelService");
 const { calculerDebitsEquipement, oublier: oublierTrafic } = require("./traficService");
+const { purgerAdressesSansPreuve } = require("./inventaireService");
 
 // Nombre d'équipements sondés simultanément. Chaque vérification peut durer
 // plusieurs secondes (ping + SNMP + diagnostic de panne sur 5 ports) : sans
@@ -1134,6 +1135,21 @@ async function cycleSupervision() {
   if (equipements.length > 0) {
     diffuser(null, "cycle", { equipements: equipements.length });
   }
+
+  /* ── L'INVENTAIRE SE NETTOIE TOUT SEUL, À CHAQUE CYCLE ──
+
+     Placé APRÈS la boucle, jamais avant : un équipement sondé à l'instant
+     vient peut-être d'écrire son premier relevé, et il ne doit pas être
+     jugé sur un état antérieur d'une seconde.
+
+     Portée VOLONTAIREMENT globale, alors que le cycle ne supervise que les
+     sites sans agent : une adresse sans équipement inscrite par un agent
+     distant est exactement le même défaut, et n'aurait sinon jamais été
+     nettoyée. Les équipements poussés par un agent portent le statut
+     « up », que le critère écarte d'office. */
+  await purgerAdressesSansPreuve().catch((err) =>
+    console.error("Nettoyage de l'inventaire ignoré:", err.message)
+  );
 }
 
 function start() {

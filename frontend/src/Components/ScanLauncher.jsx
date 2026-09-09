@@ -200,10 +200,38 @@ export default function ScanLauncher({ idSite }) {
       {error && <p className="error">{error}</p>}
 
       {result && !result.plages && (
-        <p className="success">
-          {result.nb_equipements} équipement(s) découvert(s) et ajouté(s)
-          automatiquement.
-        </p>
+        <>
+          <p className="success">
+            {result.nb_equipements} équipement(s) découvert(s) et ajouté(s)
+            automatiquement.
+          </p>
+
+          {/* CE QUE LE SCAN A ÉCARTÉ, DIT AUSSI CLAIREMENT QUE CE QU'IL A
+              TROUVÉ.
+
+              Une adresse qui ne répond à rien n'est pas un équipement : elle
+              n'entre pas à l'inventaire, et celles qu'y avaient laissées les
+              anciens scans en sortent. Sans cette ligne, l'inventaire
+              rétrécirait sans explication — et un chiffre qui baisse sans
+              raison est ce qui fait douter de tout le reste. */}
+          {(result.ignores_sans_preuve > 0 || result.adresses_retirees > 0) && (
+            <p className="aide">
+              {result.ignores_sans_preuve > 0 && (
+                <>
+                  {result.ignores_sans_preuve} adresse(s) sondée(s) sans réponse :
+                  ni ping, ni port TCP, ni SNMP, ni empreinte nmap. Elles ne sont
+                  pas inscrites à l'inventaire.{" "}
+                </>
+              )}
+              {result.adresses_retirees > 0 && (
+                <>
+                  {result.adresses_retirees} adresse(s) laissée(s) par un scan
+                  précédent ont été retirées pour la même raison.
+                </>
+              )}
+            </p>
+          )}
+        </>
       )}
 
       {result && result.plages && (

@@ -791,6 +791,29 @@ async function scanRange({
         snmpData ? snmpData.sysName : null
       );
 
+      /* ── QU'EST-CE QUI PROUVE QUE CETTE MACHINE EXISTE ? ──
+
+         Cinq preuves possibles, de la plus directe à la plus indirecte.
+         La première trouvée l'emporte : inutile de chercher plus loin
+         quand la machine a déjà répondu.
+
+         La cinquième — la sonde de refus TCP — n'est tentée QUE si les
+         quatre autres ont échoué. C'est le cas de l'adresse trouvée dans
+         le seul cache ARP : soit elle refuse une connexion, et elle
+         existe ; soit elle reste muette, et il n'y a personne. */
+      let preuve = null;
+      if (host.latency !== null && host.latency !== undefined) {
+        preuve = { preuve: "ping", detail: `réponse au ping (${Math.round(host.latency) || "<1"} ms)` };
+      } else if (portsOuverts.length > 0) {
+        preuve = { preuve: "port_ouvert", detail: `port ${portsOuverts[0].port} ouvert` };
+      } else if (snmpData) {
+        preuve = { preuve: "snmp", detail: "réponse SNMP" };
+      } else if (osDetecte) {
+        preuve = { preuve: "nmap", detail: `empreinte nmap : ${String(osDetecte).slice(0, 60)}` };
+      } else {
+        preuve = await preuveDePresence(host.ip).catch(() => null);
+      }
+
       return {
         adresse_ip: host.ip,
         adresse_mac: mac,
@@ -823,12 +846,26 @@ async function scanRange({
 
            Ce que ça change à l'écran : après un scan, le tableau de bord
            cesse d'annoncer un parc en meilleure santé qu'il ne l'est. */
-        statut:
-          host.latency !== null && host.latency !== undefined
-            ? "up"
-            : portsOuverts.length > 0 || snmpData || osDetecte
-              ? "up"
-              : "inconnu",
+        statut: preuve ? "up" : "inconnu",
+
+        /* ── LA PREUVE D'EXISTENCE, ET SA DATE ──
+
+           C'est ce qu'aucun autre outil ne dit. Zabbix, Nagios, Centreon
+           et Checkmk montrent un hôte et son état ; aucun ne dit SUR QUELLE
+           PREUVE cet hôte figure dans la liste. C'est exactement le trou
+           par lequel une adresse fantôme entre à l'inventaire — et
+           Checkmk y tombe encore, son forum en témoigne.
+
+           La plateforme enregistrait déjà quelle règle avait décidé du
+           type, du nom et du fabricant. Il manquait la ligne la plus
+           fondamentale : pourquoi cette machine est-elle là du tout ?
+
+           Un client qui conteste une ligne obtient sa réponse en une
+           phrase : « refus de connexion sur le port 445, le 9 septembre
+           à 13h42 ». Et un fantôme devient impossible : sans preuve, pas
+           de ligne. */
+        preuve_existence: preuve ? preuve.preuve : null,
+        preuve_detail: preuve ? preuve.detail : null,
         derniere_decouverte: new Date(),
       };
     } catch (err) {
@@ -863,6 +900,91 @@ function testPort(ip, port, timeoutMs = 800) {
     socket.once("error", () => { resolve(false); });
     socket.connect(port, ip);
   });
+}
+
+/**
+ * Sonde de PRÉSENCE, distincte de la sonde de service.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * CE QUE `testPort` JETTE, ET POURQUOI ÇA COMPTE
+ *
+ * `testPort` répond « ouvert » ou « pas ouvert ». Il met dans le même sac
+ * deux réponses qui n'ont rien à voir :
+ *
+ *   • REFUS DE CONNEXION (ECONNREFUSED) — la machine est là, elle a
+ *     répondu tout de suite, ce port-là est simplement fermé ;
+ *   • SILENCE (délai dépassé, hôte injoignable) — personne n'a répondu.
+ *
+ * Un refus est une PREUVE DE PRÉSENCE. C'est le « TCP ping » que nmap
+ * emploie avec l'option -PS, et c'est l'équivalent portable de l'ARP ping
+ * de ntopng : ntop explique choisir ARP parce qu'il travaille à la
+ * couche 2 et ne peut pas être filtré, contrairement à ICMP. Nous ne
+ * pouvons pas émettre d'ARP sans droits particuliers ni dépendance
+ * native ; le refus TCP donne la même certitude, sans privilège, sous
+ * Windows comme sous Linux.
+ *
+ * CE QUE ÇA CHANGE. Une machine qui bloque le ping, n'expose aucun port
+ * et ne parle pas SNMP était jusqu'ici indiscernable d'une adresse
+ * fantôme. Elle devient identifiable — et le fantôme, lui, reste
+ * silencieux sur les deux comptes.
+ * ─────────────────────────────────────────────────────────────────────
+ *
+ * @returns {Promise<"ouvert"|"refuse"|"silence">}
+ */
+function sonderPresence(ip, port, timeoutMs = 700) {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    let repondu = false;
+    const finir = (verdict) => {
+      if (repondu) return;
+      repondu = true;
+      socket.destroy();
+      resolve(verdict);
+    };
+
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => finir("ouvert"));
+    socket.once("timeout", () => finir("silence"));
+    socket.once("error", (err) => {
+      // ECONNREFUSED : quelqu'un a répondu « ce port est fermé ». Il faut
+      // donc une pile réseau vivante à cette adresse.
+      // ECONNRESET : une réponse aussi, brutale mais réelle.
+      // EHOSTUNREACH / ENETUNREACH / ETIMEDOUT : rien à cette adresse.
+      finir(err.code === "ECONNREFUSED" || err.code === "ECONNRESET" ? "refuse" : "silence");
+    });
+
+    socket.connect(port, ip);
+  });
+}
+
+/**
+ * Cette adresse abrite-t-elle une machine ? Renvoie la preuve, ou null.
+ *
+ * Les ports choisis sont ceux qu'une pile réseau refuse le plus
+ * franchement quand rien n'écoute : ils sont testés EN PARALLÈLE, le
+ * coût est celui d'un seul délai.
+ */
+const PORTS_PRESENCE = [445, 135, 80, 443, 22, 3389];
+
+async function preuveDePresence(ip) {
+  const verdicts = await Promise.all(
+    PORTS_PRESENCE.map(async (port) => ({
+      port,
+      verdict: await sonderPresence(ip, port).catch(() => "silence"),
+    }))
+  );
+
+  const ouvert = verdicts.find((v) => v.verdict === "ouvert");
+  if (ouvert) return { preuve: "port_ouvert", detail: `port ${ouvert.port} ouvert` };
+
+  const refus = verdicts.find((v) => v.verdict === "refuse");
+  if (refus) {
+    return {
+      preuve: "refus_tcp",
+      detail: `refus de connexion sur le port ${refus.port} — la machine répond, ce port est fermé`,
+    };
+  }
+  return null;
 }
 
 /**
@@ -1391,6 +1513,7 @@ async function snmpMetrics(ip, community = "public", { avecInventaire = false } 
 module.exports = {
   estAdresseReservee,
   scanRange, pingSweep, snmpProbe, snmpProbeV3, listHostsFromCidr,
+  sonderPresence, preuveDePresence,
   diagnosePanne, scanPorts, arpComplement, snmpMetrics, nmapFingerprint,
   PORTS_SIGNE_DE_VIE, normaliserMacSimple,
   diagnostiquerPortee, sousReseauxLocaux, estDirectementAttache,

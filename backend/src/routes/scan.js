@@ -34,6 +34,7 @@ const {
 } = require("../services/nomPersonnaliseService");
 const { detecterConflits, decrireConflit } = require("../services/conflitIpService");
 const { creerAlerte } = require("../services/monitoringService");
+const { purgerAdressesSansPreuve } = require("../services/inventaireService");
 // Même règle que celle qui calcule le total : voir le détail par port.
 const { estIgnoree } = require("../services/traficService");
 
@@ -372,9 +373,56 @@ async function scannerUnePlage(req, id_site, cidr, snmp_community) {
         .catch(() => {});
     }
 
+    /* ── UNE ADRESSE SANS PREUVE N'EST PAS UN ÉQUIPEMENT ──
+
+       CE QUE FONT LES AUTRES OUTILS, ET POURQUOI.
+
+       nmap, sur un réseau local, ENVOIE des requêtes ARP et écoute les
+       réponses : une réponse prouve la présence à l'instant même.
+       Zabbix ne crée un hôte que lorsqu'un contrôle aboutit — ping, port
+       ou SNMP. Aucun des deux n'invente d'hôte.
+
+       CE QUE NOUS FAISIONS. Nous lisions `arp -a`, c'est-à-dire le CACHE
+       ARP du système. Ce cache garde en mémoire les machines vues il y a
+       plusieurs minutes. Lire un cache n'est pas sonder : c'est un
+       souvenir, pas une preuve. Un portable parti à midi y figure encore
+       à midi cinq, et se retrouvait inscrit à l'inventaire comme un
+       équipement à part entière.
+
+       Sur un parc Wi-Fi, cela remplissait la liste d'adresses derrière
+       lesquelles il n'y a personne — et ces lignes ne pouvaient jamais
+       ni s'expliquer ni disparaître.
+
+       LA RÈGLE. Un hôte JAMAIS VU AUPARAVANT n'est inscrit que s'il a
+       donné au moins un signe de vie : réponse au ping, port TCP ouvert,
+       réponse SNMP, ou empreinte nmap. Sans aucun des quatre, on ne
+       l'inscrit pas.
+
+       POURQUOI C'EST SÛR. Le cas qu'on pourrait craindre — un poste
+       Windows qui bloque le ping — est couvert : il expose les ports
+       135, 139 et 445, que le scan de ports voit. C'est justement pour
+       lui que le complément ARP existait ; il n'en a pas besoin.
+
+       CE QU'ON NE FAIT PAS. On ne supprime jamais un équipement DÉJÀ
+       CONNU qui ne donne rien ce coup-ci. Il a fait ses preuves un jour :
+       c'est à la supervision, qui observe en continu, de dire s'il est
+       encore là — pas à un scan qui passe une fois. */
+    let ignores_sans_preuve = 0;
+
     for (const eq of equipements) {
       // L'échec d'un seul équipement ne doit pas annuler tout le scan.
       try {
+        if (eq.statut !== "up") {
+          const [dejaConnu] = await db.query(
+            "SELECT id_equipement FROM EQUIPEMENT WHERE id_site = ? AND adresse_ip = ?",
+            [id_site, eq.adresse_ip]
+          );
+          if (dejaConnu.length === 0) {
+            ignores_sans_preuve++;
+            continue;
+          }
+        }
+
         const idType = await getIdType(eq.type_detecte);
 
         await db.query(
@@ -397,8 +445,9 @@ async function scannerUnePlage(req, id_site, cidr, snmp_community) {
           `INSERT INTO EQUIPEMENT (id_site, id_type, type_source, nom, nom_source,
                                    adresse_ip, adresse_mac,
                                    fabricant, fabricant_source, sys_descr, os_detecte,
-                                   statut, derniere_decouverte)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+                                   statut, derniere_decouverte,
+                                   preuve_existence, preuve_detail, date_preuve)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, NOW())
            ON DUPLICATE KEY UPDATE
              id_type = VALUES(id_type), type_source = VALUES(type_source),
              nom = COALESCE(VALUES(nom), nom),
@@ -420,7 +469,15 @@ async function scannerUnePlage(req, id_site, cidr, snmp_community) {
                 on laisse la supervision décider — c'est elle qui observe
                 en continu. */
              statut = CASE WHEN ? = 'up' THEN 'up' ELSE statut END,
-             derniere_decouverte = NOW()`,
+             derniere_decouverte = NOW(),
+             /* La preuve n'est REMPLACÉE que par une nouvelle preuve.
+                Un scan qui ne prouve rien ne doit pas effacer celle du
+                scan précédent : on perdrait la seule trace expliquant
+                pourquoi cette machine est à l'inventaire. */
+             preuve_existence = COALESCE(VALUES(preuve_existence), preuve_existence),
+             preuve_detail    = COALESCE(VALUES(preuve_detail), preuve_detail),
+             date_preuve      = CASE WHEN VALUES(preuve_existence) IS NOT NULL
+                                     THEN NOW() ELSE date_preuve END`,
           // `eq.statut` apparaît DEUX fois : une pour l'insertion, une pour
           // le CASE de la mise à jour. MySQL lie les marqueurs dans l'ordre
           // du texte, VALUES d'abord.
@@ -428,6 +485,8 @@ async function scannerUnePlage(req, id_site, cidr, snmp_community) {
            eq.adresse_ip, eq.adresse_mac,
            eq.fabricant, eq.fabricant_source ?? null, eq.sys_descr, eq.os_detecte,
            eq.statut ?? "inconnu",
+           eq.preuve_existence ?? null,
+           eq.preuve_detail ?? null,
            eq.statut ?? "inconnu"]
         );
 
@@ -503,7 +562,32 @@ async function scannerUnePlage(req, id_site, cidr, snmp_community) {
       }
     }
 
-    return { cidr, equipements };
+    /* ── NETTOYAGE DE L'INVENTAIRE, ICI ET AUTOMATIQUEMENT ──
+
+       Refuser les nouvelles adresses sans preuve ne suffisait pas : celles
+       inscrites par les scans précédents restaient, et il fallait lancer
+       une commande pour les retirer. Faire porter à l'exploitant une règle
+       que le logiciel connaît par cœur n'est pas une solution, c'est une
+       corvée récurrente.
+
+       La règle est donc tenue par le produit, à la fin de chaque scan.
+       Aucune commande de nettoyage n'existe plus. Le détail du critère et
+       du frein est dans inventaireService. */
+    const nettoyage = await purgerAdressesSansPreuve(id_site).catch((e) => {
+      console.error("Nettoyage de l'inventaire ignoré:", e.message);
+      return { retires: 0 };
+    });
+
+    // `ignores_sans_preuve` remonte jusqu'à l'écran : une adresse écartée
+    // doit être COMPTÉE et DITE, pas passée sous silence. Sans ce chiffre,
+    // la nouvelle règle donnerait l'impression que le scan trouve moins
+    // qu'avant, sans expliquer pourquoi.
+    return {
+      cidr,
+      equipements,
+      ignores_sans_preuve,
+      adresses_retirees: nettoyage.retires || 0,
+    };
   } catch (err) {
     err.cidr = cidr;
     throw err;
@@ -556,12 +640,19 @@ router.post("/scan", requireRole("admin", "operateur"), async (req, res) => {
   }
 
   try {
-    const { equipements } = await scannerUnePlage(req, id_site, cidr, snmp_community);
+    const { equipements, ignores_sans_preuve, adresses_retirees } = await scannerUnePlage(
+      req, id_site, cidr, snmp_community
+    );
     const conflits = await conflitsDuSite(id_site);
 
     res.json({
       message: "Scan terminé",
       nb_equipements: equipements.length,
+      ignores_sans_preuve: ignores_sans_preuve || 0,
+      // Ce que le scan a RETIRÉ, au même titre que ce qu'il a trouvé. Une
+      // ligne qui disparaît de l'inventaire sans un mot inquiète à juste
+      // titre : on dit combien, et pourquoi.
+      adresses_retirees: adresses_retirees || 0,
       equipements,
       conflits_ip: conflits.length,
     });
@@ -1395,6 +1486,7 @@ router.get("/equipements", async (req, res) => {
             e.fabricant, e.fabricant_source, e.type_source,
             e.os_detecte, e.derniere_decouverte,
             e.sys_descr IS NOT NULL AS expose_snmp,
+            e.preuve_existence, e.preuve_detail, e.date_preuve,
             t.libelle AS type_libelle
      FROM EQUIPEMENT e
      LEFT JOIN TYPE_EQUIPEMENT t ON t.id_type = e.id_type
