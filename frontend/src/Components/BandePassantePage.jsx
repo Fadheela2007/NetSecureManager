@@ -462,7 +462,7 @@ export default function BandePassantePage({ idSite }) {
                     strokeWidth={2}
                     fill="url(#grad-global-entrant)"
                     connectNulls={false}
-                    dot={false}
+                    dot={courbeGlobale.length <= 8}
                     isAnimationActive={false}
                   />
                   <Area
@@ -472,7 +472,7 @@ export default function BandePassantePage({ idSite }) {
                     strokeWidth={2}
                     fill="url(#grad-global-sortant)"
                     connectNulls={false}
-                    dot={false}
+                    dot={courbeGlobale.length <= 8}
                     isAnimationActive={false}
                   />
                 </AreaChart>
@@ -672,8 +672,8 @@ export default function BandePassantePage({ idSite }) {
                          l'apparition d'une mesure n'a pas de sens ici.
                          Un opérateur qui ouvre une fiche veut lire une
                          valeur, pas attendre qu'elle se dessine. */}
-                  <Area type="monotone" dataKey="entrant" stroke="var(--color-signal)" strokeWidth={2} fill="url(#grad-entrant)" connectNulls={false} dot={false} isAnimationActive={false} />
-                  <Area type="monotone" dataKey="sortant" stroke="var(--color-ok)" strokeWidth={2} fill="url(#grad-sortant)" connectNulls={false} dot={false} isAnimationActive={false} />
+                  <Area type="monotone" dataKey="entrant" stroke="var(--color-signal)" strokeWidth={2} fill="url(#grad-entrant)" connectNulls={false} dot={courbe.length <= 8} isAnimationActive={false} />
+                  <Area type="monotone" dataKey="sortant" stroke="var(--color-ok)" strokeWidth={2} fill="url(#grad-sortant)" connectNulls={false} dot={courbe.length <= 8} isAnimationActive={false} />
                 </AreaChart>
               )}
             </div>

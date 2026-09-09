@@ -790,7 +790,7 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
                     <XAxis dataKey="heure" stroke="var(--color-mute)" fontSize={11} />
                     <YAxis stroke="var(--color-mute)" fontSize={11} />
                     <Tooltip contentStyle={{ background: "var(--color-surface-2)", border: "1px solid var(--color-line)" }} />
-                    <Line type="monotone" dataKey="latence" stroke="var(--color-signal)" dot={false} strokeWidth={2} isAnimationActive={false} />
+                    <Line type="monotone" dataKey="latence" stroke="var(--color-signal)" dot={donnees.length <= 8} strokeWidth={2} isAnimationActive={false} />
                   </LineChart>
                 )}
               </div>
@@ -808,8 +808,8 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
                       <XAxis dataKey="heure" stroke="var(--color-mute)" fontSize={11} />
                       <YAxis stroke="var(--color-mute)" fontSize={11} domain={[0, 100]} />
                       <Tooltip contentStyle={{ background: "var(--color-surface-2)", border: "1px solid var(--color-line)" }} />
-                      <Line type="monotone" dataKey="cpu" name="CPU" stroke="var(--color-warn)" dot={false} strokeWidth={2} isAnimationActive={false} />
-                      <Line type="monotone" dataKey="ram" name="RAM" stroke="var(--color-ok)" dot={false} strokeWidth={2} isAnimationActive={false} />
+                      <Line type="monotone" dataKey="cpu" name="CPU" stroke="var(--color-warn)" dot={donnees.length <= 8} strokeWidth={2} isAnimationActive={false} />
+                      <Line type="monotone" dataKey="ram" name="RAM" stroke="var(--color-ok)" dot={donnees.length <= 8} strokeWidth={2} isAnimationActive={false} />
                     </LineChart>
                   )}
                 </div>

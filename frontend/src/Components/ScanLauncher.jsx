@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import axios from "axios";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
@@ -31,6 +31,36 @@ export default function ScanLauncher({ idSite }) {
   const [error, setError] = useState(null);
   const [reseaux, setReseaux] = useState(null);
   const [detection, setDetection] = useState(false);
+
+  /* ── UN SCAN LONG DOIT DIRE QU'IL TRAVAILLE ──
+
+     Le bouton affichait « Scan en cours... » et rien d'autre. Sur une
+     plage /23 avec trois machines analysées à la fois, l'attente dépasse
+     dix minutes — pendant lesquelles rien à l'écran ne distingue un scan
+     qui avance d'un serveur planté. La première réaction est de recharger
+     la page, ce qui abandonne le scan sans l'arrêter côté serveur.
+
+     Le compteur ne mesure pas la progression réelle (il faudrait la faire
+     remonter du serveur) mais il prouve que le temps passe et rappelle
+     l'ordre de grandeur attendu. C'est ce qui manque pour tenir dix
+     minutes sans douter. */
+  const [secondes, setSecondes] = useState(0);
+
+  useEffect(() => {
+    if (loading === null) {
+      setSecondes(0);
+      return;
+    }
+    const debut = Date.now();
+    const minuteur = setInterval(
+      () => setSecondes(Math.floor((Date.now() - debut) / 1000)),
+      1000
+    );
+    return () => clearInterval(minuteur);
+  }, [loading]);
+
+  const duree = (s) =>
+    s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${String(s % 60).padStart(2, "0")} s`;
 
   /**
    * Propose les plages déduites des interfaces du serveur.
@@ -120,6 +150,19 @@ export default function ScanLauncher({ idSite }) {
           {loading === "plage" ? "Scan en cours..." : "Scanner cette plage"}
         </button>
       </form>
+
+      {loading !== null && (
+        <p className="aide">
+          Scan en cours depuis <strong>{duree(secondes)}</strong>. Ne rechargez
+          pas la page : le scan continuerait côté serveur sans vous rendre son
+          résultat.
+          <span style={{ display: "block", marginTop: "0.25rem" }}>
+            Une plage /24 demande quelques minutes, un /23 le double. La durée
+            dépend surtout du nombre de machines analysées en parallèle
+            (réglage <span className="font-[var(--font-mono)]">SCAN_CONCURRENCE</span>).
+          </span>
+        </p>
+      )}
 
       {/* Réseaux détectés : une ligne par plage, à cliquer pour remplir le
           champ. Les adaptateurs d'hyperviseur sont montrés mais signalés —
