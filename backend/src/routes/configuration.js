@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const db = require("../db");
 const { requireRole } = require("../middleware/requireRole");
+const { tracer } = require("../services/journal");
 
 /**
  * Clés dont la valeur ne doit jamais sortir de la base.
@@ -42,7 +43,32 @@ router.patch("/configuration/:cle", requireRole("admin"), async (req, res) => {
   if (valeur === undefined || valeur === null || valeur === "") {
     return res.status(400).json({ error: "valeur requise" });
   }
-  await db.query("UPDATE CONFIGURATION SET valeur = ? WHERE cle = ?", [valeur, req.params.cle]);
+  // UNE CLÉ INCONNUE N'EST PAS UNE MISE À JOUR RÉUSSIE.
+  //
+  // `UPDATE ... WHERE cle = ?` sur une clé qui n'existe pas ne touche
+  // aucune ligne et ne lève rien : la route répondait « Configuration mise
+  // à jour » et l'interface affichait un succès, alors que le réglage
+  // n'existait nulle part. Une faute de frappe dans un nom de clé
+  // devenait indétectable.
+  const [r] = await db.query("UPDATE CONFIGURATION SET valeur = ? WHERE cle = ?", [
+    valeur,
+    req.params.cle,
+  ]);
+  if (r.affectedRows === 0) {
+    return res.status(404).json({
+      error: `Réglage inconnu : ${req.params.cle}`,
+      aide: "La liste des réglages existants est donnée par GET /api/configuration.",
+    });
+  }
+
+  // Changer un seuil de supervision modifie le comportement de la
+  // plateforme pour tout le monde : cela se trace.
+  await tracer(
+    req,
+    "configuration_modifiee",
+    `Réglage « ${req.params.cle} » porté à « ${String(valeur).slice(0, 200)} »`
+  );
+
   res.json({ message: "Configuration mise à jour" });
 });
 

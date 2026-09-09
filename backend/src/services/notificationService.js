@@ -28,6 +28,12 @@ const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: Number(process.env.SMTP_PORT) || 587,
   secure: false,
+  // `secure: false` sur le port 587 signifie « je commence en clair puis je
+  // passe en TLS » (STARTTLS). Sans `requireTLS`, nodemailer ACCEPTE de
+  // continuer en clair si le serveur n'annonce pas STARTTLS : identifiants
+  // SMTP et contenu des alertes traversent alors le réseau en clair, sans
+  // le moindre avertissement. On préfère un envoi qui échoue franchement.
+  requireTLS: true,
   auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
   connectionTimeout: 5000,
   greetingTimeout: 5000,

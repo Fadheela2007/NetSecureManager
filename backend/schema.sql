@@ -61,10 +61,18 @@ CREATE TABLE IF NOT EXISTS SITE (
   adresse        VARCHAR(255) DEFAULT NULL,
   -- Jeton propre à l'agent du site (routes/sites.js, server.js)
   agent_token    VARCHAR(128) DEFAULT NULL,
-  -- NULL = site LOCAL, supervisé directement par le serveur central.
-  -- Renseigné = site distant pris en charge par un agent. C'est ce champ
-  -- qui dit au cycle central de ne PAS pinger ce site.
+  -- Dernier envoi reçu d'un agent. Sert à savoir si un agent DÉCLARÉ
+  -- transmet encore (alerte « agent muet »). Ne décide PLUS de qui
+  -- supervise le site — voir supervision_par_agent juste en dessous.
   dernier_push   DATETIME DEFAULT NULL,
+  -- Qui supervise ce site : FALSE = le cycle central, TRUE = un agent local.
+  --
+  -- C'était auparavant déduit de `dernier_push`, c'est-à-dire d'un effet de
+  -- bord : lancer un agent une seule fois, pour un essai, sur un site local,
+  -- l'excluait définitivement de la supervision. Constaté en réel — 135
+  -- équipements plus surveillés par personne pendant quatre jours.
+  -- Un mode de fonctionnement doit être déclaré, pas déduit.
+  supervision_par_agent BOOLEAN NOT NULL DEFAULT FALSE,
   -- Ce que l'agent applique RÉELLEMENT en matière de blocage web.
   -- Distinct de POLITIQUE_WEB.version, qui est ce qu'on lui demande.
   -- Sans cet écart, l'interface annoncerait un blocage imaginaire.
@@ -325,7 +333,10 @@ CREATE TABLE IF NOT EXISTS ALERTE (
 -- uniquement sur la sous-requête "id_alerte NOT IN (SELECT ...)" de
 -- escaladeIncidents(). Voir la recommandation en fin de fichier.
 --
--- id_utilisateur_assigne existe en base mais n'est lue par aucun code.
+-- id_utilisateur_assigne est lue et écrite par PATCH /incidents/:id/assigner
+-- (routes/scan.js), et jointe à UTILISATEUR pour afficher le nom du
+-- responsable. Ce commentaire affirmait le contraire — il datait d'avant
+-- la route.
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS INCIDENT (
   id_incident             INT AUTO_INCREMENT PRIMARY KEY,
@@ -381,8 +392,55 @@ CREATE TABLE IF NOT EXISTS VULNERABILITE_CONNUE (
   port         INT NOT NULL,
   severite     ENUM('faible','moyenne','haute','critique') NOT NULL DEFAULT 'moyenne',
   description  TEXT DEFAULT NULL,
-  KEY idx_vuln_port (port)
+  KEY idx_vuln_port (port),
+  -- Unicité (référence, port) : sans elle, rejouer le peuplement ci-dessous
+  -- créerait des doublons et la fiche d'un équipement afficherait deux fois
+  -- le même risque.
+  UNIQUE KEY uk_vuln_ref_port (cve_id, port)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------
+-- Services exposés à risque — données de référence.
+--
+-- Cette table était interrogée par GET /equipements/:id/vulnerabilites et
+-- l'écran affichait « vulnérabilités détectées », mais RIEN ne la
+-- remplissait : aucune installation n'a jamais pu afficher quoi que ce
+-- soit.
+--
+-- On n'y met PAS de numéros de CVE. Une CVE désigne une faille dans une
+-- version précise d'un logiciel ; un scan de ports ne voit pas la version.
+-- Écrire « CVE-2021-… » en face de « le port 445 répond » serait faux, et
+-- le premier technicien qui vérifierait la référence cesserait de croire
+-- le reste du produit.
+--
+-- Ce sont donc des risques liés au PROTOCOLE, vrais quelle que soit la
+-- version, et vérifiables par n'importe quel administrateur réseau.
+-- ---------------------------------------------------------------------
+INSERT IGNORE INTO VULNERABILITE_CONNUE (cve_id, service, port, severite, description) VALUES
+  ('SVC-23-TELNET', 'Telnet', 23, 'critique',
+   'Telnet transmet le mot de passe en clair sur le réseau. Toute personne capable d''écouter le trafic le lit. À remplacer par SSH (port 22).'),
+  ('SVC-21-FTP', 'FTP', 21, 'haute',
+   'FTP transmet identifiants et fichiers sans chiffrement. À remplacer par SFTP ou FTPS.'),
+  ('SVC-445-SMB', 'Partage de fichiers SMB', 445, 'haute',
+   'Le partage de fichiers Windows est exposé. C''est la porte d''entrée privilégiée des rançongiciels sur un réseau interne. À restreindre aux machines qui en ont besoin.'),
+  ('SVC-3389-RDP', 'Bureau à distance RDP', 3389, 'haute',
+   'Le bureau à distance est accessible. Cible constante d''attaques par essais de mots de passe. À limiter par pare-feu et à protéger par une authentification forte.'),
+  ('SVC-3306-MYSQL', 'Base de données MySQL', 3306, 'haute',
+   'Une base de données répond sur le réseau. Une base ne devrait être joignable que depuis les serveurs applicatifs, jamais depuis un poste de travail.'),
+  ('SVC-5432-PGSQL', 'Base de données PostgreSQL', 5432, 'haute',
+   'Une base de données répond sur le réseau. Même remarque que pour MySQL : l''accès doit être restreint aux serveurs applicatifs.'),
+  ('SVC-161-SNMP', 'SNMP', 161, 'moyenne',
+   'L''équipement répond en SNMP. Si la communauté est restée « public », n''importe qui sur le réseau peut lire sa configuration. À vérifier, et à passer en SNMPv3 si le matériel le permet.'),
+  ('SVC-110-POP3', 'POP3', 110, 'moyenne',
+   'POP3 non chiffré : le mot de passe de messagerie circule en clair. À remplacer par POP3S (995).'),
+  ('SVC-143-IMAP', 'IMAP', 143, 'moyenne',
+   'IMAP non chiffré : le mot de passe de messagerie circule en clair. À remplacer par IMAPS (993).'),
+  ('SVC-554-RTSP', 'Flux vidéo RTSP', 554, 'moyenne',
+   'Un flux vidéo est exposé. Beaucoup de caméras le diffusent sans authentification, ou avec les identifiants d''usine. À vérifier sur l''équipement.'),
+  ('SVC-9100-JETDIRECT', 'Impression brute', 9100, 'moyenne',
+   'Le port d''impression brute accepte des travaux sans authentification. Permet d''imprimer à distance, et sur certains modèles de lire ou modifier la configuration.'),
+  ('SVC-80-HTTP-ADMIN', 'Administration en HTTP', 80, 'faible',
+   'Une interface web non chiffrée est exposée. Si elle sert à administrer l''équipement, le mot de passe circule en clair. À basculer en HTTPS quand le matériel le permet.');
 
 
 -- ---------------------------------------------------------------------
@@ -473,11 +531,14 @@ INSERT IGNORE INTO TYPE_EQUIPEMENT (libelle, description) VALUES
   ('detecte_nmap',     'Identifié via signature nmap uniquement'),
   ('inconnu',          'Type non déterminé');
 
--- Les deux premières clés sont lues par monitoringService.getConfig().
--- ⚠ intervalle_scan_minutes existe en base et s'affiche dans l'écran
--- Configuration, mais AUCUN code ne la lit : les crons sont codés en dur
--- ("* * * * *" pour la supervision, "*/5 * * * *" pour l'escalade).
--- La modifier depuis l'interface n'a aujourd'hui aucun effet.
+-- Ces clés sont lues par monitoringService.getConfig().
+--
+-- intervalle_scan_minutes EST lue (monitoringService, cycle de
+-- supervision) : le cron se déclenche toutes les minutes, mais ne
+-- vérifie réellement les équipements que si l'intervalle configuré est
+-- écoulé. Un commentaire affirmait ici qu'aucun code ne la lisait — il
+-- datait d'avant cette correction. Un schéma qui ment sur son propre
+-- code coûte plus cher qu'un schéma sans commentaire.
 INSERT IGNORE INTO CONFIGURATION (cle, valeur, description) VALUES
   ('seuil_echecs_avant_alerte', '3',  'Nombre de pings consécutifs en échec avant de déclarer un équipement hors ligne'),
   ('seuil_escalade_minutes',    '15', 'Durée (minutes) au bout de laquelle une alerte active devient un incident'),
@@ -511,15 +572,16 @@ INSERT IGNORE INTO CONFIGURATION (cle, valeur, description) VALUES
 -- ---------------------------------------------------------------------
 -- 2) VULNERABILITE_CONNUE : unicité de (cve_id, port)
 --
--- Sans cette contrainte, réexécuter le script d'insertion des CVE
--- dupliquera chaque ligne. GET /api/equipements/:id/vulnerabilites
--- afficherait alors la même vulnérabilité plusieurs fois.
+-- ✔ FAIT le 08/09/2026 : la clé `uk_vuln_ref_port (cve_id, port)` est
+-- désormais posée dans la définition de la table ci-dessus, et sur les
+-- bases existantes par migrations/2026-09-08 (via la migration des
+-- services exposés). Le peuplement utilise INSERT IGNORE : le rejouer est
+-- sans effet.
 --
--- ⚠ Vérifier d'abord l'absence de doublons existants :
+-- Sur une base d'avant cette date, vérifier l'absence de doublons avant
+-- d'appliquer la migration :
 --   SELECT cve_id, port, COUNT(*) c FROM VULNERABILITE_CONNUE
 --     GROUP BY cve_id, port HAVING c > 1;
---
--- ALTER TABLE VULNERABILITE_CONNUE ADD UNIQUE KEY uk_vuln_cve_port (cve_id, port);
 --
 -- =====================================================================
 

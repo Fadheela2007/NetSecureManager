@@ -25,6 +25,7 @@ const bcrypt = require("bcryptjs");
 const router = express.Router();
 const db = require("../db");
 const { requireRole } = require("../middleware/requireRole");
+const { tracer } = require("../services/journal");
 const { porteeDe } = require("../middleware/porteeSite");
 
 const ROLES = ["admin", "operateur", "lecteur"];
@@ -193,6 +194,16 @@ router.post("/utilisateurs", requireRole("admin"), async (req, res) => {
        FROM UTILISATEUR WHERE id_utilisateur = ?`,
       [result.insertId]
     );
+    // La création d'un compte est une action à tracer : c'est elle qui
+    // donne un accès. Aucune trace n'était écrite jusqu'ici.
+    await tracer(
+      req,
+      "utilisateur_cree",
+      `Compte « ${String(nom).trim()} » créé (rôle ${role}, ${
+        idSite === null ? "portée globale" : "site " + idSite
+      })`
+    );
+
     res.status(201).json(rows[0]);
   } catch (err) {
     if (err.code === "ER_DUP_ENTRY") {
@@ -305,6 +316,21 @@ router.patch("/utilisateurs/:id", requireRole("admin"), async (req, res) => {
     );
 
     await cx.commit();
+
+    // Ce qui a changé, et non l'état final : « rôle » sans dire lequel
+    // n'apprend rien à qui relit le journal six mois plus tard.
+    const modifs = [];
+    if (nom !== undefined) modifs.push("nom");
+    if (email !== undefined) modifs.push("e-mail");
+    if (role !== undefined) modifs.push(`rôle → ${role}`);
+    if (idSiteFourni) modifs.push(`site → ${idSite === null ? "global" : idSite}`);
+    if (mot_de_passe) modifs.push("mot de passe");
+    await tracer(
+      req,
+      "utilisateur_modifie",
+      `Compte #${idCible} (${cible.email}) modifié : ${modifs.join(", ")}`
+    );
+
     res.json(rows[0]);
   } catch (err) {
     await cx.rollback().catch(() => {});
@@ -365,6 +391,18 @@ router.delete("/utilisateurs/:id", requireRole("admin"), async (req, res) => {
 
     await cx.query("DELETE FROM UTILISATEUR WHERE id_utilisateur = ?", [idCible]);
     await cx.commit();
+
+    // Tracé APRÈS le commit : on ne veut pas de ligne « supprimé » pour
+    // une suppression annulée. La clé étrangère du journal est en
+    // ON DELETE SET NULL, la trace survit donc à la disparition du compte.
+    await tracer(
+      req,
+      "utilisateur_supprime",
+      `Compte #${idCible} « ${cible.nom} » supprimé (rôle ${cible.role}, ${
+        cible.id_site === null ? "portée globale" : "site " + cible.id_site
+      })`
+    );
+
     res.json({ message: `Compte « ${cible.nom} » supprimé` });
   } catch (err) {
     await cx.rollback().catch(() => {});

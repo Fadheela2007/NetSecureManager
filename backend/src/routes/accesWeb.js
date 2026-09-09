@@ -15,7 +15,8 @@ const express = require("express");
 const router = express.Router();
 const db = require("../db");
 const { requireRole } = require("../middleware/requireRole");
-const { clauseSite, siteAutorise } = require("../middleware/porteeSite");
+const { tracer } = require("../services/journal");
+const { clauseSite, siteAutorise, porteeDe } = require("../middleware/porteeSite");
 const {
   compilerPolitique,
   genererDnsmasq,
@@ -50,6 +51,49 @@ async function chargerPolitique(idSite) {
     [idSite ?? null]
   );
   return rows[0] || null;
+}
+
+/**
+ * Cette politique est-elle dans le périmètre de l'appelant ?
+ *
+ * POURQUOI CE CONTRÔLE EXISTE. Les routes qui ajoutent ou suppriment un
+ * domaine reçoivent un identifiant de POLITIQUE, pas un identifiant de
+ * SITE — et personne ne vérifiait à qui cette politique appartenait. Un
+ * administrateur rattaché au site 2 pouvait donc, en changeant un nombre
+ * dans l'URL, débloquer une catégorie sur le site 1 ou ajouter une règle
+ * de blocage chez un autre client. Le cloisonnement était appliqué
+ * partout sauf là où l'identifiant ne portait pas le mot « site ».
+ *
+ * La politique par défaut (id_site NULL) vaut pour tous les sites qui
+ * n'ont pas la leur : elle est donc réservée à un administrateur global.
+ *
+ * @returns {Promise<{ok: true} | {ok: false, statut: number, erreur: string}>}
+ */
+async function politiqueDansPortee(req, idPolitique) {
+  const [rows] = await db.query(
+    "SELECT id_site FROM POLITIQUE_WEB WHERE id_politique = ?",
+    [idPolitique]
+  );
+  if (rows.length === 0) {
+    return { ok: false, statut: 404, erreur: "Politique introuvable" };
+  }
+
+  const portee = porteeDe(req);
+  if (portee === null) return { ok: true };
+
+  if (rows[0].id_site === null) {
+    return {
+      ok: false,
+      statut: 403,
+      erreur: "Seul un administrateur global peut modifier la politique par défaut",
+    };
+  }
+  if (rows[0].id_site !== portee) {
+    // 404 et non 403 : un 403 confirmerait l'existence d'une politique
+    // appartenant à un autre site.
+    return { ok: false, statut: 404, erreur: "Politique introuvable" };
+  }
+  return { ok: true };
 }
 
 /** Domaines des catégories actives + règles manuelles d'une politique. */
@@ -230,7 +274,18 @@ router.get("/acces-web/stats", async (req, res) => {
 router.put("/acces-web/politique", requireRole("admin"), async (req, res) => {
   const { id_site = null, nom, active, message_blocage, categories } = req.body || {};
 
-  if (id_site !== null && !siteAutorise(req, id_site)) {
+  // `id_site` vaut null PAR DÉFAUT dans cette route : l'ancien test
+  // `id_site !== null && ...` ne se déclenchait donc jamais sur l'appel le
+  // plus courant. Un administrateur rattaché qui omettait le champ
+  // réécrivait la politique appliquée à toute la plateforme.
+  if (id_site === null) {
+    if (porteeDe(req) !== null) {
+      return res.status(403).json({
+        error: "Seul un administrateur global peut modifier la politique par défaut",
+        aide: "Précisez id_site pour agir sur la politique de votre propre site.",
+      });
+    }
+  } else if (!siteAutorise(req, id_site)) {
     return res.status(403).json({ error: "Site hors de votre périmètre" });
   }
   if (!nom || typeof nom !== "string" || !nom.trim()) {
@@ -280,6 +335,17 @@ router.put("/acces-web/politique", requireRole("admin"), async (req, res) => {
     }
 
     await connexion.commit();
+
+    // Activer ou lever un blocage web engage le client vis-à-vis de ses
+    // salariés : la trace de qui a décidé, et quand, doit exister.
+    await tracer(
+      req,
+      "politique_web_modifiee",
+      `Politique « ${nom.trim()} » (${
+        id_site === null ? "par défaut" : "site " + id_site
+      }) ${active ? "activée" : "désactivée"} — ${ids.length} catégorie(s)`
+    );
+
     res.json({ id_politique: idPolitique, categories: ids.length });
   } catch (err) {
     await connexion.rollback();
@@ -318,6 +384,9 @@ router.post("/acces-web/politique/:id/domaine", requireRole("admin"), async (req
     return res.status(400).json({ error: "Action inconnue" });
   }
 
+  const acces = await politiqueDansPortee(req, req.params.id);
+  if (!acces.ok) return res.status(acces.statut).json({ error: acces.erreur });
+
   try {
     await db.query(
       `INSERT INTO POLITIQUE_DOMAINE (id_politique, domaine, action, commentaire)
@@ -329,6 +398,12 @@ router.post("/acces-web/politique/:id/domaine", requireRole("admin"), async (req
       "UPDATE POLITIQUE_WEB SET version = version + 1 WHERE id_politique = ?",
       [req.params.id]
     );
+    await tracer(
+      req,
+      "regle_web_ajoutee",
+      `Domaine ${normalise} : ${action} (politique #${req.params.id})`
+    );
+
     res.json({ domaine: normalise, action });
   } catch (err) {
     if (schemaAbsent(err)) {
@@ -345,10 +420,21 @@ router.delete("/acces-web/domaine/:idRegle", requireRole("admin"), async (req, r
   );
   if (!regle) return res.status(404).json({ error: "Règle introuvable" });
 
+  const acces = await politiqueDansPortee(req, regle.id_politique);
+  // 404 systématique ici : la règle existe, mais l'appelant n'a pas à
+  // savoir qu'elle existe sur un site qui n'est pas le sien.
+  if (!acces.ok) return res.status(404).json({ error: "Règle introuvable" });
+
   await db.query("DELETE FROM POLITIQUE_DOMAINE WHERE id_regle = ?", [req.params.idRegle]);
   await db.query("UPDATE POLITIQUE_WEB SET version = version + 1 WHERE id_politique = ?", [
     regle.id_politique,
   ]);
+  await tracer(
+    req,
+    "regle_web_supprimee",
+    `Règle #${req.params.idRegle} retirée de la politique #${regle.id_politique}`
+  );
+
   res.json({ supprime: true });
 });
 

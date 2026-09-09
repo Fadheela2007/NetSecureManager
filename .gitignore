@@ -98,3 +98,12 @@ RESTE_A_FAIRE*.md
 OU-EN-SUIS-JE.md
 SUITE-DES-TESTS.md
 CLAUDE.md
+
+# Fichiers de travail temporaires (scripts de vérification ponctuels).
+_a_supprimer/
+
+# Documents de travail de la campagne du 8-9 septembre : ils décrivent des
+# défauts DEPUIS CORRIGÉS avec leur mécanisme — même raison que les RAPPORT_*.
+AUDIT-COMPLET-*.md
+OU-EN-EST-LE-PROJET.md
+FICHE-TEST.md

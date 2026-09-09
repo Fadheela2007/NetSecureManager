@@ -9,7 +9,9 @@
 
 const ping = require("ping");
 const snmp = require("net-snmp");
-const ipLib = require("ip");
+// Arithmétique d'adresses écrite dans le projet : voir adressesIp.js pour
+// la raison du remplacement du paquet « ip ».
+const ipLib = require("./adressesIp");
 const net = require("net");
 const dgram = require("dgram");
 const os = require("os");
@@ -147,8 +149,46 @@ function diagnostiquerPortee(cidr) {
   };
 }
 
+/**
+ * Nombre maximal d'adresses qu'une plage a le droit de contenir.
+ *
+ * POURQUOI CE PLAFOND. `listHostsFromCidr` construisait la liste complète
+ * des adresses SANS AUCUNE BORNE. Une plage saisie « 10.0.0.0/8 » — une
+ * faute de frappe courante, /8 au lieu de /24 — demandait un tableau de
+ * 16,7 millions de chaînes : le processus Node dépassait la mémoire
+ * disponible et TOUTE la supervision tombait, y compris pour les autres
+ * sites. Aucun message n'aurait désigné la cause.
+ *
+ * 65 534 adresses (/16) laisse passer tout réseau d'entreprise réel tout
+ * en écartant les saisies catastrophiques. Relevable par SCAN_MAX_HOTES
+ * pour un cas particulier, mais un scan de cette taille se découpe en
+ * plusieurs plages : c'est plus rapide et cela dit où l'on en est.
+ */
+const MAX_HOTES_PAR_PLAGE = Number(process.env.SCAN_MAX_HOTES) > 0
+  ? Number(process.env.SCAN_MAX_HOTES)
+  : 65534;
+
 function listHostsFromCidr(cidr) {
-  const subnet = ipLib.cidrSubnet(cidr);
+  if (typeof cidr !== "string" || !/^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/.test(cidr.trim())) {
+    throw new Error(
+      `Plage réseau illisible : « ${cidr} ». Attendu : une adresse et un masque, par exemple 192.168.1.0/24.`
+    );
+  }
+
+  const subnet = ipLib.cidrSubnet(cidr.trim());
+
+  // Compté AVANT de construire quoi que ce soit : le but est justement de
+  // ne pas allouer le tableau qui ferait tomber le serveur.
+  const taille = ipLib.toLong(subnet.lastAddress) - ipLib.toLong(subnet.firstAddress) + 1;
+  if (taille > MAX_HOTES_PAR_PLAGE) {
+    throw new Error(
+      `Plage trop large : ${cidr} contient ${taille.toLocaleString("fr-FR")} adresses, ` +
+        `la limite est de ${MAX_HOTES_PAR_PLAGE.toLocaleString("fr-FR")}. ` +
+        `Découpez-la en plusieurs plages (un /24 par VLAN est l'usage), ` +
+        `ou relevez SCAN_MAX_HOTES dans backend/.env si c'est réellement voulu.`
+    );
+  }
+
   const hosts = [];
   const start = ipLib.toLong(subnet.firstAddress);
   const end = ipLib.toLong(subnet.lastAddress);
@@ -163,7 +203,40 @@ function listHostsFromCidr(cidr) {
   return hosts;
 }
 
-async function pingSweep(hosts, concurrency = 30) {
+/**
+ * Compare deux adresses matérielles sans se soucier de leur écriture.
+ * « A4-BB-6D-01-02-03 » et « a4:bb:6d:01:02:03 » désignent la même carte ;
+ * les comparer telles quelles conclurait à un changement de machine et
+ * relancerait une identification complète à chaque scan.
+ */
+function normaliserMacSimple(mac) {
+  if (!mac) return null;
+  const propre = String(mac).toLowerCase().replace(/[^0-9a-f]/g, "");
+  return propre.length === 12 ? propre : null;
+}
+
+/**
+ * Balayage ICMP.
+ *
+ * CONCURRENCE À 64, ET NON 30.
+ *
+ * Sur un /23, 508 adresses à 30 en parallèle font dix-sept vagues d'une
+ * seconde : dix-sept secondes rien que pour savoir qui répond, avant même
+ * d'avoir identifié une seule machine.
+ *
+ * Un ping n'est pas un scan de ports : c'est un paquet, une réponse,
+ * aucune connexion ouverte, rien qui ressemble à une reconnaissance
+ * hostile. La borne prudente de cinq machines simultanées vaut pour
+ * l'identification — SNMP, nmap, ports — pas pour le balayage.
+ *
+ * Réglable par PING_CONCURRENCE, plafonné à 128.
+ */
+const CONCURRENCE_PING = (() => {
+  const v = Number(process.env.PING_CONCURRENCE);
+  return Number.isFinite(v) && v > 0 ? Math.min(128, Math.floor(v)) : 64;
+})();
+
+async function pingSweep(hosts, concurrency = CONCURRENCE_PING) {
   const alive = [];
   for (let i = 0; i < hosts.length; i += concurrency) {
     const batch = hosts.slice(i, i + concurrency);
@@ -445,7 +518,18 @@ async function arpComplement(cidr, aliveHostsFromPing, arpEntries = null) {
  *   muet assez longtemps pour qu'on le croie planté. Optionnel : le cycle
  *   central ne le fournit pas.
  */
-async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProgress = null }) {
+async function scanRange({
+  cidr,
+  snmpCommunity = "public",
+  snmpV3 = null,
+  onProgress = null,
+  // Équipements déjà identifiés lors d'un scan précédent, fournis par
+  // l'appelant qui a accès à la base. Voir `peutReutiliser` plus bas :
+  // c'est ce qui évite de réapprendre un système d'exploitation qui n'a
+  // pas changé, et fait passer un rescan de plusieurs minutes à
+  // quelques dizaines de secondes.
+  connus = null,
+}) {
   const avancer = typeof onProgress === "function" ? onProgress : () => {};
 
   const hosts = listHostsFromCidr(cidr);
@@ -485,11 +569,40 @@ async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProg
   // ressemblent à une reconnaissance hostile, que les pare-feux bloquent.
   // Le scan rendrait alors moins de résultats en étant plus agressif.
   //
-  // Réglable par SCAN_CONCURRENCE, plafonné à 20 pour qu'une valeur saisie
-  // à la légère ne transforme pas l'agent en outil d'attaque.
+  // ── POURQUOI LA VALEUR PAR DÉFAUT PASSE DE 5 À 10 ──
+  //
+  // Ce nombre décide à lui seul de la durée d'un scan. nmap représente
+  // 93 % du temps et coûte jusqu'à 25 s par machine ; le reste du travail
+  // (SNMP muet 1,5 s, ports 0,4 s en parallèle) est négligeable devant
+  // lui. Le temps total vaut donc, en gros :
+  //
+  //     machines vivantes ÷ CONCURRENCE × durée nmap
+  //
+  // Sur un parc réel de 44 machines actives sans cache d'OS :
+  //     à  5 → 9 lots × ~20 s ≈ 3 minutes
+  //     à 10 → 5 lots × ~20 s ≈ 1 min 40
+  //     à 16 → 3 lots × ~20 s ≈ 1 minute
+  //
+  // Le raisonnement d'origine — rester discret pour ne pas déclencher les
+  // sondes d'intrusion — reste juste, et c'est pour cela qu'on ne monte
+  // pas à 50. Mais 10 sondes simultanées représentent environ 1 Mbit/s :
+  // c'est le trafic d'une seule page web qui se charge, très loin de ce
+  // qu'un pare-feu interprète comme une reconnaissance hostile.
+  //
+  // Le plafond passe de 20 à 32 : un serveur de supervision moderne tient
+  // la charge, et le facteur limitant reste le réseau supervisé, pas lui.
+  // Qui scanne son propre réseau, la nuit, sans sonde d'intrusion, a le
+  // droit d'aller vite — c'est son réseau.
+  //
+  // SI LE SCAN RESTE LENT APRÈS CE RÉGLAGE, la cause est ailleurs : voir
+  // la réutilisation de l'OS déjà connu, plus bas (`peutReutiliser`). Elle
+  // exige une adresse MAC, que la table ARP du serveur ne connaît QUE pour
+  // les réseaux directement raccordés. Sur un VLAN routé, aucune MAC n'est
+  // vue, le cache ne s'applique jamais, et chaque scan repaye nmap en
+  // entier. C'est le cas qui rend un rescan aussi lent que le premier.
   const CONCURRENCE_IDENTIFICATION = Number(process.env.SCAN_CONCURRENCE) > 0
-    ? Math.min(20, Number(process.env.SCAN_CONCURRENCE))
-    : 5;
+    ? Math.min(32, Number(process.env.SCAN_CONCURRENCE))
+    : 10;
 
   /**
    * Identifie une machine. Ne lève jamais : un hôte qui fait échouer SNMP
@@ -517,12 +630,42 @@ async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProg
         [snmpData?.sysDescr, snmpData?.sysName].filter(Boolean).join(" "),
         "snmp"
       );
+      // ── CE QU'ON NE REDEMANDE PAS ──
+      //
+      // nmap représente 93 % du temps d'un scan, et il répond toujours la
+      // même chose : un système d'exploitation ne change pas d'un scan à
+      // l'autre. On repayait donc 7 secondes par machine pour réapprendre
+      // ce qu'on savait déjà.
+      //
+      // La réponse précédente n'est réutilisée QUE si l'adresse matérielle
+      // est identique. C'est la condition qui rend la réutilisation sûre :
+      // en DHCP, une adresse IP change de machine, et sans ce contrôle on
+      // attribuerait le système du poste d'hier à la caméra d'aujourd'hui.
+      //
+      // MAC inconnue des deux côtés : on refait le travail. Mieux vaut
+      // sept secondes qu'une identité recopiée sur la mauvaise machine.
+      const macActuelle = normaliserMacSimple(
+        (toutesLesEntreesArp.find((a) => a.ip === host.ip) || {}).mac
+      );
+      const ancien = connus instanceof Map ? connus.get(host.ip) : null;
+      const peutReutiliser =
+        ancien &&
+        ancien.os_detecte &&
+        macActuelle &&
+        normaliserMacSimple(ancien.adresse_mac) === macActuelle;
+
       if (!typeSnmp) {
-        const nmapResult = await nmapFingerprint(host.ip);
-        if (nmapResult) {
-          osDetecte = nmapResult.os_detecte;
-          nmapDeviceType = nmapResult.type_detecte;
-          fabricantNmap = fabricantFromOsString(nmapResult.os_detecte);
+        if (peutReutiliser) {
+          osDetecte = ancien.os_detecte;
+          nmapDeviceType = ancien.type_detecte_nmap || null;
+          fabricantNmap = fabricantFromOsString(ancien.os_detecte);
+        } else {
+          const nmapResult = await nmapFingerprint(host.ip);
+          if (nmapResult) {
+            osDetecte = nmapResult.os_detecte;
+            nmapDeviceType = nmapResult.type_detecte;
+            fabricantNmap = fabricantFromOsString(nmapResult.os_detecte);
+          }
         }
       }
 
@@ -551,8 +694,11 @@ async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProg
       //
       // Coût nul quand aucun port HTTP n'est ouvert (on n'ouvre alors
       // aucune connexion), et le port est déjà connu par scanPorts.
+      // Même raisonnement que pour nmap : le titre de la page
+      // d'administration d'une imprimante ne change pas d'un scan à
+      // l'autre. On ne la relit que si l'appareil n'est pas déjà connu.
       let banniere = null;
-      if (!snmpData?.sysDescr) {
+      if (!snmpData?.sysDescr && !peutReutiliser) {
         banniere = await lireBanniere(host.ip, portsOuverts);
       }
 
@@ -660,7 +806,29 @@ async function scanRange({ cidr, snmpCommunity = "public", snmpV3 = null, onProg
         os_detecte: osDetecte,
         // Transmis pour éviter un second scan de ports côté routes/scan.js.
         services: portsOuverts,
-        statut: "up",
+
+        /* ── « EN LIGNE » DEMANDE UNE PREUVE ──
+           Le statut était écrit « up » pour tout hôte analysé, sans
+           distinction. Or le balayage complète le ping par la table ARP du
+           poste, qui garde en mémoire les machines vues il y a quelques
+           minutes. Un portable déjà parti y figure encore, et se retrouvait
+           enregistré « en ligne » sans avoir jamais répondu.
+
+           On exige donc au moins un signe de vie : une réponse au ping, un
+           port TCP ouvert, une réponse SNMP, ou une empreinte nmap. Sans
+           aucun des quatre, l'appareil est « inconnu » — l'ENUM le prévoit.
+           La nuance n'est pas cosmétique : « up » affirme un fonctionnement
+           constaté, « inconnu » dit qu'on a vu une trace sans pouvoir la
+           confirmer.
+
+           Ce que ça change à l'écran : après un scan, le tableau de bord
+           cesse d'annoncer un parc en meilleure santé qu'il ne l'est. */
+        statut:
+          host.latency !== null && host.latency !== undefined
+            ? "up"
+            : portsOuverts.length > 0 || snmpData || osDetecte
+              ? "up"
+              : "inconnu",
         derniere_decouverte: new Date(),
       };
     } catch (err) {
@@ -697,16 +865,50 @@ function testPort(ip, port, timeoutMs = 800) {
   });
 }
 
+/**
+ * Ports interrogés pour savoir si une machine muette au ping est vivante.
+ *
+ * LA LISTE PRÉCÉDENTE PASSAIT À CÔTÉ DU CAS LE PLUS FRÉQUENT.
+ *
+ * Elle contenait 80, 443, 22, 3389 et 8080 — les ports d'un serveur ou
+ * d'un équipement réseau. Or la machine qui bloque le ping par défaut,
+ * c'est le POSTE WINDOWS, et il n'expose aucun de ces cinq-là. Il expose
+ * 445 et 139. Un parc bureautique entier pouvait donc être déclaré en
+ * panne alors qu'il fonctionnait.
+ *
+ * 445 en tête : c'est le plus discriminant sur un réseau d'entreprise.
+ */
+const PORTS_SIGNE_DE_VIE = [445, 139, 135, 80, 443, 3389, 22, 8080, 9100, 631];
+
+/**
+ * L'équipement est-il réellement injoignable, ou seulement muet au ping ?
+ *
+ * Les ports sont testés EN PARALLÈLE et non l'un après l'autre. En
+ * séquence, une machine réellement éteinte coûtait la somme de tous les
+ * délais — dix ports à 800 ms, soit huit secondes par équipement et par
+ * vérification. En parallèle, le coût est celui d'un seul délai, quel que
+ * soit le nombre de ports. C'est ce qui permet d'allonger la liste sans
+ * ralentir le cycle.
+ */
 async function diagnosePanne(ip) {
-  const ports = [80, 443, 22, 3389, 8080];
-  for (const port of ports) {
-    if (await testPort(ip, port)) {
-      return {
-        code: "pare_feu_probable",
-        detail: `Ne répond plus au ping, mais le port ${port} reste actif — probablement un pare-feu qui bloque le ping.`,
-      };
-    }
+  const resultats = await Promise.all(
+    PORTS_SIGNE_DE_VIE.map(async (port) => ({
+      port,
+      ouvert: await testPort(ip, port).catch(() => false),
+    }))
+  );
+
+  const vivant = resultats.find((r) => r.ouvert);
+  if (vivant) {
+    return {
+      code: "pare_feu_probable",
+      detail:
+        `Ne répond pas au ping, mais le port ${vivant.port} est ouvert : ` +
+        "la machine fonctionne et bloque simplement les requêtes ICMP " +
+        "(comportement par défaut d'un poste Windows).",
+    };
   }
+
   return {
     code: "injoignable_total",
     detail: "Aucune réponse (ping et ports courants) — l'équipement semble réellement injoignable ou éteint.",
@@ -1190,6 +1392,7 @@ module.exports = {
   estAdresseReservee,
   scanRange, pingSweep, snmpProbe, snmpProbeV3, listHostsFromCidr,
   diagnosePanne, scanPorts, arpComplement, snmpMetrics, nmapFingerprint,
+  PORTS_SIGNE_DE_VIE, normaliserMacSimple,
   diagnostiquerPortee, sousReseauxLocaux, estDirectementAttache,
   wakeOnLan, fingerprint,
   // Attribution du trafic par port de switch — voir attributionPortService.

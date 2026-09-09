@@ -10,6 +10,7 @@ const router = express.Router();
 const db = require("../db");
 const { requireRole } = require("../middleware/requireRole");
 const { clauseSite, porteeDe, siteAutorise } = require("../middleware/porteeSite");
+const { tracer } = require("../services/journal");
 
 /** Seuil de silence au-delà duquel un agent est considéré muet (minutes). */
 const SEUIL_MUET_DEFAUT = 30;
@@ -47,12 +48,41 @@ function etatAgent(dernierPush, seuilMinutes = SEUIL_MUET_DEFAUT) {
  */
 router.get("/sites", async (req, res) => {
   const portee = clauseSite(req, "id_site");
-  const [rows] = await db.query(
-    `SELECT id_site, nom, ville, adresse, dernier_push, date_creation
-     FROM SITE WHERE ${portee.clause} ORDER BY nom`,
-    portee.params
+
+  // `supervision_par_agent` vient de la migration 2026-09-08. On la lit
+  // séparément pour qu'une base non migrée continue de répondre : la liste
+  // des sites est l'un des premiers appels de l'interface, la faire échouer
+  // rendrait la plateforme inutilisable au lieu de dégrader un détail.
+  let colonneMode = "supervision_par_agent";
+  let rows;
+  try {
+    [rows] = await db.query(
+      `SELECT id_site, nom, ville, adresse, dernier_push, date_creation, ${colonneMode}
+       FROM SITE WHERE ${portee.clause} ORDER BY nom`,
+      portee.params
+    );
+  } catch {
+    colonneMode = null;
+    [rows] = await db.query(
+      `SELECT id_site, nom, ville, adresse, dernier_push, date_creation
+       FROM SITE WHERE ${portee.clause} ORDER BY nom`,
+      portee.params
+    );
+  }
+
+  res.json(
+    rows.map((s) => ({
+      ...s,
+      agent: etatAgent(s.dernier_push),
+      // MySQL renvoie 1/0 : on normalise en booléen pour que l'interface
+      // n'ait pas à connaître cette particularité.
+      supervision_par_agent: colonneMode
+        ? Boolean(s.supervision_par_agent)
+        : // Sans la colonne, on retombe sur l'ancienne déduction — imparfaite,
+          // mais cohérente avec ce que fait alors le cycle de supervision.
+          s.dernier_push !== null,
+    }))
   );
-  res.json(rows.map((s) => ({ ...s, agent: etatAgent(s.dernier_push) })));
 });
 
 router.post("/sites", requireRole("admin"), async (req, res) => {
@@ -73,6 +103,8 @@ router.post("/sites", requireRole("admin"), async (req, res) => {
     "INSERT INTO SITE (nom, ville, agent_token) VALUES (?, ?, ?)",
     [nom, ville, agent_token]
   );
+  await tracer(req, "site_cree", `Site « ${nom} » (${ville}) créé`);
+
   res.json({ id_site: result.insertId, nom, ville, agent_token });
 });
 
@@ -183,11 +215,87 @@ router.post("/sites/:id/regenerer-token", requireRole("admin"), async (req, res)
   const nouveau = crypto.randomBytes(24).toString("hex");
   await db.query("UPDATE SITE SET agent_token = ? WHERE id_site = ?", [nouveau, req.params.id]);
 
+  // Révoquer un jeton d'agent coupe la remontée d'un site entier. Sans
+  // trace, un site devenu muet ne se distingue pas d'une panne réseau —
+  // et personne ne se souvient d'avoir cliqué. Le jeton lui-même n'est
+  // évidemment pas journalisé.
+  await tracer(
+    req,
+    "jeton_agent_regenere",
+    `Jeton d'agent du site ${req.params.id} régénéré — l'ancien est révoqué`
+  );
+
   res.json({
     agent_token: nouveau,
     avertissement:
       "L'ancien jeton est révoqué. L'agent déjà installé sur ce site sera rejeté " +
       "jusqu'à ce que vous relanciez l'installation avec le nouveau jeton.",
+  });
+});
+
+/**
+ * PATCH /api/sites/:id/supervision
+ * body : { supervision_par_agent: true|false }
+ *
+ * Déclare qui supervise ce site : le cycle central, ou un agent local.
+ *
+ * POURQUOI CE RÉGLAGE EST EXPLICITE
+ *
+ * Il était déduit de `dernier_push` — la trace du dernier envoi d'un
+ * agent. Conséquence : lancer un agent une seule fois, pour un essai, sur
+ * un site LOCAL, l'excluait définitivement de la supervision centrale.
+ * Constaté en réel : 135 équipements plus surveillés par personne pendant
+ * quatre jours, parce qu'un agent de test avait tourné cinq minutes.
+ *
+ * Un effet de bord ne doit pas décider d'un mode de fonctionnement.
+ */
+router.patch("/sites/:id/supervision", requireRole("admin"), async (req, res) => {
+  // Whitelist stricte : `Boolean(req.body.x)` accepterait la chaîne
+  // « false », qui est vraie en JavaScript — et couperait la supervision
+  // d'un site par accident.
+  const valeur = req.body?.supervision_par_agent;
+  if (valeur !== true && valeur !== false) {
+    return res.status(400).json({
+      error: "supervision_par_agent doit valoir true ou false",
+    });
+  }
+
+  const [rows] = await db.query("SELECT id_site FROM SITE WHERE id_site = ?", [req.params.id]);
+  if (rows.length === 0 || !siteAutorise(req, rows[0].id_site)) {
+    return res.status(404).json({ error: "Site introuvable" });
+  }
+
+  try {
+    await db.query("UPDATE SITE SET supervision_par_agent = ? WHERE id_site = ?", [
+      valeur ? 1 : 0,
+      req.params.id,
+    ]);
+  } catch (err) {
+    // Migration 2026-09-08 non passée : on le dit au lieu de renvoyer une
+    // erreur serveur qui enverrait chercher ailleurs.
+    return res.status(409).json({
+      error: "Colonne supervision_par_agent absente",
+      aide: "Appliquez backend/migrations/2026-09-08-mode-de-supervision-explicite.sql, puis réessayez.",
+      details: err.message,
+    });
+  }
+
+  // Le troisième endroit annoncé par le commentaire précédent est arrivé :
+  // l'écriture du journal vit désormais dans services/journal.js.
+  await tracer(
+    req,
+    "supervision_modifiee",
+    `Site ${req.params.id} : supervision ${
+      valeur ? "confiée à l'agent local" : "rendue au serveur central"
+    }`
+  );
+
+  res.json({
+    id_site: Number(req.params.id),
+    supervision_par_agent: valeur,
+    message: valeur
+      ? "Le serveur central ne supervisera plus ce site : son agent local s'en charge."
+      : "Le serveur central supervise à nouveau ce site.",
   });
 });
 

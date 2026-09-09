@@ -13,8 +13,12 @@ require("./db").verifierConfiguration();
 const express = require("express");
 const cors = require("cors");
 const http = require("http");
-const ipLib = require("ip");
+// Arithmétique d'adresses écrite dans le projet : le paquet « ip » est
+// signalé vulnérable sans correctif publié et n'est plus maintenu.
+// Équivalence vérifiée sur 1 089 676 comparaisons avant remplacement.
+const ipLib = require("./services/adressesIp");
 const { Server } = require("socket.io");
+const tempsReel = require("./services/tempsReelService");
 
 const scanRoutes = require("./routes/scan");
 const authRoutes = require("./routes/auth");
@@ -120,7 +124,25 @@ app.use(
   })
 );
 
-app.use(express.json());
+/* ---------------------------------------------------------------------
+   TAILLE DU CORPS DES REQUÊTES.
+
+   `express.json()` sans argument plafonne à 100 ko. Un push d'agent porte
+   l'inventaire complet d'un site : équipements, relevés SNMP et
+   interfaces. Sur un parc de quelques centaines de machines — un site
+   d'entreprise ordinaire — le corps dépasse 100 ko et Express répond 413
+   AVANT que la moindre ligne de cette application ne s'exécute.
+
+   Le symptôme aurait été le pire possible : la plateforme fonctionne
+   parfaitement en démonstration sur un petit réseau, puis un site réel
+   cesse de remonter quoi que ce soit sans qu'aucun journal applicatif
+   n'en dise la raison.
+
+   5 Mo laisse passer un inventaire de plusieurs milliers d'équipements
+   tout en gardant une borne : sans limite du tout, un corps arbitraire
+   deviendrait un moyen simple de saturer la mémoire du serveur.
+   --------------------------------------------------------------------- */
+app.use(express.json({ limit: "5mb" }));
 app.use("/api/auth", authRoutes);
 
 // ⚠ NE RIEN MONTER SUR "/api" AVEC requireAuth ICI.
@@ -805,8 +827,19 @@ const server = http.createServer(app);
 let io = null;
 if (process.env.WEBSOCKET_ORIGINE) {
   io = new Server(server, { cors: { origin: process.env.WEBSOCKET_ORIGINE } });
+  // Authentification et affectation aux salons par site : voir
+  // services/tempsReelService.js. Sans cet appel, n'importe qui pouvant
+  // joindre le serveur recevrait les événements de tous les sites.
+  tempsReel.installer(io, process.env.JWT_SECRET);
   app.set("io", io);
   console.log(`Temps réel activé pour l'origine ${process.env.WEBSOCKET_ORIGINE}`);
+} else {
+  // Dit pourquoi l'interface ne bougera pas toute seule, plutôt que de
+  // laisser chercher. Le produit fonctionne sans, en rechargement manuel.
+  console.log(
+    "Temps réel désactivé (WEBSOCKET_ORIGINE absent du .env) — " +
+      "l'interface ne se rafraîchira pas d'elle-même."
+  );
 }
 
 const PORT = process.env.PORT || 5000;

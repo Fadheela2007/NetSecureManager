@@ -8,6 +8,7 @@ const router = express.Router();
 const db = require("../db");
 const { getSuggestion } = require("../services/suggestions");
 const { requireRole } = require("../middleware/requireRole");
+const { diffuser } = require("../services/tempsReelService");
 const {
   clauseSite,
   siteAutorise,
@@ -19,6 +20,7 @@ const {
   scanRange, scanPorts, wakeOnLan, snmpMetrics, tableCommutation,
   diagnostiquerPortee,
 } = require("../services/discoveryService");
+const { detecterReseaux } = require("../services/reseauxLocauxService");
 const {
   construireCorrespondance,
   attribuer,
@@ -336,8 +338,32 @@ async function scannerUnePlage(req, id_site, cidr, snmp_community) {
   try {
     const { options, plage } = await resoudreParametresScan(id_site, cidr, snmp_community);
 
+    // ── CE QU'ON SAIT DÉJÀ ──
+    //
+    // Transmis au moteur pour qu'il ne redemande pas à nmap un système
+    // d'exploitation qu'il a déjà appris. nmap représente 93 % du temps
+    // d'un scan et répond invariablement la même chose : un OS ne change
+    // pas d'un scan à l'autre.
+    //
+    // La réutilisation est conditionnée à l'adresse matérielle (voir
+    // `peutReutiliser` dans discoveryService) : en DHCP, une IP change de
+    // machine, et recopier l'identité de l'ancienne serait pire que lent.
+    const [dejaConnus] = await db.query(
+      `SELECT adresse_ip, adresse_mac, os_detecte
+       FROM EQUIPEMENT
+       WHERE id_site = ? AND os_detecte IS NOT NULL AND adresse_mac IS NOT NULL`,
+      [id_site]
+    );
+    options.connus = new Map(dejaConnus.map((e) => [e.adresse_ip, e]));
+
     const equipements = await scanRange(options);
     await logActivite(req, "scan_lance", `Scan de ${cidr} sur le site ${id_site}`);
+
+    // Un scan change le parc : les écrans ouverts doivent le voir sans
+    // qu'on leur demande. Diffusé AVANT l'enregistrement plutôt qu'après,
+    // pour que l'interface affiche « scan en cours de traitement » pendant
+    // l'insertion, qui dure sur un grand parc.
+    diffuser(id_site, "scan", { plage: cidr, equipements: equipements.length });
 
     if (plage) {
       // Colonne optionnelle selon l'ancienneté du schéma : on n'échoue pas dessus.
@@ -372,7 +398,7 @@ async function scannerUnePlage(req, id_site, cidr, snmp_community) {
                                    adresse_ip, adresse_mac,
                                    fabricant, fabricant_source, sys_descr, os_detecte,
                                    statut, derniere_decouverte)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'up', NOW())
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
            ON DUPLICATE KEY UPDATE
              id_type = VALUES(id_type), type_source = VALUES(type_source),
              nom = COALESCE(VALUES(nom), nom),
@@ -380,10 +406,29 @@ async function scannerUnePlage(req, id_site, cidr, snmp_community) {
              adresse_mac = VALUES(adresse_mac),
              fabricant = VALUES(fabricant), fabricant_source = VALUES(fabricant_source),
              sys_descr = VALUES(sys_descr), os_detecte = VALUES(os_detecte),
-             statut = 'up', derniere_decouverte = NOW()`,
+             /* ON NE REMONTE JAMAIS UN STATUT SANS PREUVE, ET ON N'EN
+                DÉGRADE JAMAIS UN QUI EN AVAIT UNE.
+
+                Un statut forcé à 'up' sans condition remettait « en ligne » un
+                équipement retrouvé dans la seule table ARP — y compris un
+                équipement que la supervision venait de constater absent.
+                Le scan effaçait donc l'observation par une supposition.
+
+                Le sens inverse est tout aussi faux : un appareil déjà connu
+                et vivant, revu sans preuve lors d'un scan, ne doit pas
+                retomber en « inconnu ». Sans preuve, on ne touche à rien et
+                on laisse la supervision décider — c'est elle qui observe
+                en continu. */
+             statut = CASE WHEN ? = 'up' THEN 'up' ELSE statut END,
+             derniere_decouverte = NOW()`,
+          // `eq.statut` apparaît DEUX fois : une pour l'insertion, une pour
+          // le CASE de la mise à jour. MySQL lie les marqueurs dans l'ordre
+          // du texte, VALUES d'abord.
           [id_site, idType, eq.type_source ?? null, eq.nom, eq.nom_source ?? null,
            eq.adresse_ip, eq.adresse_mac,
-           eq.fabricant, eq.fabricant_source ?? null, eq.sys_descr, eq.os_detecte]
+           eq.fabricant, eq.fabricant_source ?? null, eq.sys_descr, eq.os_detecte,
+           eq.statut ?? "inconnu",
+           eq.statut ?? "inconnu"]
         );
 
         const [rows] = await db.query(
@@ -481,6 +526,26 @@ async function conflitsDuSite(id_site) {
   });
 }
 
+/**
+ * GET /api/reseaux-detectes
+ * Plages déduites des interfaces du serveur.
+ *
+ * Évite de faire calculer une plage à la main. Un masque 255.255.254.0 est
+ * un /23 : l'écrire /24 laisse la moitié du réseau invisible, ce qui est
+ * arrivé et a coûté deux tiers d'un parc pendant des semaines.
+ *
+ * Ne déclenche AUCUN scan : cette route ne fait que proposer. Scanner un
+ * réseau n'est pas un acte neutre, la validation reste humaine.
+ */
+router.get("/reseaux-detectes", requireRole("admin", "operateur"), (req, res) => {
+  try {
+    res.json({ reseaux: detecterReseaux() });
+  } catch (err) {
+    console.error("Détection des réseaux locaux échouée:", err.message);
+    res.status(500).json({ error: "Impossible de lire les interfaces réseau du serveur" });
+  }
+});
+
 router.post("/scan", requireRole("admin", "operateur"), async (req, res) => {
   const { id_site, cidr, snmp_community } = req.body;
   if (!id_site || !cidr) {
@@ -501,6 +566,12 @@ router.post("/scan", requireRole("admin", "operateur"), async (req, res) => {
       conflits_ip: conflits.length,
     });
   } catch (err) {
+    // Une plage illisible ou trop large vient de la saisie, pas d'une
+    // panne : un 500 « Erreur serveur » enverrait chercher un défaut du
+    // produit là où il suffit de corriger un masque.
+    if (/Plage (réseau illisible|trop large)/.test(err.message)) {
+      return res.status(400).json({ error: err.message });
+    }
     console.error(err);
     res.status(500).json({ error: "Erreur pendant le scan", details: err.message });
   }
@@ -938,11 +1009,108 @@ router.get("/bande-passante/classement", async (req, res) => {
     porteeTotal.params
   );
 
+  // ── TOTAL GLOBAL ──
+  //
+  // Calculé sur TOUT le parc mesuré, et non sur le classement ci-dessus
+  // qui est tronqué à `limite` : additionner un palmarès donnerait un
+  // total plus petit que la réalité, ce qui est pire qu'aucun total.
+  //
+  // LES ÉQUIPEMENTS DE TRANSIT SONT EXCLUS. Le compteur d'un commutateur
+  // est la somme de ses ports, donc du trafic des machines qui y sont
+  // branchées — machines déjà comptées pour elles-mêmes. Les additionner
+  // compterait deux fois, parfois trois sur une cascade de switches, et
+  // produirait un chiffre spectaculaire et faux.
+  //
+  // Ce que ce total EST : la somme de ce qui a pu être mesuré.
+  // Ce qu'il N'EST PAS : la consommation du site. Neuf machines sur dix
+  // n'exposent aucun compteur, et le champ `couverture` existe pour que
+  // l'interface ne puisse pas présenter l'un pour l'autre.
+  //
+  // ── CE QUI N'ALLAIT PAS DANS CE CALCUL ──
+  //
+  // Le commentaire ci-dessus annonçait « moyennes cumulées » et le champ
+  // s'appelle `total`. La requête écrivait pourtant `AVG(...)` sur TOUS
+  // les relevés de TOUTES les machines à la fois. Ce n'est pas un cumul :
+  // c'est la moyenne d'UN relevé, c'est-à-dire la consommation de la
+  // machine moyenne.
+  //
+  // Sur vingt machines mesurées, l'écran annonçait donc environ un
+  // vingtième du débit réel du parc — un chiffre petit, plausible, et
+  // faux. C'est la pire catégorie d'erreur sur un outil de mesure : rien
+  // ne signale l'anomalie, et le client fonde ses décisions dessus.
+  //
+  // LE CALCUL JUSTE SE FAIT EN DEUX TEMPS. On moyenne d'abord PAR
+  // ÉQUIPEMENT sur la période, puis on additionne ces moyennes. C'est ce
+  // que veut dire « le parc consomme en moyenne X » : la somme de ce que
+  // chaque machine consomme en moyenne, et non la moyenne de tout.
+  //
+  // LE PIC EST UNE AUTRE QUESTION, ET IL A SA PROPRE REQUÊTE. Additionner
+  // les pics individuels donnerait un maximum que le parc n'a jamais
+  // atteint : deux machines qui saturent le lien à des heures différentes
+  // ne l'ont jamais saturé ensemble. Le vrai pic est le plus fort débit
+  // SIMULTANÉ — on regroupe donc les relevés par minute, on somme à
+  // l'intérieur de chaque minute, et on prend le maximum de ces sommes.
+  // Ce chiffre-là correspond à quelque chose qui s'est réellement produit.
+  const [[global]] = await db.query(
+    `SELECT SUM(x.moy_e) AS moy_entrant,
+            SUM(x.moy_s) AS moy_sortant,
+            COUNT(*) AS equipements
+     FROM (
+       SELECT r.id_equipement,
+              AVG(r.trafic_entrant_kbps) AS moy_e,
+              AVG(r.trafic_sortant_kbps) AS moy_s
+       FROM RELEVE r
+       JOIN EQUIPEMENT e ON e.id_equipement = r.id_equipement
+       LEFT JOIN TYPE_EQUIPEMENT t ON t.id_type = e.id_type
+       WHERE r.date_releve >= NOW() - INTERVAL ${heures} HOUR
+         AND (r.trafic_entrant_kbps IS NOT NULL OR r.trafic_sortant_kbps IS NOT NULL)
+         AND COALESCE(t.libelle, '') NOT IN ('routeur', 'routeur/switch', 'pare-feu')
+         AND ${portee.clause}
+       GROUP BY r.id_equipement
+     ) x`,
+    portee.params
+  );
+
+  const [[pics]] = await db.query(
+    `SELECT MAX(y.somme_e) AS pic_entrant, MAX(y.somme_s) AS pic_sortant
+     FROM (
+       SELECT DATE_FORMAT(r.date_releve, '%Y-%m-%d %H:%i') AS minute,
+              SUM(r.trafic_entrant_kbps) AS somme_e,
+              SUM(r.trafic_sortant_kbps) AS somme_s
+       FROM RELEVE r
+       JOIN EQUIPEMENT e ON e.id_equipement = r.id_equipement
+       LEFT JOIN TYPE_EQUIPEMENT t ON t.id_type = e.id_type
+       WHERE r.date_releve >= NOW() - INTERVAL ${heures} HOUR
+         AND (r.trafic_entrant_kbps IS NOT NULL OR r.trafic_sortant_kbps IS NOT NULL)
+         AND COALESCE(t.libelle, '') NOT IN ('routeur', 'routeur/switch', 'pare-feu')
+         AND ${portee.clause}
+       GROUP BY minute
+     ) y`,
+    portee.params
+  );
+
+  const nombreOuNull = (v) => (v === null || v === undefined ? null : Number(v));
+
   res.json({
     periode_heures: heures,
     couverture: {
       equipements: Number(couverture.total || 0),
       avec_mesure: Number(couverture.avec_mesure || 0),
+    },
+    total: {
+      // Somme des moyennes PAR ÉQUIPEMENT : « le parc consomme en moyenne
+      // X », et non « la machine moyenne consomme X ».
+      moy_entrant: nombreOuNull(global.moy_entrant),
+      moy_sortant: nombreOuNull(global.moy_sortant),
+      // Plus fort débit SIMULTANÉ, mesuré minute par minute — pas la
+      // somme de pics qui n'ont jamais coïncidé.
+      pic_entrant: nombreOuNull(pics?.pic_entrant),
+      pic_sortant: nombreOuNull(pics?.pic_sortant),
+      equipements_comptes: Number(global.equipements || 0),
+      // Dit à l'interface qu'elle ne doit PAS écrire « consommation du
+      // site » : elle n'a mesuré qu'une partie du parc.
+      partiel:
+        Number(global.equipements || 0) < Number(couverture.total || 0),
     },
     classement: [
       ...rows.map((r) => ({
@@ -981,6 +1149,80 @@ router.get("/bande-passante/classement", async (req, res) => {
       (a, b) =>
         (b.moy_entrant ?? 0) + (b.moy_sortant ?? 0) - ((a.moy_entrant ?? 0) + (a.moy_sortant ?? 0))
     ),
+  });
+});
+
+/**
+ * GET /api/bande-passante/historique?heures=24
+ *
+ * LE DÉBIT DU PARC DANS LE TEMPS, ET NON PLUS SEULEMENT SA MOYENNE.
+ *
+ * L'écran affichait trois chiffres — moyenne descendante, moyenne
+ * montante, pic. Trois chiffres ne répondent pas à la question que se
+ * pose réellement l'exploitant : « à quel moment ça sature ? ». Une
+ * moyenne sur 24 h noie la demi-heure de sauvegarde qui met le lien à
+ * genoux tous les soirs, et c'est précisément celle-là qu'il faut voir.
+ *
+ * CE QUI EST SOMMÉ, ET POURQUOI. À chaque intervalle de temps, on
+ * additionne le débit de toutes les machines mesurées. Les équipements de
+ * transit — routeurs, commutateurs, pare-feu — sont exclus, exactement
+ * comme dans le total : leur compteur est la somme de leurs ports, donc du
+ * trafic des machines qui y sont branchées, déjà compté une fois. Les
+ * additionner doublerait le chiffre, parfois le triplerait sur une cascade
+ * de commutateurs.
+ *
+ * LA GRANULARITÉ S'ADAPTE À LA PÉRIODE. Une heure se lit à la minute ;
+ * trente jours à la minute feraient 43 200 points, que ni le réseau ni le
+ * navigateur n'ont de raison de transporter — et qu'aucun œil ne lit. On
+ * vise environ 200 points quelle que soit la période demandée : assez pour
+ * voir une bosse, assez peu pour rester léger.
+ */
+router.get("/bande-passante/historique", async (req, res) => {
+  let heures = Number(req.query.heures);
+  if (!Number.isFinite(heures) || heures <= 0) heures = 24;
+  heures = Math.min(Math.floor(heures), 24 * 30);
+
+  // Largeur d'un point, en minutes. Bornée à 1 minute au plus fin : le
+  // cycle de supervision ne produit pas plus d'un relevé par minute, des
+  // intervalles plus courts ne feraient qu'ajouter des trous.
+  const pas = Math.max(1, Math.round((heures * 60) / 200));
+
+  const portee = clauseSite(req, "e.id_site");
+
+  /* GROUPEMENT PAR TRANCHE DE `pas` MINUTES.
+     FLOOR(UNIX_TIMESTAMP(...) / N) * N ramène chaque horodatage au début
+     de sa tranche. On repasse en DATETIME pour que l'interface reçoive une
+     date lisible plutôt qu'un entier qu'elle devrait reconvertir. */
+  const [points] = await db.query(
+    `SELECT FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(r.date_releve) / ?) * ?) AS instant,
+            SUM(r.trafic_entrant_kbps) AS entrant,
+            SUM(r.trafic_sortant_kbps) AS sortant,
+            COUNT(DISTINCT r.id_equipement) AS equipements
+     FROM RELEVE r
+     JOIN EQUIPEMENT e ON e.id_equipement = r.id_equipement
+     LEFT JOIN TYPE_EQUIPEMENT t ON t.id_type = e.id_type
+     WHERE r.date_releve >= NOW() - INTERVAL ${heures} HOUR
+       AND (r.trafic_entrant_kbps IS NOT NULL OR r.trafic_sortant_kbps IS NOT NULL)
+       AND COALESCE(t.libelle, '') NOT IN ('routeur', 'routeur/switch', 'pare-feu')
+       AND ${portee.clause}
+     GROUP BY instant
+     ORDER BY instant`,
+    [pas * 60, pas * 60, ...portee.params]
+  );
+
+  res.json({
+    periode_heures: heures,
+    pas_minutes: pas,
+    points: points.map((p) => ({
+      instant: p.instant,
+      // `decimalNumbers` est actif sur le pool, mais SUM() sur des DECIMAL
+      // peut ressortir en chaîne selon la version du pilote : on force,
+      // sinon la bibliothèque de graphiques ne sait pas placer la valeur
+      // sur un axe et ne trace RIEN — sans erreur, avec un cadre vide.
+      entrant: p.entrant === null ? null : Number(p.entrant),
+      sortant: p.sortant === null ? null : Number(p.sortant),
+      equipements: Number(p.equipements || 0),
+    })),
   });
 });
 
@@ -1035,6 +1277,83 @@ router.get("/equipements/:id/bande-passante", async (req, res) => {
   }));
 
   res.json({ periode_heures: heures, historique, interfaces: detaillees });
+});
+
+/**
+ * GET /api/topologie
+ *
+ * Les raccordements RÉELLEMENT établis : quelle machine est branchée sur
+ * quel port de quel commutateur.
+ *
+ * POURQUOI CETTE ROUTE EXISTE
+ *
+ * La page Topologie dessinait une étoile : elle choisissait comme centre
+ * l'équipement dont l'adresse se termine par .1, .254 ou .155, et y
+ * reliait tout le reste. Ces liens n'existaient nulle part — ni en base,
+ * ni sur le réseau. C'était un dessin, pas une topologie, et il ne
+ * pouvait répondre à la seule question qui compte : « si ce commutateur
+ * tombe, qui perd le réseau ? »
+ *
+ * Les vrais liens sont dans INTERFACE_RESEAU, renseignés par
+ * l'attribution par port (BRIDGE-MIB) — la même source que la bande
+ * passante par machine.
+ *
+ * CE QUI EST RENVOYÉ, ET CE QUI NE L'EST PAS
+ *
+ * Uniquement des liens ÉTABLIS. Les équipements dont le raccordement est
+ * inconnu sont renvoyés à part, comptés, et jamais rattachés d'office à
+ * un nœud : un lien inventé est pire qu'un lien absent, parce qu'on s'en
+ * sert pour décider d'une intervention.
+ */
+router.get("/topologie", async (req, res) => {
+  const portee = clauseSite(req, "e.id_site");
+
+  let liens = [];
+  try {
+    const [rows] = await db.query(
+      `SELECT i.id_equipement       AS id_switch,
+              sw.nom                AS switch_nom,
+              COALESCE(sw.nom_personnalise, sw.nom) AS switch_libelle,
+              sw.adresse_ip         AS switch_ip,
+              i.index_snmp          AS port,
+              i.nom                 AS port_nom,
+              i.etat_operationnel   AS port_etat,
+              i.vitesse_mbps,
+              i.nb_mac_vues,
+              e.id_equipement,
+              COALESCE(e.nom_personnalise, e.nom) AS equipement_nom,
+              e.adresse_ip,
+              e.statut,
+              t.libelle AS type_equipement
+       FROM INTERFACE_RESEAU i
+       JOIN EQUIPEMENT sw ON sw.id_equipement = i.id_equipement
+       JOIN EQUIPEMENT e  ON e.id_equipement = i.id_equipement_connecte
+       LEFT JOIN TYPE_EQUIPEMENT t ON t.id_type = e.id_type
+       WHERE i.id_equipement_connecte IS NOT NULL AND ${portee.clause}
+       ORDER BY sw.adresse_ip, i.index_snmp`,
+      portee.params
+    );
+    liens = rows;
+  } catch (err) {
+    // Migration 2026-08-21 (attribution par port) non passée : la page
+    // doit s'afficher en disant ce qui manque, pas tomber en erreur.
+    if (!colonneManquante(err)) throw err;
+  }
+
+  // Ce qui n'est raccordé à rien de connu. Compté, jamais inventé.
+  const porteeEq = clauseSite(req, "e.id_site");
+  const [[{ total }]] = await db.query(
+    `SELECT COUNT(*) AS total FROM EQUIPEMENT e WHERE ${porteeEq.clause}`,
+    porteeEq.params
+  );
+
+  res.json({
+    liens,
+    couverture: {
+      equipements: Number(total || 0),
+      raccordes: new Set(liens.map((l) => l.id_equipement)).size,
+    },
+  });
 });
 
 /** État du registre OUI, pour diagnostic. */
@@ -1198,6 +1517,20 @@ router.patch("/alertes/reactiver", requireRole("admin", "operateur"), async (req
 
 router.get("/alertes", async (req, res) => {
   const { statut } = req.query;
+
+  // LIMITE FACULTATIVE.
+  //
+  // Le tableau de bord téléchargeait TOUTES les alertes actives pour n'en
+  // afficher que cinq et compter le reste. Sur un parc en incident large —
+  // une coupure de courant, un lien qui tombe — cela transfère des milliers
+  // de lignes à chaque rafraîchissement, et le temps réel en déclenche un
+  // par événement.
+  //
+  // Par défaut illimité : la page Alertes a besoin de la liste entière pour
+  // trier et filtrer. Seuls les appelants qui savent ce qu'ils veulent
+  // demandent une limite.
+  let limite = Number(req.query.limite);
+  limite = Number.isFinite(limite) && limite > 0 ? Math.min(Math.floor(limite), 500) : null;
   // LEFT JOIN : les alertes d'agent muet ne sont rattachées à aucun
   // équipement (id_equipement NULL). Un INNER JOIN les ferait disparaître.
   const portee = clauseSite(req, "COALESCE(a.id_site, e.id_site)");
@@ -1214,7 +1547,8 @@ router.get("/alertes", async (req, res) => {
      WHERE (? IS NULL OR a.statut = ?) AND ${portee.clause}
      ORDER BY
        FIELD(a.niveau, 'critical', 'warning', 'info'),
-       a.derniere_occurrence DESC, a.date_creation DESC`,
+       a.derniere_occurrence DESC, a.date_creation DESC
+     ${limite ? `LIMIT ${limite}` : ""}`,
     [statut || null, statut || null, ...portee.params]
   ).catch((err) => {
     // Migration 2026-08-18-alertes-acquittement non passée : la colonne
@@ -1465,13 +1799,40 @@ router.get("/equipements/:id/releves", async (req, res) => {
   if (!acces.ok) return res.status(acces.statut).json({ error: acces.erreur });
 
   const [rows] = await db.query(
-    `SELECT date_releve, cpu_pourcent, ram_pourcent, latence_ms, trafic_entrant_kbps, trafic_sortant_kbps
+    `SELECT /* releves-equipement */ date_releve, cpu_pourcent, ram_pourcent, latence_ms, trafic_entrant_kbps, trafic_sortant_kbps
      FROM RELEVE
      WHERE id_equipement = ? AND date_releve >= NOW() - INTERVAL ${heures} HOUR
      ORDER BY date_releve ASC`,
     [req.params.id]
   );
-  res.json(rows);
+  // ── POURQUOI CETTE RÉPONSE PORTE AUSSI L'ÉTAT DE LA SUPERVISION ──
+  //
+  // Sans relevé, l'interface affichait « cet équipement n'expose pas
+  // SNMP » — une cause INVENTÉE. Elle est vraie la plupart du temps, et
+  // fausse précisément quand ça compte : si le cycle de supervision est
+  // arrêté, AUCUN équipement n'a de relevé, et le message envoie chercher
+  // un problème SNMP qui n'existe pas. C'est arrivé, et ça a coûté des
+  // heures.
+  //
+  // On répond donc à la question que l'interface ne peut pas trancher
+  // seule : « est-ce cet équipement, ou toute la plateforme ? ». Une
+  // requête de plus, et uniquement quand il n'y a rien à montrer.
+  let supervision = null;
+  if (rows.length === 0) {
+    const [[dernier]] = await db.query("SELECT MAX(date_releve) AS dernier FROM RELEVE");
+    supervision = {
+      dernier_releve_parc: dernier?.dernier ?? null,
+      // Le cycle tourne toutes les minutes : au-delà de dix, il est arrêté.
+      // La marge absorbe un redémarrage ou un cycle qui a débordé.
+      active: dernier?.dernier
+        ? Date.now() - new Date(dernier.dernier).getTime() < 10 * 60 * 1000
+        : false,
+    };
+  }
+
+  // Enveloppe { releves, supervision } au lieu du tableau nu : l'ancienne
+  // forme est encore acceptée par le frontend, voir EquipementDetail.
+  res.json({ releves: rows, supervision });
 });
 
 router.post("/equipements/:id/reveiller", requireRole("admin", "operateur"), async (req, res) => {

@@ -10,6 +10,7 @@ const router = express.Router();
 const db = require("../db");
 const { requireRole } = require("../middleware/requireRole");
 const { clauseSite, siteAutorise } = require("../middleware/porteeSite");
+const { tracer } = require("../services/journal");
 
 
 /**
@@ -87,6 +88,8 @@ router.post("/plages", requireRole("admin", "operateur"), async (req, res) => {
         snmp_v3_priv_key || null,
       ]
     );
+    await tracer(req, "plage_ajoutee", `Plage ${cidr} déclarée sur le site ${id_site}`);
+
     res.json({ id_plage: result.insertId, message: "Plage enregistrée" });
   } catch (err) {
     if (err.code === "ER_DUP_ENTRY") {
@@ -108,6 +111,8 @@ router.delete("/plages/:id", requireRole("admin"), async (req, res) => {
   if (result.affectedRows === 0) {
     return res.status(404).json({ error: "Plage introuvable" });
   }
+  await tracer(req, "plage_supprimee", `Plage #${req.params.id} supprimée`);
+
   res.json({ message: "Plage supprimée" });
 });
 
