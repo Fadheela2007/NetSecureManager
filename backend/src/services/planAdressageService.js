@@ -155,7 +155,29 @@ async function planDUnePlage(idSite, cidr) {
 
   // Les .0 et .255 intérieurs à la plage. Énumérés tant qu'ils tiennent à
   // l'écran, comptés au-delà.
-  const nbIntermediaires = nbIntermediairesReservees(prefixe);
+  /* Comptées SANS celles qu'un équipement occupe déjà.
+
+     Le total analytique compte toutes les .0 et .255 intérieures. Si
+     l'une d'elles porte un équipement — cas rare mais réel, c'est même
+     ainsi que le premier fantôme est né — elle serait retranchée deux
+     fois : une comme occupée, une comme réservée. Le compte des libres
+     baissait alors sans raison visible, sur l'écran même dont le sujet
+     est que ces trois nombres s'additionnent. */
+  let nbIntermediaires = nbIntermediairesReservees(prefixe);
+  if (nbIntermediaires > 0) {
+    let dejaOccupees = 0;
+    for (const e of occupees) {
+      if (
+        estOctetReserve(e.adresse_ip) &&
+        e.adresse_ip !== sousReseau.networkAddress &&
+        e.adresse_ip !== sousReseau.broadcastAddress
+      ) {
+        dejaOccupees++;
+      }
+    }
+    nbIntermediaires = Math.max(0, nbIntermediaires - dejaOccupees);
+  }
+
   if (nbIntermediaires > 0 && nbIntermediaires <= 16) {
     const debut = toLong(sousReseau.firstAddress);
     const fin = toLong(sousReseau.lastAddress);

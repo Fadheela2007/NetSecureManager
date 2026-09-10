@@ -169,8 +169,25 @@ function demarrer() {
   // on conclurait que l'installation a échoué.
   collecterEtEnvoyer();
 
+  // UN INTERVALLE D'UNE HEURE OU PLUS SE COMPTE EN HEURES.
+  //
+  // Un pas de 60 n'existe pas dans un champ « minutes », qui va de 0 à
+  // 59. La borne à 59 que j'avais posée produisait un pas de 59 : un
+  // déclenchement à la minute 0, PUIS un à la minute 59 — deux envois
+  // séparés d'une minute, puis une heure de silence. Le défaut de
+  // cadence le plus discret qui soit : l'agent a l'air de fonctionner,
+  // il envoie même trop, et l'intervalle demandé n'est jamais respecté.
+  //
+  // (Ce commentaire est en lignes simples et non en bloc : la syntaxe
+  // d'une expression cron contient la séquence qui FERME un commentaire
+  // de bloc, et le fichier cessait d'être lisible par Node.)
+  const planification =
+    minutes >= 60
+      ? `0 ${"*"}/${Math.max(1, Math.min(23, Math.round(minutes / 60)))} * * *`
+      : `${"*"}/${minutes} * * * *`;
+
   let enCours = false;
-  cron.schedule(`*/${Math.min(59, minutes)} * * * *`, async () => {
+  cron.schedule(planification, async () => {
     if (enCours) return;
     enCours = true;
     try {

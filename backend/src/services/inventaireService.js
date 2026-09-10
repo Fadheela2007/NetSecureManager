@@ -87,13 +87,35 @@ function colonneManquante(err) {
  * doit jamais faire tomber la supervision — c'est déjà arrivé sur ce
  * projet et cela a coûté 113 équipements sans relevés pendant des jours.
  */
-function critere(avecPreuve) {
+function critere(avecColonnesRecentes) {
   return `
     NOT EXISTS (SELECT 1 FROM RELEVE r WHERE r.id_equipement = e.id_equipement)
     AND NOT EXISTS (SELECT 1 FROM SERVICE_DETECTE s WHERE s.id_equipement = e.id_equipement)
     AND e.sys_descr IS NULL
     AND e.os_detecte IS NULL
-    ${avecPreuve ? "AND e.preuve_existence IS NULL" : ""}
+    ${avecColonnesRecentes ? "AND e.preuve_existence IS NULL" : ""}
+    /* ── UNE MACHINE QUI A UN AGENT N'EST JAMAIS UNE ADRESSE VIDE ──
+
+       Défaut trouvé à l'audit du 10 septembre, avant qu'il ne se
+       produise. Le scénario tenait en trois temps :
+
+         1. un ancien scan inscrit un poste, sans preuve enregistrée
+            (les preuves datent du 9 septembre) ;
+         2. l'agent de poste y est installé et transmet son inventaire —
+            deux cents logiciels, la machine passe « up » ;
+         3. le poste est éteint quelques jours. La supervision le voit
+            muet, sans aucun relevé à son actif, et le marque « inconnu ».
+
+       Le nettoyage suivant le prenait alors pour une adresse fantôme et
+       l'effaçait — EN EMPORTANT SON INVENTAIRE, par cascade. Un poste
+       éteint aurait perdu ce que seul un agent installé dessus pouvait
+       savoir, et personne n'aurait pu dire pourquoi.
+
+       Un agent qui a parlé est la preuve d'existence la plus forte dont
+       dispose la plateforme : il a fallu qu'une machine réelle, allumée,
+       exécute du code. Elle sort donc du critère par deux chemins
+       indépendants — la preuve posée à la réception, et cette ligne. */
+    ${avecColonnesRecentes ? "AND e.dernier_inventaire_poste IS NULL" : ""}
     AND e.nom_personnalise IS NULL
     AND e.statut <> 'up'
     AND e.date_ajout < NOW() - INTERVAL 2 MINUTE`;
@@ -176,6 +198,22 @@ async function purgerAdressesSansPreuve(idSite = null) {
     );
     if (total >= PARC_SIGNIFICATIF && lignes.length / total > PART_MAXIMALE) {
       freine = true;
+      /* LE FREIN SE DIT DANS LA PLATEFORME, PAS SEULEMENT EN CONSOLE.
+
+         Il ne se déclenche que dans un cas : la supervision est arrêtée,
+         ou les relevés ont disparu. C'est-à-dire précisément le moment où
+         personne ne lit la fenêtre du serveur. Un garde-fou qui ne
+         s'exprime que là où l'on ne regarde pas ne protège de rien —
+         c'est exactement le défaut qui a laissé 111 machines supervisées
+         par personne pendant quatre jours. */
+      await tracer(
+        null,
+        "nettoyage_inventaire_suspendu",
+        `Nettoyage suspendu sur le site ${site} : ${lignes.length} des ${total} ` +
+          "équipements n'ont jamais donné signe de vie. Une telle proportion " +
+          "ressemble à une supervision arrêtée, pas à des adresses vides. " +
+          "Rien n'a été supprimé."
+      ).catch(() => {});
       console.warn(
         `\n⚠  NETTOYAGE DE L'INVENTAIRE SUSPENDU sur le site ${site}.\n` +
           `   ${lignes.length} des ${total} équipements n'ont jamais donné le moindre\n` +

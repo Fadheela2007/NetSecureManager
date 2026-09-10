@@ -355,7 +355,18 @@ async function faillesDeLEquipement(idEquipement) {
             ? "ce logiciel n'a pas de correspondance dans la base publique : on ne sait pas quoi demander"
             : failles.length === 0
               ? "interrogé, aucune faille publiée pour cette version"
-              : null,
+              /* PLUS DE FAILLES PUBLIÉES QU'ON N'EN A GARDÉES.
+
+                 Une requête au NVD rend au plus deux cents résultats. Un
+                 logiciel très ancien peut en compter davantage : on
+                 afficherait alors deux cents lignes en laissant croire
+                 qu'elles sont toutes. Le compte réel est connu — il est
+                 enregistré au moment de l'interrogation — donc on le dit
+                 au lieu de le taire. */
+              : Number(interrogation.nb_resultats) > failles.length
+                ? `${interrogation.nb_resultats} failles publiées pour cette version ; ` +
+                  `les ${failles.length} premières sont listées ici, les plus graves d'abord`
+                : null,
       failles,
     });
   }

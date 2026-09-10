@@ -194,13 +194,27 @@ async function recevoirInventaire(idSite, corps) {
     corps.processus === null ? null : await remplacerProcessus(idEquipement, corps.processus);
 
   await db.query(
+    /* LA PREUVE EST POSÉE AUSSI SUR UN ÉQUIPEMENT DÉJÀ CONNU.
+
+       Elle ne l'était qu'à la création. Un poste inscrit par un ancien
+       scan, puis équipé d'un agent, gardait donc une preuve vide — et
+       redevenait effaçable par le nettoyage automatique dès qu'il
+       s'éteignait assez longtemps.
+
+       Un agent qui parle est la preuve la plus forte dont dispose la
+       plateforme : il a fallu qu'une machine réelle exécute du code.
+       Elle remplace donc franchement une preuve plus faible, au lieu
+       d'être conservée par COALESCE comme le fait le scan. */
     `UPDATE EQUIPEMENT
         SET dernier_inventaire_poste = NOW(),
             agent_poste_version = ?,
             nom = COALESCE(nom, ?),
             os_detecte = COALESCE(?, os_detecte),
             statut = 'up',
-            echecs_consecutifs = 0
+            echecs_consecutifs = 0,
+            preuve_existence = 'agent_poste',
+            preuve_detail = 'un agent installé sur cette machine transmet son inventaire',
+            date_preuve = NOW()
       WHERE id_equipement = ?`,
     [
       corps.agent_version ? String(corps.agent_version).slice(0, 20) : null,
