@@ -25,6 +25,7 @@ const authRoutes = require("./routes/auth");
 const { requireAuth } = require("./middleware/authMiddleware");
 const monitoringService = require("./services/monitoringService");
 const { evaluerChargeDepuisPush } = require("./services/monitoringService");
+const { recevoirInventaire } = require("./services/inventairePosteService");
 const db = require("./db");
 const sitesRoutes = require("./routes/sites");
 const rapportsRoutes = require("./routes/rapports");
@@ -720,6 +721,60 @@ app.post("/api/agent/push", async (req, res) => {
   } catch (err) {
     console.error("Erreur agent push:", err);
     res.status(500).json({ error: "Erreur serveur pendant la réception des données de l'agent" });
+  }
+});
+
+/**
+ * POST /api/agent/inventaire-poste
+ * Ce qu'un agent installé SUR une machine sait d'elle-même.
+ *
+ * POURQUOI CETTE ROUTE EXISTE, ET POURQUOI AUCUN SCAN NE LA REMPLACE
+ *
+ * Un scan réseau ne voit que ce qu'une machine EXPOSE. Il ne peut pas
+ * voir ce qui tourne à l'intérieur : sans agent, on n'a pas accès à
+ * l'API du système ni aux exécutables locaux. Aucune plateforme n'y
+ * échappe — les processus affichés par Zabbix viennent du Zabbix agent,
+ * ceux de CheckMK de l'agent CheckMK, ceux de Nagios de NRPE.
+ *
+ * MÊME AUTHENTIFICATION QUE /agent/push, ET C'EST DÉLIBÉRÉ. Le jeton est
+ * celui du SITE : déployer l'agent sur quarante postes ne demande pas
+ * quarante secrets à gérer. La contrepartie est réelle et doit être dite
+ * au client : un poste compromis peut envoyer un inventaire au nom d'un
+ * autre poste du même site. Il ne peut RIEN lire — ce jeton n'ouvre
+ * aucune route de lecture.
+ */
+app.post("/api/agent/inventaire-poste", async (req, res) => {
+  const { id_site, adresse_ip } = req.body || {};
+
+  if (!id_site || !adresse_ip) {
+    return res.status(400).json({ error: "id_site et adresse_ip sont requis" });
+  }
+
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Token d'agent manquant" });
+  }
+
+  try {
+    const [siteRows] = await db.query("SELECT agent_token FROM SITE WHERE id_site = ?", [id_site]);
+    if (!siteRows[0] || siteRows[0].agent_token !== header.slice(7)) {
+      return res.status(403).json({ error: "Token d'agent invalide pour ce site" });
+    }
+
+    const bilan = await recevoirInventaire(id_site, req.body);
+    res.json(bilan);
+  } catch (err) {
+    // Migration 2026-09-10 non passée : on le DIT, avec la commande. Un
+    // 500 « erreur serveur » enverrait chercher une panne là où il suffit
+    // d'appliquer une migration.
+    if (/doesn't exist|Unknown column/i.test(err.message)) {
+      return res.status(503).json({
+        error: "L'inventaire de poste n'est pas installé sur cette base",
+        aide: "node tools\\appliquer-migrations.js",
+      });
+    }
+    console.error("Erreur inventaire de poste:", err);
+    res.status(500).json({ error: "Erreur serveur pendant la réception de l'inventaire" });
   }
 });
 

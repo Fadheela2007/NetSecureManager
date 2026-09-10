@@ -36,6 +36,7 @@ const { detecterConflits, decrireConflit } = require("../services/conflitIpServi
 const { creerAlerte } = require("../services/monitoringService");
 const { purgerAdressesSansPreuve } = require("../services/inventaireService");
 const { faillesDeLEquipement } = require("../services/faillesService");
+const { inventaireDeLEquipement } = require("../services/inventairePosteService");
 
 // Avertissement de migration manquante : une seule fois par démarrage.
 let colonnesVersionSignalees = false;
@@ -2030,6 +2031,35 @@ router.post("/equipements/:id/reveiller", requireRole("admin", "operateur"), asy
  * opposées. Un outil de sécurité qui les confond rassure sans avoir
  * regardé — le pire défaut qu'il puisse avoir.
  */
+/**
+ * GET /api/equipements/:id/inventaire-poste
+ * Les logiciels installés et les programmes qui tournent sur cette
+ * machine — ce que seul un agent installé dessus peut savoir.
+ *
+ * La réponse porte TOUJOURS `agent_installe`. Une liste vide sans ce
+ * drapeau se lirait « cette machine ne fait tourner aucun logiciel »,
+ * alors qu'elle signifie « personne n'a regardé ». C'est la même règle
+ * que pour les failles et pour la supervision : une absence
+ * d'information ne doit jamais ressembler à une bonne nouvelle.
+ */
+router.get("/equipements/:id/inventaire-poste", async (req, res) => {
+  const acces = await verifierAccesEquipement(req, req.params.id);
+  if (!acces.ok) return res.status(acces.statut).json({ error: acces.erreur });
+
+  try {
+    res.json(await inventaireDeLEquipement(req.params.id));
+  } catch (err) {
+    if (/doesn't exist|Unknown column/i.test(err.message)) {
+      return res.status(503).json({
+        error: "L'inventaire de poste n'est pas installé sur cette base",
+        aide: "node tools\\appliquer-migrations.js",
+      });
+    }
+    console.error("Lecture de l'inventaire de poste impossible:", err.message);
+    res.status(500).json({ error: "Impossible de lire l'inventaire de cette machine" });
+  }
+});
+
 router.get("/equipements/:id/failles", async (req, res) => {
   const acces = await verifierAccesEquipement(req, req.params.id);
   if (!acces.ok) return res.status(acces.statut).json({ error: acces.erreur });

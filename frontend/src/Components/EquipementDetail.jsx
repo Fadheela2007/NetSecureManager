@@ -63,6 +63,7 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
   const [interfaces, setInterfaces] = useState([]);
   const [services, setServices] = useState([]);
   const [failles, setFailles] = useState(null);
+  const [interieur, setInterieur] = useState(null);
   const [dispo, setDispo] = useState(null);
   const [periodeDispo, setPeriodeDispo] = useState(30);
 
@@ -259,6 +260,16 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
     axios.get(`${API_URL}/equipements/${equipement.id_equipement}/failles`)
       .then(({ data }) => setFailles(data))
       .catch(() => setFailles(false));
+  }, [equipement.id_equipement]);
+
+  /* L'intérieur de la machine : logiciels installés et programmes qui
+     tournent. Seul un agent installé dessus peut le savoir — aucun scan
+     réseau, d'aucune plateforme, ne voit à travers un poste. */
+  useEffect(() => {
+    setInterieur(null);
+    axios.get(`${API_URL}/equipements/${equipement.id_equipement}/inventaire-poste`)
+      .then(({ data }) => setInterieur(data))
+      .catch(() => setInterieur(false));
   }, [equipement.id_equipement]);
 
   useEffect(() => {
@@ -613,6 +624,120 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
                 ))}
               </ul>
             )}
+          </div>
+        )}
+
+        {/* ── L'INTÉRIEUR DE LA MACHINE ──
+
+            Ce qu'aucun scan réseau ne peut voir. Les processus affichés
+            par Zabbix viennent du Zabbix agent, ceux de CheckMK de
+            l'agent CheckMK, ceux de Nagios de NRPE : sans agent, on n'a
+            pas accès à l'API du système ni aux exécutables locaux.
+
+            Le cas SANS agent est traité en premier et affiché en toutes
+            lettres. Une fiche vide sans ce message se lirait « cette
+            machine ne fait tourner aucun logiciel » — une affirmation
+            fausse, produite par une absence d'information. */}
+        {interieur && interieur.agent_installe === false && (
+          <div className="mb-5">
+            <h3 className="text-xs uppercase tracking-wide text-[var(--color-mute)] mb-2">
+              Intérieur de la machine
+            </h3>
+            <p className="text-xs text-[var(--color-mute)] leading-relaxed">
+              {interieur.explication}. Pour l'observer, installez l'agent de poste
+              (<span className="font-[var(--font-mono)]">src/agent-poste</span>) sur
+              cette machine.
+            </p>
+          </div>
+        )}
+
+        {interieur && interieur.agent_installe && (
+          <div className="mb-5">
+            <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
+              <h3 className="text-xs uppercase tracking-wide text-[var(--color-mute)]">
+                Intérieur de la machine
+              </h3>
+              {/* La DATE de la photographie, jamais séparée de son contenu :
+                  sans elle, on lit un instantané d'il y a trois jours en
+                  croyant voir maintenant. */}
+              <span className="text-[11px] text-[var(--color-mute)]">
+                relevé le {new Date(interieur.dernier_inventaire).toLocaleString("fr-FR")}
+                {interieur.agent_version ? ` — agent ${interieur.agent_version}` : ""}
+              </span>
+            </div>
+
+            {interieur.processus.length > 0 && (
+              <div className="mb-3">
+                <p className="text-xs mb-1.5">
+                  Programmes en cours ({interieur.processus.length})
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {interieur.processus.slice(0, 30).map((p) => (
+                    <span
+                      key={p.nom}
+                      title={
+                        p.memoire_ko
+                          ? `${Math.round(p.memoire_ko / 1024)} Mo` +
+                            (p.occurrences > 1 ? ` — ${p.occurrences} exemplaires` : "")
+                          : undefined
+                      }
+                      className="text-xs px-2 py-1 rounded-lg border border-[var(--color-line)] text-[var(--color-mute)]"
+                    >
+                      {p.nom}
+                      {p.occurrences > 1 && (
+                        <span className="text-[10px]"> ×{p.occurrences}</span>
+                      )}
+                    </span>
+                  ))}
+                  {interieur.processus.length > 30 && (
+                    <span className="text-xs text-[var(--color-mute)] px-1 py-1">
+                      … et {interieur.processus.length - 30} autres
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {interieur.logiciels.length > 0 && (
+              <div>
+                <p className="text-xs mb-1.5">
+                  Logiciels installés ({interieur.logiciels.length})
+                </p>
+                <div className="table-scroll max-h-72 overflow-y-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-left text-[11px] uppercase tracking-wide text-[var(--color-mute)] border-b border-[var(--color-line)]">
+                        <th className="pb-1.5 font-medium">Nom</th>
+                        <th className="pb-1.5 font-medium">Version</th>
+                        <th className="pb-1.5 font-medium">Éditeur</th>
+                        <th className="pb-1.5 font-medium">Installé le</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[var(--color-line)]">
+                      {interieur.logiciels.map((l) => (
+                        <tr key={`${l.nom}-${l.version || ""}`}>
+                          <td className="py-1.5">{l.nom}</td>
+                          <td className="py-1.5 font-[var(--font-mono)] text-[var(--color-mute)]">
+                            {l.version || "—"}
+                          </td>
+                          <td className="py-1.5 text-[var(--color-mute)]">{l.editeur || "—"}</td>
+                          <td className="py-1.5 text-[var(--color-mute)]">
+                            {l.date_installation
+                              ? new Date(l.date_installation).toLocaleDateString("fr-FR")
+                              : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            <p className="text-[11px] text-[var(--color-mute)] mt-2 leading-relaxed">
+              Remonté par l'agent installé sur cette machine. Les programmes en
+              cours sont une photographie de l'instant du relevé, pas un historique.
+            </p>
           </div>
         )}
 

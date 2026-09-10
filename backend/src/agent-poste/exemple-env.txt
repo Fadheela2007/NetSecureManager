@@ -1,0 +1,32 @@
+# ---------------------------------------------------------------------
+# Agent de POSTE — à copier en « .env » à côté de agent-poste.js
+#
+# À ne pas confondre avec le .env de l'agent de SITE : celui-ci ne
+# contient ni CIDR ni communauté SNMP, parce que cet agent ne scanne
+# aucun réseau. Il ne parle que de la machine sur laquelle il tourne.
+# ---------------------------------------------------------------------
+
+# L'adresse de l'API centrale, celle du navigateur suivie de /api.
+CENTRAL_API_URL=http://192.168.0.10:5000/api
+
+# Le jeton du SITE — page Sites, « Mise en service de l'agent ».
+# Le même pour tous les postes d'un site : quarante machines ne
+# demandent pas quarante secrets à gérer.
+AGENT_TOKEN=
+
+# Le numéro du site, tel qu'affiché page Sites.
+ID_SITE=1
+
+# Toutes les combien de minutes l'inventaire est envoyé.
+# Défaut 60, minimum 5. Un inventaire n'est pas une mesure : la liste
+# des logiciels d'un poste ne change pas quatre fois par heure, et
+# interroger toutes les cinq minutes ne remonterait rien de plus.
+INTERVALLE_MINUTES=60
+
+# Remonter le nom de l'utilisateur propriétaire de chaque processus.
+#
+# ÉTEINT PAR DÉFAUT, et c'est délibéré. La liste des programmes qu'une
+# personne fait tourner dit beaucoup d'elle, et un outil de supervision
+# n'a pas besoin de le savoir pour faire son travail. L'activer doit
+# être une décision prise, pas un réglage découvert.
+COLLECTER_UTILISATEUR=0

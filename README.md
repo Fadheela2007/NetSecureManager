@@ -237,6 +237,35 @@ part par courriel, car cela dépend du réseau et non du code.
 
 ---
 
+## Voir l'intérieur des postes
+
+Un scan réseau, quel qu'il soit, ne voit que ce qu'une machine **expose**.
+Il ne peut pas voir ce qui tourne dedans. Aucune plateforme n'y échappe :
+les processus affichés par Zabbix viennent du Zabbix agent, ceux de
+CheckMK de l'agent CheckMK, ceux de Nagios de NRPE.
+
+La plateforme a donc deux agents, et ils ne font pas le même métier :
+
+| | Où il s'installe | Ce qu'il remonte |
+|---|---|---|
+| Agent de **site** (`src/agent`) | un par réseau | le scan de la plage, les relevés SNMP, la politique web |
+| Agent de **poste** (`src/agent-poste`) | un par machine à suivre | les logiciels installés, les programmes en cours |
+
+L'installation est décrite pas à pas dans `INSTALLER-AGENT-POSTE.md`.
+Sur la fiche d'un équipement, une machine sans agent affiche « aucun
+agent de poste n'est installé » — un message, pas un écran vide : une
+liste vide sans explication se lirait « cette machine ne fait tourner
+aucun logiciel ».
+
+**La vie privée est un choix à poser, pas un réglage à découvrir.**
+L'agent ne remonte pas le nom de l'utilisateur tant que
+`COLLECTER_UTILISATEUR=1` n'est pas écrit dans son `.env`, et il ne
+remonte **jamais** les lignes de commande complètes — elles contiennent
+régulièrement des mots de passe et des chemins personnels. Le nom de
+l'exécutable suffit à répondre aux questions qu'on pose à un inventaire.
+
+---
+
 ## Failles connues des logiciels exposés
 
 Le scan lit la version que chaque service annonce à la connexion —
