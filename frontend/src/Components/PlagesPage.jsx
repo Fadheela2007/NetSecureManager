@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
+import PlanAdressage from "./PlanAdressage";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
@@ -24,6 +25,9 @@ export default function PlagesPage({ idSite }) {
   const [message, setMessage] = useState(null);
   const [enCours, setEnCours] = useState(null); // id_plage en cours de scan
   const [envoi, setEnvoi] = useState(false);
+  // Incrémenté après tout changement de plage ou de scan : le plan
+  // d'adressage se recalcule alors sans que l'exploitant recharge la page.
+  const [versionPlan, setVersionPlan] = useState(0);
 
   // Le rôle sert uniquement à masquer un bouton : la vraie protection est
   // côté backend (requireRole("admin") sur DELETE /api/plages/:id).
@@ -50,6 +54,7 @@ export default function PlagesPage({ idSite }) {
     try {
       const { data } = await axios.get(`${API_URL}/plages`, { params: { id_site: idSite } });
       setPlages(data);
+      setVersionPlan((v) => v + 1);
       setErreur(null);
     } catch (err) {
       setErreur(err.response?.data?.error || "Impossible de charger les plages réseau");
@@ -333,6 +338,8 @@ export default function PlagesPage({ idSite }) {
           </table></div>
         )}
       </div>
+
+      <PlanAdressage idSite={idSite} rafraichir={versionPlan} />
     </div>
   );
 }

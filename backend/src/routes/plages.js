@@ -11,6 +11,7 @@ const db = require("../db");
 const { requireRole } = require("../middleware/requireRole");
 const { clauseSite, siteAutorise } = require("../middleware/porteeSite");
 const { tracer } = require("../services/journal");
+const { planDuSite, planDUnePlage } = require("../services/planAdressageService");
 
 
 /**
@@ -60,6 +61,47 @@ router.get("/plages", async (req, res) => {
 
   res.json(plages);
 });
+
+/**
+ * GET /api/plan-adressage?id_site=1[&cidr=192.168.0.0/23]
+ *
+ * Ce qui est attribué, ce qui est réservé, ce qui reste libre.
+ *
+ * Sans `cidr` : toutes les plages actives du site. Avec `cidr` : cette
+ * plage seule, même si elle n'est pas déclarée — pour répondre à « et si
+ * je passais ce réseau en /24 ? » sans rien créer en base.
+ *
+ * Ouverte à tout compte authentifié, y compris « lecteur » : la réponse
+ * ne contient aucun secret, seulement des adresses que ce compte peut
+ * déjà voir dans l'inventaire. Le cloisonnement par site, lui, s'applique.
+ */
+router.get("/plan-adressage", async (req, res) => {
+  const idSite = Number(req.query.id_site);
+  if (!idSite) {
+    return res.status(400).json({ error: "id_site est requis" });
+  }
+  if (!siteAutorise(req, idSite)) {
+    return res.status(403).json({ error: "Vous n'êtes pas autorisé à consulter ce site" });
+  }
+
+  try {
+    if (req.query.cidr) {
+      const plan = await planDUnePlage(idSite, String(req.query.cidr));
+      return res.json({ plages: [plan] });
+    }
+    res.json({ plages: await planDuSite(idSite) });
+  } catch (err) {
+    // Une plage illisible vient de la saisie, pas d'une panne : un 500
+    // enverrait chercher un défaut du produit là où il suffit de corriger
+    // un masque.
+    if (/CIDR invalide|préfixe invalide/i.test(err.message)) {
+      return res.status(400).json({ error: err.message });
+    }
+    console.error("Plan d'adressage impossible:", err.message);
+    res.status(500).json({ error: "Impossible de calculer le plan d'adressage" });
+  }
+});
+
 
 router.post("/plages", requireRole("admin", "operateur"), async (req, res) => {
   const {
