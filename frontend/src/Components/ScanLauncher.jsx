@@ -31,6 +31,7 @@ export default function ScanLauncher({ idSite }) {
   const [error, setError] = useState(null);
   const [reseaux, setReseaux] = useState(null);
   const [detection, setDetection] = useState(false);
+  const [plagesDeclarees, setPlagesDeclarees] = useState([]);
 
   /* ── UN SCAN LONG DOIT DIRE QU'IL TRAVAILLE ──
 
@@ -45,6 +46,35 @@ export default function ScanLauncher({ idSite }) {
      l'ordre de grandeur attendu. C'est ce qui manque pour tenir dix
      minutes sans douter. */
   const [secondes, setSecondes] = useState(0);
+
+  /* ── LE CHAMP EST PRÉ-REMPLI AVEC LA VRAIE PLAGE DU SITE ──
+
+     Il ne portait qu'un exemple grisé, « 192.168.1.0/24 ». Recopié tel
+     quel — le réflexe naturel devant un champ vide qui montre un
+     modèle — il fait scanner un réseau qui n'existe pas chez le client.
+
+     Le scan ne se plaint pas : il balaie consciencieusement 254 adresses
+     muettes et rend une liste incohérente. L'utilisateur en conclut que
+     le scan « fait n'importe quoi », alors qu'il a fait exactement ce
+     qu'on lui a demandé. Constaté en conditions réelles sur un parc en
+     192.168.0.0/23, où l'exemple désigne la seconde moitié du réseau.
+
+     La plage déclarée du site est la bonne réponse dans la quasi-
+     totalité des cas : c'est elle que « Scanner tout le site » utilise,
+     et c'est bien ce bouton-là qui donnait de bons résultats. */
+  useEffect(() => {
+    if (!idSite) return;
+    axios
+      .get(`${API_URL}/plages`, { params: { id_site: idSite } })
+      .then(({ data }) => {
+        const actives = (data || []).filter((p) => p.actif);
+        setPlagesDeclarees(actives);
+        // On ne remplace jamais une saisie en cours : l'exploitant qui a
+        // commencé à taper a une raison de le faire.
+        setCidr((actuel) => actuel || (actives[0] ? actives[0].cidr : ""));
+      })
+      .catch(() => setPlagesDeclarees([]));
+  }, [idSite]);
 
   useEffect(() => {
     if (loading === null) {
@@ -132,11 +162,37 @@ export default function ScanLauncher({ idSite }) {
           </span>
           <input
             type="text"
-            placeholder="192.168.1.0/24"
+            /* Le repère de saisie décrit la FORME attendue au lieu de
+               montrer une adresse plausible qu'on recopie sans y penser. */
+            placeholder="adresse/masque, ex. 10.0.0.0/24"
             value={cidr}
             onChange={(e) => setCidr(e.target.value)}
             required
           />
+          {plagesDeclarees.length > 1 && (
+            <span className="aide">
+              Plages déclarées pour ce site :{" "}
+              {plagesDeclarees.map((p, i) => (
+                <React.Fragment key={p.cidr}>
+                  {i > 0 && ", "}
+                  <button
+                    type="button"
+                    onClick={() => setCidr(p.cidr)}
+                    className="lien-detecter"
+                  >
+                    {p.cidr}
+                  </button>
+                </React.Fragment>
+              ))}
+            </span>
+          )}
+          {plagesDeclarees.length === 0 && (
+            <span className="aide">
+              Aucune plage n'est déclarée pour ce site. Déclarez-la dans
+              « Plages réseau » : le scan de site s'en servira, et ce champ
+              se remplira tout seul.
+            </span>
+          )}
         </label>
         <label>
           Communauté SNMP
