@@ -64,6 +64,7 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
   const [services, setServices] = useState([]);
   const [failles, setFailles] = useState(null);
   const [interieur, setInterieur] = useState(null);
+  const [certificats, setCertificats] = useState([]);
   const [dispo, setDispo] = useState(null);
   const [periodeDispo, setPeriodeDispo] = useState(30);
 
@@ -265,6 +266,16 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
   /* L'intérieur de la machine : logiciels installés et programmes qui
      tournent. Seul un agent installé dessus peut le savoir — aucun scan
      réseau, d'aucune plateforme, ne voit à travers un poste. */
+  /* Certificats des services chiffrés. Le nombre de jours restants est
+     calculé par le serveur à chaque lecture, jamais stocké : figé, il
+     serait faux dès le lendemain. */
+  useEffect(() => {
+    setCertificats([]);
+    axios.get(`${API_URL}/equipements/${equipement.id_equipement}/certificats`)
+      .then(({ data }) => setCertificats(Array.isArray(data) ? data : []))
+      .catch(() => setCertificats([]));
+  }, [equipement.id_equipement]);
+
   useEffect(() => {
     setInterieur(null);
     axios.get(`${API_URL}/equipements/${equipement.id_equipement}/inventaire-poste`)
@@ -737,6 +748,91 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
             <p className="text-[11px] text-[var(--color-mute)] mt-2 leading-relaxed">
               Remonté par l'agent installé sur cette machine. Les programmes en
               cours sont une photographie de l'instant du relevé, pas un historique.
+            </p>
+          </div>
+        )}
+
+        {/* ── CERTIFICATS DES SERVICES CHIFFRÉS ──
+
+            Placé HAUT dans la fiche, avant les ports : c'est la seule
+            information de cet écran qui annonce une panne AVANT qu'elle
+            arrive. Un certificat qui expire ne se dégrade pas, il coupe.
+
+            Le jour où il expire est connu à la seconde près, des mois à
+            l'avance, et écrit dans l'équipement lui-même. L'enterrer en
+            bas de page reviendrait à laisser tomber un service dont on
+            tenait la date de panne. */}
+        {certificats.length > 0 && (
+          <div className="mb-5">
+            <h3 className="text-xs uppercase tracking-wide text-[var(--color-mute)] mb-2">
+              Certificats
+            </h3>
+            <div className="space-y-2">
+              {certificats.map((c) => {
+                const jours = c.jours_restants === null ? null : Number(c.jours_restants);
+                const couleur =
+                  jours === null
+                    ? "var(--color-mute)"
+                    : jours < 0
+                      ? "var(--color-crit)"
+                      : jours <= 30
+                        ? "var(--color-warn)"
+                        : "var(--color-ok)";
+
+                return (
+                  <div
+                    key={c.port}
+                    className="border rounded-lg p-3"
+                    style={{ borderColor: couleur }}
+                  >
+                    <div className="flex flex-wrap items-baseline justify-between gap-2">
+                      <p className="text-sm">
+                        <span className="font-[var(--font-mono)] text-[var(--color-mute)]">
+                          {c.port}
+                        </span>{" "}
+                        {c.sujet || "certificat sans nom"}
+                      </p>
+                      <p className="text-xs" style={{ color: couleur }}>
+                        {jours === null
+                          ? "date d'expiration illisible"
+                          : jours < 0
+                            ? `EXPIRÉ depuis ${Math.abs(jours)} jour(s)`
+                            : `expire dans ${jours} jour(s)`}
+                      </p>
+                    </div>
+
+                    <p className="text-[11px] text-[var(--color-mute)] mt-1">
+                      Émis par {c.emetteur || "émetteur inconnu"}
+                      {c.auto_signe ? " — auto-signé" : ""}
+                      {c.taille_cle ? ` · clé ${c.taille_cle} bits` : ""}
+                      {c.courbe ? ` · courbe ${c.courbe}` : ""}
+                      {c.protocole ? ` · ${c.protocole}` : ""}
+                    </p>
+
+                    {/* TROIS ÉTATS, PAS DEUX. Un refus de connexion
+                        ancienne peut venir de NOTRE bibliothèque avant le
+                        serveur : écrire « n'accepte pas TLS 1.0 » sur
+                        cette base serait une affirmation de sécurité non
+                        vérifiée. On ne dit donc que la preuve. */}
+                    {c.tls_ancien_accepte === 1 && (
+                      <p className="text-[11px] text-[var(--color-warn)] mt-1">
+                        Accepte encore TLS 1.0 ou 1.1, retirés des navigateurs depuis 2020.
+                      </p>
+                    )}
+
+                    {c.auto_signe === 1 && (
+                      <p className="text-[11px] text-[var(--color-mute)] mt-1">
+                        Un certificat auto-signé est courant sur un équipement interne.
+                        Il n'est un défaut que sur un service accessible depuis l'extérieur.
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <p className="text-[11px] text-[var(--color-mute)] mt-2 leading-relaxed">
+              Lu pendant le scan, dans la carte d'identité que chaque service chiffré
+              présente à la connexion — comme le fait un navigateur. Rien n'a été envoyé.
             </p>
           </div>
         )}

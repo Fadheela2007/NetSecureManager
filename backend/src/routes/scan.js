@@ -40,6 +40,7 @@ const { inventaireDeLEquipement } = require("../services/inventairePosteService"
 
 // Avertissement de migration manquante : une seule fois par démarrage.
 let colonnesVersionSignalees = false;
+let tableCertificatsSignalee = false;
 // Même règle que celle qui calcule le total : voir le détail par port.
 const { estIgnoree } = require("../services/traficService");
 
@@ -570,6 +571,56 @@ async function scannerUnePlage(req, id_site, cidr, snmp_community) {
                ON DUPLICATE KEY UPDATE nom_service = VALUES(nom_service), date_detection = NOW()`,
               services.flatMap((s) => [idEquipement, s.port, s.nom_service])
             );
+          });
+        }
+
+        /* ── CERTIFICATS DES SERVICES CHIFFRÉS ──
+
+           Le nombre de jours restants n'est PAS enregistré : il se
+           recalcule à chaque lecture. Stocké, il serait faux dès le
+           lendemain — et une valeur périmée qui a l'air fraîche est pire
+           qu'une valeur absente.
+
+           `tls_ancien_accepte` garde ses TROIS états (1 prouvé,
+           0 refusé sans certitude, NULL non testé) : voir
+           services/certificatService.js. */
+        const certificats = eq.certificats || [];
+        if (certificats.length > 0) {
+          await db.query(
+            `INSERT INTO CERTIFICAT_TLS
+               (id_equipement, port, sujet, emetteur, valide_du, valide_au,
+                auto_signe, taille_cle, courbe, protocole, chiffrement,
+                tls_ancien_accepte, empreinte, noms_alternatifs, date_releve)
+             VALUES ${certificats.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())").join(", ")}
+             ON DUPLICATE KEY UPDATE
+               sujet = VALUES(sujet), emetteur = VALUES(emetteur),
+               valide_du = VALUES(valide_du), valide_au = VALUES(valide_au),
+               auto_signe = VALUES(auto_signe), taille_cle = VALUES(taille_cle),
+               courbe = VALUES(courbe), protocole = VALUES(protocole),
+               chiffrement = VALUES(chiffrement),
+               tls_ancien_accepte = VALUES(tls_ancien_accepte),
+               empreinte = VALUES(empreinte),
+               noms_alternatifs = VALUES(noms_alternatifs),
+               date_releve = NOW()`,
+            certificats.flatMap((c) => [
+              idEquipement, c.port, c.sujet, c.emetteur,
+              c.valide_du, c.valide_au,
+              c.auto_signe ? 1 : 0, c.taille_cle, c.courbe,
+              c.protocole, c.chiffrement, c.tls_ancien_accepte,
+              c.empreinte, c.noms_alternatifs,
+            ])
+          ).catch((err) => {
+            // Migration 2026-09-10 non passée : mieux vaut un scan sans
+            // certificats qu'un scan qui échoue sur une table absente.
+            if (!/doesn't exist|Unknown column/i.test(err.message)) throw err;
+            if (!tableCertificatsSignalee) {
+              tableCertificatsSignalee = true;
+              console.warn(
+                "\n⚠  CERTIFICAT_TLS est absente de la base.\n" +
+                  "   Les certificats lus pendant le scan ne sont pas enregistrés.\n" +
+                  "   Pour les activer :  node tools\\appliquer-migrations.js\n"
+              );
+            }
           });
         }
 
@@ -2042,6 +2093,38 @@ router.post("/equipements/:id/reveiller", requireRole("admin", "operateur"), asy
  * que pour les failles et pour la supervision : une absence
  * d'information ne doit jamais ressembler à une bonne nouvelle.
  */
+/**
+ * GET /api/equipements/:id/certificats
+ * Les certificats présentés par les services chiffrés de cette machine.
+ *
+ * Le nombre de jours restants est CALCULÉ ici, jamais lu depuis la base :
+ * stocké, il serait faux dès le lendemain — et une valeur périmée qui a
+ * l'air fraîche est pire qu'une valeur absente.
+ */
+router.get("/equipements/:id/certificats", async (req, res) => {
+  const acces = await verifierAccesEquipement(req, req.params.id);
+  if (!acces.ok) return res.status(acces.statut).json({ error: acces.erreur });
+
+  try {
+    const [rows] = await db.query(
+      `SELECT port, sujet, emetteur, valide_du, valide_au,
+              DATEDIFF(valide_au, NOW()) AS jours_restants,
+              auto_signe, taille_cle, courbe, protocole, chiffrement,
+              tls_ancien_accepte, noms_alternatifs, date_releve
+       FROM CERTIFICAT_TLS WHERE id_equipement = ? ORDER BY port`,
+      [req.params.id]
+    );
+    res.json(rows);
+  } catch (err) {
+    // Table absente : on rend une liste vide plutôt qu'une erreur. Un
+    // écran qui n'affiche pas de certificat vaut mieux qu'un écran en
+    // panne — et la fiche indique par ailleurs d'où vient l'information.
+    if (/doesn't exist|Unknown column/i.test(err.message)) return res.json([]);
+    console.error("Lecture des certificats impossible:", err.message);
+    res.status(500).json({ error: "Impossible de lire les certificats" });
+  }
+});
+
 router.get("/equipements/:id/inventaire-poste", async (req, res) => {
   const acces = await verifierAccesEquipement(req, req.params.id);
   if (!acces.ok) return res.status(acces.statut).json({ error: acces.erreur });

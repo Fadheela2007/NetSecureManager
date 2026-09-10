@@ -15,6 +15,7 @@ const { passagePlanificateur } = require("./rapportPlanifieService");
 const { diffuser } = require("./tempsReelService");
 const { calculerDebitsEquipement, oublier: oublierTrafic } = require("./traficService");
 const { purgerAdressesSansPreuve } = require("./inventaireService");
+const { SEUIL_ALERTE_JOURS } = require("./certificatService");
 
 // Nombre d'équipements sondés simultanément. Chaque vérification peut durer
 // plusieurs secondes (ping + SNMP + diagnostic de panne sur 5 ports) : sans
@@ -839,6 +840,113 @@ async function verifierAgents() {
  * supervision. On procède par tranches avec un plafond par passage, quitte à
  * étaler la purge sur plusieurs heures lors du premier nettoyage.
  */
+/**
+ * Alerte sur les certificats qui expirent.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * POURQUOI CE CONTRÔLE NE RESSEMBLE À AUCUN AUTRE DE CE FICHIER
+ *
+ * Toutes les autres vérifications constatent un problème DÉJÀ SURVENU :
+ * une machine est tombée, une mémoire est saturée, un agent s'est tu.
+ * Celle-ci est la seule qui prévienne AVANT.
+ *
+ * C'est aussi la seule panne du parc dont la date est connue à la
+ * seconde près, des mois à l'avance, et écrite dans l'équipement
+ * lui-même. Ne pas l'annoncer serait un gâchis particulier : l'outil a
+ * l'information en main et laisse quand même le service tomber.
+ *
+ * ELLE N'ENVOIE RIEN SUR LE RÉSEAU. Les dates viennent de la table,
+ * remplie au dernier scan. Le contrôle est une simple lecture.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * DEUX NIVEAUX, ET LE SEUIL EST CHOISI
+ *
+ * Trente jours : le délai qu'il faut pour obtenir un certificat auprès
+ * d'une autorité, le faire valider en interne et le déployer. Alerter à
+ * sept jours produirait une urgence là où une tâche planifiée suffisait.
+ *
+ * UN CERTIFICAT PÉRIMÉ RESTE UNE ALERTE, il ne devient pas un état
+ * normal parce qu'il dure. C'est le piège classique de ce genre de
+ * contrôle : le rendre silencieux passé un certain temps, au motif que
+ * « tout le monde sait ».
+ */
+async function verifierCertificats() {
+  let lignes;
+  try {
+    [lignes] = await db.query(
+      `SELECT c.id_equipement, c.port, c.sujet, c.valide_au,
+              DATEDIFF(c.valide_au, NOW()) AS jours_restants,
+              e.id_site, e.adresse_ip,
+              COALESCE(e.nom_personnalise, e.nom) AS nom
+       FROM CERTIFICAT_TLS c
+       JOIN EQUIPEMENT e ON e.id_equipement = c.id_equipement
+       WHERE c.valide_au IS NOT NULL`
+    );
+  } catch (err) {
+    // Migration 2026-09-10 non passée : le cycle continue sans ce
+    // contrôle plutôt que d'abandonner tous les autres.
+    if (/doesn't exist|Unknown column/i.test(err.message)) return;
+    throw err;
+  }
+
+  /* UN ÉQUIPEMENT, UNE ALERTE — pas une par port.
+
+     Un serveur qui expose 443, 993 et 465 avec le MÊME certificat
+     produirait trois alertes identiques pour un seul renouvellement à
+     faire. Le dédoublonnage du fichier porte sur (équipement, type) : on
+     retient donc le certificat le plus urgent de la machine, et son
+     message nomme le port concerné. */
+  const parEquipement = new Map();
+  for (const l of lignes) {
+    const actuel = parEquipement.get(l.id_equipement);
+    if (!actuel || Number(l.jours_restants) < Number(actuel.jours_restants)) {
+      parEquipement.set(l.id_equipement, l);
+    }
+  }
+
+  for (const c of parEquipement.values()) {
+    const jours = Number(c.jours_restants);
+    const equipement = {
+      id_equipement: c.id_equipement,
+      id_site: c.id_site,
+      adresse_ip: c.adresse_ip,
+      nom: c.nom,
+    };
+    const quoi = `${c.sujet || "certificat"} (port ${c.port})`;
+
+    if (jours < 0) {
+      await creerAlerte(
+        equipement,
+        "certificat_expire",
+        "critical",
+        `Certificat EXPIRÉ depuis ${Math.abs(jours)} jour(s) : ${quoi}. ` +
+          "Le service est inaccessible ou affiche un avertissement de sécurité " +
+          "à chaque connexion.",
+        "certificat_expire"
+      );
+      // L'avertissement devient une panne : l'alerte préventive n'a plus
+      // lieu d'être, sinon les deux coexistent et se contredisent.
+      await resoudreAlertes(c.id_equipement, "certificat_expire_bientot");
+    } else if (jours <= SEUIL_ALERTE_JOURS) {
+      await creerAlerte(
+        equipement,
+        "certificat_expire_bientot",
+        "warning",
+        `Certificat à renouveler sous ${jours} jour(s) : ${quoi}. ` +
+          `Expiration le ${new Date(c.valide_au).toLocaleDateString("fr-FR")}.`,
+        "certificat_expire_bientot"
+      );
+    } else {
+      // Renouvelé : les deux alertes se referment. Sans cette branche,
+      // une alerte réglée resterait affichée jusqu'à ce qu'un humain
+      // l'acquitte — et un tableau de bord qui garde des alertes mortes
+      // finit par ne plus être lu du tout.
+      await resoudreAlertes(c.id_equipement, "certificat_expire");
+      await resoudreAlertes(c.id_equipement, "certificat_expire_bientot");
+    }
+  }
+}
+
 async function purgerReleves() {
   const jours = await getConfig("retention_releves_jours", 30);
   if (!Number.isFinite(jours) || jours <= 0) {
@@ -1196,6 +1304,9 @@ function start() {
     try {
       agentsEnCours = true;
       await verifierAgents();
+      // Même passage que les agents : les deux sont de simples lectures,
+      // et un certificat ne change pas d'état en moins de cinq minutes.
+      await verifierCertificats();
     } catch (err) {
       console.error("Erreur de vérification des agents:", err.message);
     } finally {

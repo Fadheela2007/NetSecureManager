@@ -22,6 +22,7 @@ const { resoudreNom } = require("./nomService");
 const { parLots } = require("./parLots");
 const { lireBanniere } = require("./banniereWebService");
 const { identifierVersions } = require("./versionService");
+const { examinerCertificats } = require("./certificatService");
 
 const OID_SYS_DESCR = "1.3.6.1.2.1.1.1.0";
 const OID_SYS_OBJECT_ID = "1.3.6.1.2.1.1.2.0";
@@ -724,6 +725,29 @@ async function scanRange({
         console.error(`Lecture des versions de ${host.ip} échouée:`, err.message);
       }
 
+      /* ── LA CARTE D'IDENTITÉ DES SERVICES CHIFFRÉS ──
+
+         Un certificat qui expire ne se dégrade pas : il coupe. C'est une
+         panne qu'on voit venir trente jours à l'avance, ou jamais.
+
+         Un serveur TLS présente son certificat AVANT toute
+         authentification — c'est le principe du protocole, et ce que
+         fait chaque navigateur des milliers de fois par jour. On lit, on
+         referme, on n'envoie rien.
+
+         Le coût est nul sur l'immense majorité d'un parc bureautique :
+         sans port chiffré ouvert, aucune connexion n'est tentée. Il se
+         paie sur les imprimantes et les équipements d'administration,
+         qui en exposent presque tous un. SCAN_CERTIFICATS=0 le désactive
+         pour qui préfère la vitesse. */
+      let certificats = [];
+      if (process.env.SCAN_CERTIFICATS !== "0") {
+        certificats = await examinerCertificats(host.ip, portsOuverts).catch((err) => {
+          console.error(`Lecture des certificats de ${host.ip} échouée:`, err.message);
+          return [];
+        });
+      }
+
       // PRIORITÉ DES SOURCES : SNMP > OUI > nmap.
       //
       // SNMP en premier : l'équipement se décrit lui-même, c'est le vrai
@@ -851,6 +875,7 @@ async function scanRange({
         os_detecte: osDetecte,
         // Transmis pour éviter un second scan de ports côté routes/scan.js.
         services: portsOuverts,
+        certificats,
 
         /* ── « EN LIGNE » DEMANDE UNE PREUVE ──
            Le statut était écrit « up » pour tout hôte analysé, sans
