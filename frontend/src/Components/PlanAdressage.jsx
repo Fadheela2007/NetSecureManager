@@ -111,9 +111,15 @@ function PlanDUnePlage({ plan, ouverte, basculer }) {
     <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl p-5 space-y-4">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <p className="font-[var(--font-mono)] text-[13px]">{plan.cidr}</p>
+        {/* Les bornes ATTRIBUABLES, pas celles du bloc.
+
+            La ligne annonçait « 510 adresses attribuables — 192.168.0.0 à
+            192.168.1.255 » : or ces deux bornes-là sont précisément le
+            réseau et la diffusion, les seules qu'on ne peut PAS attribuer.
+            Le chiffre était juste et l'intervalle le contredisait. */}
         <p className="text-xs text-[var(--color-mute)]">
           {plan.total_attribuables.toLocaleString("fr-FR")} adresses attribuables —{" "}
-          {plan.adresse_reseau} à {plan.adresse_diffusion}
+          {plan.premiere_attribuable} à {plan.derniere_attribuable}
         </p>
       </div>
 
