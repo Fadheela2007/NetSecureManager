@@ -77,7 +77,22 @@ sortie-*.txt
 # Déjà versionnés ? Les retirer du suivi sans les effacer du disque :
 #     git rm -r --cached backend/tools
 # ---------------------------------------------------------------------
-backend/tools/
+# « backend/tools/* » et non « backend/tools/ » : git ne sait pas
+# ré-inclure un fichier dont un DOSSIER parent est exclu. Avec la barre
+# oblique seule, les exceptions ci-dessous n'auraient eu aucun effet — et
+# le produit serait parti sans deux outils dont le README parle.
+backend/tools/*
+
+# EXCEPTION — ceux-ci font partie du produit livré.
+#
+# La règle ci-dessus vise les outils de DIAGNOSTIC : ils s'exécutent
+# contre un réseau réel et en affichent les adresses. Les outils
+# ci-dessous n'appartiennent pas à cette famille — ils sont une étape
+# d'exploitation normale, documentée dans le README et attendue par un
+# client. Les exclure du dépôt reviendrait à livrer un produit dont une
+# fonction annoncée est absente.
+!backend/tools/importer-failles.js
+!backend/tools/appliquer-migrations.js
 
 # ---------------------------------------------------------------------
 # Documents de travail — à garder sur le poste, hors du dépôt.
@@ -107,3 +122,7 @@ _a_supprimer/
 AUDIT-COMPLET-*.md
 OU-EN-EST-LE-PROJET.md
 FICHE-TEST.md
+
+# Dossier créé par l'assistant pour déposer un fichier de travail. Rien
+# du produit n'y vit ; il peut être supprimé sans conséquence.
+Claude outputs/

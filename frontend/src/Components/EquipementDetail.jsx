@@ -62,6 +62,7 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
   const [vulnErreur, setVulnErreur] = useState(false);
   const [interfaces, setInterfaces] = useState([]);
   const [services, setServices] = useState([]);
+  const [failles, setFailles] = useState(null);
   const [dispo, setDispo] = useState(null);
   const [periodeDispo, setPeriodeDispo] = useState(30);
 
@@ -247,6 +248,17 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
     axios.get(`${API_URL}/equipements/${equipement.id_equipement}/services`)
       .then(({ data }) => setServices(data))
       .catch(() => setServices([]));
+  }, [equipement.id_equipement]);
+
+  /* Failles publiées pour les versions annoncées.
+     `null` tant que la réponse n'est pas là, et `false` si le suivi n'est
+     pas installé : trois états distincts, parce qu'une liste vide et une
+     absence d'information ne doivent jamais s'afficher pareil. */
+  useEffect(() => {
+    setFailles(null);
+    axios.get(`${API_URL}/equipements/${equipement.id_equipement}/failles`)
+      .then(({ data }) => setFailles(data))
+      .catch(() => setFailles(false));
   }, [equipement.id_equipement]);
 
   useEffect(() => {
@@ -682,6 +694,98 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
                   ou masquée : le texte reçu est conservé pour vérification.
                 </p>
               </div>
+            )}
+
+            {/* ── FAILLES PUBLIÉES POUR CES VERSIONS ──
+
+                Ce bloc dit trois choses différentes, et ne les confond
+                jamais : ce qui a été trouvé, ce qui a été cherché sans
+                rien trouver, et ce qui n'a pas été cherché du tout.
+
+                Un outil de sécurité qui affiche une liste vide sans dire
+                s'il a regardé rassure sans avoir regardé. C'est le pire
+                défaut qu'il puisse avoir, et c'est celui qui a déjà coûté
+                111 machines supervisées par personne sur ce parc. */}
+            {Array.isArray(failles) && failles.length > 0 && (
+              <div className="mt-4">
+                <p className="text-xs uppercase tracking-wide text-[var(--color-mute)] mb-1.5">
+                  Failles publiées pour ces versions
+                </p>
+
+                {failles.map((s) => (
+                  <div key={`f-${s.port}`} className="mb-3">
+                    <p className="text-xs">
+                      <span className="font-[var(--font-mono)] text-[var(--color-mute)]">
+                        {s.port}
+                      </span>{" "}
+                      {s.produit}
+                      {s.version ? ` ${s.version}` : ""}
+                      {s.failles.length > 0 && (
+                        <span className="text-[var(--color-warn)]">
+                          {" "}— {s.failles.length} faille(s) à vérifier
+                        </span>
+                      )}
+                    </p>
+
+                    {s.explication && (
+                      <p className="text-[11px] text-[var(--color-mute)] mt-0.5 leading-relaxed">
+                        {s.statut === "jamais_interroge" || s.statut === "erreur" ? "⚠ " : ""}
+                        {s.explication}
+                      </p>
+                    )}
+
+                    {s.failles.length > 0 && (
+                      <ul className="mt-1 space-y-1">
+                        {s.failles.slice(0, 8).map((f) => (
+                          <li key={f.cve_id} className="text-[11px] flex flex-wrap gap-x-2">
+                            {/* Le lien vers la source est indispensable :
+                                une référence qu'on ne peut pas vérifier
+                                ne vaut rien, et la première vérification
+                                d'un technicien décide s'il croit le reste
+                                du produit. */}
+                            <a
+                              href={`https://nvd.nist.gov/vuln/detail/${f.cve_id}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="font-[var(--font-mono)] text-[var(--color-signal)] hover:underline shrink-0"
+                            >
+                              {f.cve_id}
+                            </a>
+                            {f.score !== null && f.score !== undefined && (
+                              <span className="text-[var(--color-mute)] shrink-0">
+                                {f.severite} {f.score}
+                              </span>
+                            )}
+                            <span className="text-[var(--color-mute)] truncate max-w-full">
+                              {f.description}
+                            </span>
+                          </li>
+                        ))}
+                        {s.failles.length > 8 && (
+                          <li className="text-[11px] text-[var(--color-mute)]">
+                            … et {s.failles.length - 8} autres
+                          </li>
+                        )}
+                      </ul>
+                    )}
+                  </div>
+                ))}
+
+                <p className="text-[11px] text-[var(--color-mute)] leading-relaxed border-t border-[var(--color-line)] pt-2">
+                  Source : NVD (NIST). Le rapprochement se fait sur la version
+                  numérique annoncée — un correctif de distribution corrige souvent
+                  une faille sans changer ce numéro. C'est une liste à vérifier,
+                  pas un verdict sur cette machine.
+                </p>
+              </div>
+            )}
+
+            {failles === false && services.some((s) => s.produit) && (
+              <p className="text-[11px] text-[var(--color-mute)] mt-3 leading-relaxed">
+                ⚠ Le suivi des failles connues n'est pas installé sur cette base.
+                Les versions ci-dessus n'ont donc été comparées à rien — ce n'est
+                pas une absence de faille.
+              </p>
             )}
 
             {/* La remarque est écrite EN TOUTES LETTRES sous la liste, et

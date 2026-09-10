@@ -237,6 +237,39 @@ part par courriel, car cela dépend du réseau et non du code.
 
 ---
 
+## Failles connues des logiciels exposés
+
+Le scan lit la version que chaque service annonce à la connexion —
+`OpenSSH 8.2p1`, `Apache 2.4.41`, `MySQL 8.0.32`. Cette commande compare
+ces versions à la base publique du NIST et enregistre les failles
+publiées :
+
+```bash
+cd backend
+node tools/importer-failles.js
+```
+
+Elle demande un accès à `nvd.nist.gov` : c'est pourquoi elle est séparée
+du scan, qui tourne sur le réseau du client et n'a pas toujours internet.
+Sans clé d'API, le NVD accepte une requête toutes les six secondes ;
+une clé gratuite (`NVD_API_KEY` dans `.env`) ramène ce délai sous la
+seconde. Un logiciel absent de `backend/donnees/cpe-produits.json`
+n'est pas interrogé — et il est marqué comme tel, jamais comme « sans
+faille ».
+
+**Ce que la plateforme affirme, et ce qu'elle n'affirme pas.** Elle
+affiche « 3 failles publiées pour cette version, à vérifier ». Elle
+n'écrit jamais « cette machine est vulnérable ». Le rapprochement porte
+sur la version numérique annoncée : un correctif de distribution corrige
+souvent une faille sans changer ce numéro. Chaque ligne porte son numéro
+CVE et un lien vers le NVD, pour que la vérification prenne un clic.
+
+Une liste vide n'est jamais rendue sans son motif : *interrogé, rien de
+publié*, *logiciel sans correspondance connue*, ou *jamais interrogé*.
+Confondre les trois reviendrait à rassurer sans avoir regardé.
+
+---
+
 ## Principes de conception
 
 **Une case vide vaut mieux qu'une valeur fausse.** Un équipement dont le

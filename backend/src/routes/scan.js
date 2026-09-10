@@ -35,6 +35,7 @@ const {
 const { detecterConflits, decrireConflit } = require("../services/conflitIpService");
 const { creerAlerte } = require("../services/monitoringService");
 const { purgerAdressesSansPreuve } = require("../services/inventaireService");
+const { faillesDeLEquipement } = require("../services/faillesService");
 
 // Avertissement de migration manquante : une seule fois par démarrage.
 let colonnesVersionSignalees = false;
@@ -2009,6 +2010,43 @@ router.post("/equipements/:id/reveiller", requireRole("admin", "operateur"), asy
     res.json({ message: `Paquet de réveil envoyé à ${eq.nom || eq.adresse_ip}` });
   } catch (err) {
     res.status(500).json({ error: "Échec de l'envoi du paquet de réveil", details: err.message });
+  }
+});
+
+/**
+ * GET /api/equipements/:id/failles
+ * Les failles PUBLIÉES pour les versions que les services de cet
+ * équipement annoncent.
+ *
+ * Distincte de /vulnerabilites, qui porte les risques liés au PROTOCOLE
+ * (Telnet en clair), vrais quelle que soit la version. Les deux notions
+ * ne doivent pas se mêler : l'une est une propriété permanente du
+ * service, l'autre dépend d'un numéro de version et change à chaque mise
+ * à jour.
+ *
+ * La réponse porte TOUJOURS l'état de l'interrogation, pas seulement son
+ * résultat : une liste vide parce qu'on a cherché et qu'il n'y a rien, et
+ * une liste vide parce que personne n'a cherché, sont deux choses
+ * opposées. Un outil de sécurité qui les confond rassure sans avoir
+ * regardé — le pire défaut qu'il puisse avoir.
+ */
+router.get("/equipements/:id/failles", async (req, res) => {
+  const acces = await verifierAccesEquipement(req, req.params.id);
+  if (!acces.ok) return res.status(acces.statut).json({ error: acces.erreur });
+
+  try {
+    res.json(await faillesDeLEquipement(req.params.id));
+  } catch (err) {
+    // Migration 2026-09-10 non passée : on le DIT au lieu de rendre une
+    // liste vide, qui serait lue comme « aucune faille ».
+    if (/doesn't exist|Unknown column/i.test(err.message)) {
+      return res.status(503).json({
+        error: "Le suivi des failles connues n'est pas installé sur cette base",
+        aide: "node tools\\appliquer-migrations.js",
+      });
+    }
+    console.error("Lecture des failles impossible:", err.message);
+    res.status(500).json({ error: "Impossible de lire les failles connues" });
   }
 });
 

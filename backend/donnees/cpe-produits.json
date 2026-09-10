@@ -1,0 +1,39 @@
+{
+  "_lisez_moi": [
+    "Correspondance entre le nom qu'un service annonce dans sa bannière et",
+    "son identifiant CPE officiel (vendeur:produit) au NVD.",
+    "",
+    "POURQUOI CE FICHIER EST UNE DONNÉE ET NON DU CODE. La liste est",
+    "forcément incomplète : il existe des milliers de logiciels serveurs.",
+    "Un client qui expose un produit absent d'ici doit pouvoir l'ajouter",
+    "sans toucher au code ni attendre une nouvelle version.",
+    "",
+    "CHAQUE ENTRÉE A ÉTÉ VÉRIFIÉE contre l'API du NVD : une requête sur une",
+    "version réelle du produit y renvoie des résultats. Un couple",
+    "vendeur:produit erroné ne provoquerait aucune erreur visible — il",
+    "renverrait simplement zéro faille, et cette absence serait lue comme",
+    "une bonne nouvelle. C'est le pire mode de panne possible ici, d'où la",
+    "règle : on n'ajoute une ligne qu'après l'avoir essayée.",
+    "",
+    "Pour vérifier une correspondance avant de l'ajouter, ouvrir :",
+    "https://services.nvd.nist.gov/rest/json/cves/2.0?virtualMatchString=cpe:2.3:a:VENDEUR:PRODUIT:VERSION&resultsPerPage=1",
+    "et regarder totalResults.",
+    "",
+    "La clé est écrite en minuscules ; la comparaison ignore la casse."
+  ],
+
+  "correspondances": {
+    "openssh": "cpe:2.3:a:openbsd:openssh",
+    "apache": "cpe:2.3:a:apache:http_server",
+    "apache httpd": "cpe:2.3:a:apache:http_server",
+    "httpd": "cpe:2.3:a:apache:http_server",
+    "nginx": "cpe:2.3:a:f5:nginx",
+    "mysql": "cpe:2.3:a:oracle:mysql",
+    "mariadb": "cpe:2.3:a:mariadb:mariadb",
+    "proftpd": "cpe:2.3:a:proftpd:proftpd",
+    "exim": "cpe:2.3:a:exim:exim",
+    "dovecot": "cpe:2.3:a:dovecot:dovecot",
+    "postfix": "cpe:2.3:a:postfix:postfix",
+    "samba": "cpe:2.3:a:samba:samba"
+  }
+}
