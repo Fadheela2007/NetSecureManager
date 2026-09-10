@@ -21,6 +21,7 @@ const { determinerType, typeDepuisTexte } = require("./typeService");
 const { resoudreNom } = require("./nomService");
 const { parLots } = require("./parLots");
 const { lireBanniere } = require("./banniereWebService");
+const { identifierVersions } = require("./versionService");
 
 const OID_SYS_DESCR = "1.3.6.1.2.1.1.1.0";
 const OID_SYS_OBJECT_ID = "1.3.6.1.2.1.1.2.0";
@@ -700,6 +701,27 @@ async function scanRange({
       let banniere = null;
       if (!snmpData?.sysDescr && !peutReutiliser) {
         banniere = await lireBanniere(host.ip, portsOuverts);
+      }
+
+      /* ── QUEL LOGICIEL, ET DANS QUELLE VERSION ──
+
+         La plupart des services se présentent d'eux-mêmes dès qu'on ouvre
+         une connexion : « SSH-2.0-OpenSSH_8.2p1 », « 220 ProFTPD 1.3.5 ».
+         On écoute cette annonce, on n'envoie aucune sonde.
+
+         POURQUOI CE N'EST PAS UN DÉTAIL D'INVENTAIRE. Jusqu'ici la
+         plateforme ne savait dire que « le port 22 est ouvert » — une
+         information sur laquelle aucune faille connue ne peut être
+         rattachée sans mentir. « OpenSSH 7.4 » est d'une autre nature :
+         c'est une version précise d'un logiciel précis.
+
+         Le coût est payé UNIQUEMENT sur les ports concernés, et une
+         annonce arrive en quelques millisecondes. Un port qui accepte la
+         connexion sans rien dire coûte 1,2 seconde au plus. */
+      try {
+        portsOuverts = await identifierVersions(host.ip, portsOuverts, banniere);
+      } catch (err) {
+        console.error(`Lecture des versions de ${host.ip} échouée:`, err.message);
       }
 
       // PRIORITÉ DES SOURCES : SNMP > OUI > nmap.

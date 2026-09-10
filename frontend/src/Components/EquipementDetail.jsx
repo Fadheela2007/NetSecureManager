@@ -632,6 +632,58 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
               })}
             </div>
 
+            {/* ── QUEL LOGICIEL, ET DANS QUELLE VERSION ──
+
+                « Le port 22 est ouvert » ne permet de rattacher aucune
+                faille connue sans mentir. « OpenSSH 8.2p1 » est d'une
+                autre nature : c'est une version précise d'un logiciel
+                précis. C'est cette ligne qui rend l'inventaire
+                exploitable en sécurité.
+
+                La bannière brute est gardée en infobulle : une version
+                contestée se vérifie en lisant ce que la machine a
+                réellement annoncé. */}
+            {services.some((s) => s.produit) && (
+              <div className="mt-3">
+                <p className="text-xs uppercase tracking-wide text-[var(--color-mute)] mb-1.5">
+                  Logiciels déclarés
+                </p>
+                <ul className="space-y-1">
+                  {services
+                    .filter((s) => s.produit)
+                    .map((s) => (
+                      <li key={`v-${s.port}`} className="text-xs flex flex-wrap gap-x-2">
+                        <span className="font-[var(--font-mono)] text-[var(--color-mute)]">
+                          {s.port}
+                        </span>
+                        <span>
+                          {s.produit}
+                          {s.version ? ` ${s.version}` : ""}
+                        </span>
+                        {!s.version && (
+                          <span className="text-[var(--color-mute)]">
+                            — version non annoncée
+                          </span>
+                        )}
+                        {s.banniere && (
+                          <span
+                            className="text-[var(--color-mute)] italic truncate max-w-full"
+                            title={s.banniere}
+                          >
+                            « {s.banniere} »
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                </ul>
+                <p className="text-[11px] text-[var(--color-mute)] mt-1.5 leading-relaxed">
+                  Lu dans ce que le service annonce de lui-même à la connexion —
+                  aucune sonde n'a été envoyée. Une bannière peut être personnalisée
+                  ou masquée : le texte reçu est conservé pour vérification.
+                </p>
+              </div>
+            )}
+
             {/* La remarque est écrite EN TOUTES LETTRES sous la liste, et
                 pas seulement en infobulle : une information de sécurité
                 qui exige de survoler avec une souris n'existe pas sur un

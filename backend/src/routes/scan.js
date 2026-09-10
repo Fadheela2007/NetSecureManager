@@ -35,6 +35,9 @@ const {
 const { detecterConflits, decrireConflit } = require("../services/conflitIpService");
 const { creerAlerte } = require("../services/monitoringService");
 const { purgerAdressesSansPreuve } = require("../services/inventaireService");
+
+// Avertissement de migration manquante : une seule fois par démarrage.
+let colonnesVersionSignalees = false;
 // Même règle que celle qui calcule le total : voir le détail par port.
 const { estIgnoree } = require("../services/traficService");
 
@@ -517,12 +520,55 @@ async function scannerUnePlage(req, id_site, cidr, snmp_community) {
         // à 1 ms par requête, on perd une seconde par scan pour un
         // travail qui tient en 44 requêtes groupées.
         if (services.length > 0) {
+          /* LE PRODUIT ET SA VERSION SONT ÉCRITS AVEC LE PORT.
+
+             `COALESCE(VALUES(produit), produit)` et non `VALUES(produit)` :
+             une bannière se lit par le réseau et échoue par intermittence —
+             service momentanément occupé, paquet perdu, pare-feu. Écraser
+             franchement effacerait une version correcte au premier scan
+             malchanceux. On ne remplace que par mieux, jamais par du vide.
+             Même règle que pour le nom d'un équipement.
+
+             `date_version` ne bouge que lorsqu'une version est réellement
+             relue : sans quoi une case vide paraîtrait fraîche. */
           await db.query(
-            `INSERT INTO SERVICE_DETECTE (id_equipement, port, nom_service)
-             VALUES ${services.map(() => "(?, ?, ?)").join(", ")}
-             ON DUPLICATE KEY UPDATE nom_service = VALUES(nom_service), date_detection = NOW()`,
-            services.flatMap((s) => [idEquipement, s.port, s.nom_service])
-          );
+            `INSERT INTO SERVICE_DETECTE
+               (id_equipement, port, nom_service, produit, version, version_source, banniere, date_version)
+             VALUES ${services.map(() => "(?, ?, ?, ?, ?, ?, ?, NOW())").join(", ")}
+             ON DUPLICATE KEY UPDATE
+               nom_service = VALUES(nom_service),
+               produit        = COALESCE(VALUES(produit), produit),
+               version        = COALESCE(VALUES(version), version),
+               version_source = COALESCE(VALUES(version_source), version_source),
+               banniere       = COALESCE(VALUES(banniere), banniere),
+               date_version   = CASE WHEN VALUES(produit) IS NOT NULL
+                                     THEN NOW() ELSE date_version END,
+               date_detection = NOW()`,
+            services.flatMap((s) => [
+              idEquipement, s.port, s.nom_service,
+              s.produit ?? null, s.version ?? null,
+              s.version_source ?? null, s.banniere ?? null,
+            ])
+          ).catch(async (err) => {
+            // Repli si la migration 2026-09-10 n'est pas passée : mieux
+            // vaut un inventaire de ports sans versions qu'un scan qui
+            // échoue en entier sur une colonne absente.
+            if (!/Unknown column/i.test(err.message)) throw err;
+            if (!colonnesVersionSignalees) {
+              colonnesVersionSignalees = true;
+              console.warn(
+                "\n⚠  SERVICE_DETECTE.produit est absente de la base.\n" +
+                  "   Les versions des services ne sont pas enregistrées.\n" +
+                  "   Pour les activer :  node tools\\appliquer-migrations.js\n"
+              );
+            }
+            await db.query(
+              `INSERT INTO SERVICE_DETECTE (id_equipement, port, nom_service)
+               VALUES ${services.map(() => "(?, ?, ?)").join(", ")}
+               ON DUPLICATE KEY UPDATE nom_service = VALUES(nom_service), date_detection = NOW()`,
+              services.flatMap((s) => [idEquipement, s.port, s.nom_service])
+            );
+          });
         }
 
         // ── INVENTAIRE DES INTERFACES ──
@@ -1817,10 +1863,27 @@ router.get("/equipements/:id/services", async (req, res) => {
   const acces = await verifierAccesEquipement(req, req.params.id);
   if (!acces.ok) return res.status(acces.statut).json({ error: acces.erreur });
 
-  const [rows] = await db.query(
-    "SELECT port, nom_service, date_detection FROM SERVICE_DETECTE WHERE id_equipement = ? ORDER BY port",
-    [req.params.id]
-  );
+  // `banniere` est renvoyée avec la version : une version contestée se
+  // vérifie en lisant ce que la machine a réellement annoncé, au lieu de
+  // se discuter. Elle ne contient jamais de secret — c'est la phrase
+  // d'accueil publique d'un service, lisible par quiconque se connecte.
+  let rows;
+  try {
+    [rows] = await db.query(
+      `SELECT port, nom_service, produit, version, version_source, banniere,
+              date_version, date_detection
+       FROM SERVICE_DETECTE WHERE id_equipement = ? ORDER BY port`,
+      [req.params.id]
+    );
+  } catch (err) {
+    // Migration 2026-09-10 non passée : on rend les ports sans versions
+    // plutôt qu'une erreur qui viderait tout l'onglet.
+    if (!/Unknown column/i.test(err.message)) throw err;
+    [rows] = await db.query(
+      "SELECT port, nom_service, date_detection FROM SERVICE_DETECTE WHERE id_equipement = ? ORDER BY port",
+      [req.params.id]
+    );
+  }
   res.json(rows);
 });
 
