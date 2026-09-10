@@ -81,16 +81,31 @@ Bilan "interface reconstruite" $buildOk `
 # peuvent donc rien casser. Un echec ici signale une regression dans le
 # code, pas un probleme d'installation.
 Titre "Tests"
+# La sortie est ecrite dans un fichier plutot que capturee au vol.
+#
+# `npm test 2>&1 | Out-String` rendait une chaine vide sur ce poste : npm
+# est un .cmd, et son flux traverse deux interpreteurs avant d'arriver a
+# PowerShell. Le script concluait alors « la suite n'a pas pu s'executer »
+# alors que les 342 tests passaient — un faux echec, exactement le genre
+# de message qui fait chercher un defaut inexistant.
 Push-Location $backend
-$sortie = npm test 2>&1 | Out-String
+$journal = Join-Path $env:TEMP "netsecure-tests.txt"
+& npm test *> $journal
+$codeSortie = $LASTEXITCODE
 Pop-Location
-if ($sortie -match "# fail (\d+)") {
-    $rates = [int]$Matches[1]
-    $passes = if ($sortie -match "# pass (\d+)") { $Matches[1] } else { "?" }
+
+$sortie = if (Test-Path $journal) { Get-Content $journal -Raw } else { "" }
+$passes = if ($sortie -match "# pass (\d+)") { $Matches[1] } else { $null }
+$rates  = if ($sortie -match "# fail (\d+)") { [int]$Matches[1] } else { $null }
+
+if ($null -ne $rates) {
     Bilan "$passes tests passent, $rates echouent" ($rates -eq 0) `
           "Dites-le-moi : une regression est entree dans le code."
+} elseif ($codeSortie -eq 0) {
+    # Code de sortie 0 : les tests ont reussi, seul l'affichage a manque.
+    Bilan "tests passes" $true $null
 } else {
-    Bilan "tests executes" $false "La suite n'a pas pu s'executer."
+    Bilan "tests executes" $false "Detail complet dans $journal"
 }
 
 # --- Bilan -------------------------------------------------------------
