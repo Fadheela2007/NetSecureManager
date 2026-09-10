@@ -26,18 +26,24 @@ logiciels installés à notre serveur de supervision. »*
 
 ---
 
-## Étape 1 — Préparer le script
+## Étape 1 — Récupérer le script, déjà rempli
 
-Ouvrir `deploiement\inventaire-poste.ps1` et renseigner les trois
-valeurs en haut du fichier :
+Page **Sites** → *Mise en service de l'agent* → bouton **« Télécharger le
+script d'inventaire »**.
 
-```powershell
-$CENTRAL_API_URL = "http://192.168.0.10:5000/api"
-$AGENT_TOKEN     = "le-jeton-du-site"
-$ID_SITE         = 1
-```
+Le fichier arrive avec l'adresse du serveur, le numéro du site et le
+jeton **déjà dedans**. Il n'y a rien à éditer.
 
-Le jeton se lit page **Sites** → *Mise en service de l'agent*.
+> **C'est le point qui change tout au quotidien.** Le jeton se régénère —
+> c'est même le geste de sécurité qu'on attend d'un exploitant. Si le
+> script portait ses valeurs en dur, chaque rotation obligerait à rouvrir
+> le fichier et recoller la bonne ligne : une modification de **code**
+> pour une opération d'**exploitation**. Sur des centaines de postes,
+> cette friction n'empêche pas seulement le confort, elle empêche la
+> rotation elle-même — on finit par ne plus jamais changer le jeton.
+>
+> Avec le téléchargement : régénérer, télécharger, remplacer le fichier
+> sur le partage. Les 559 postes suivent au prochain déclenchement.
 
 > **À dire à l'informaticien, pas à cacher.** Ce jeton sera lisible par
 > toute personne pouvant lire `NETLOGON`, c'est-à-dire tout compte du

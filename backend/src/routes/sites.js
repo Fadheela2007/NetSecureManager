@@ -9,6 +9,14 @@ const crypto = require("crypto");
 const router = express.Router();
 const db = require("../db");
 const { requireRole } = require("../middleware/requireRole");
+const fs = require("node:fs/promises");
+const path = require("node:path");
+
+/** Le modele vit dans le depot, pas dans le code : il reste lisible et
+ *  deployable a la main, sans passer par la plateforme. */
+const CHEMIN_SCRIPT_INVENTAIRE = path.join(
+  __dirname, "..", "..", "..", "deploiement", "inventaire-poste.ps1"
+);
 const { clauseSite, porteeDe, siteAutorise } = require("../middleware/porteeSite");
 const { tracer } = require("../services/journal");
 
@@ -197,6 +205,93 @@ router.get("/sites/:id/agent", requireRole("admin"), async (req, res) => {
     cidr_suggere: site.cidr_suggere || null,
     commandes: commandesInstallation(site, urlCentrale),
   });
+});
+
+/**
+ * GET /api/sites/:id/script-inventaire
+ * Le script PowerShell d'inventaire, DEJA REMPLI pour ce site.
+ *
+ * POURQUOI CETTE ROUTE EXISTE
+ *
+ * Le script portait ses trois valeurs en dur, a renseigner a la main.
+ * Or le jeton se regenere — c'est meme le geste de securite qu'on
+ * attend d'un exploitant. Chaque rotation obligeait donc a rouvrir le
+ * script, retrouver la bonne ligne, recoller le jeton : une
+ * modification de CODE pour une operation d'EXPLOITATION.
+ *
+ * Sur un parc de plusieurs centaines de postes, cette friction ne
+ * ralentit pas la rotation, elle l'empeche : on finit par ne plus
+ * jamais changer le jeton, ce qui est le contraire du but.
+ *
+ * Desormais : regenerer, telecharger, deposer sur le partage. Aucun
+ * editeur de texte, aucune ligne a retrouver.
+ *
+ * RESERVE AUX ADMINISTRATEURS ET TRACE. Ce fichier CONTIENT le jeton :
+ * c'est un secret au meme titre que la route /agent, et son
+ * telechargement laisse une ligne au journal. Un jeton qui sort doit
+ * pouvoir se raconter apres coup.
+ */
+router.get("/sites/:id/script-inventaire", requireRole("admin"), async (req, res) => {
+  const [rows] = await db.query(
+    "SELECT id_site, nom, agent_token FROM SITE WHERE id_site = ?",
+    [req.params.id]
+  );
+  if (rows.length === 0 || !siteAutorise(req, rows[0].id_site)) {
+    return res.status(404).json({ error: "Site introuvable" });
+  }
+  const site = rows[0];
+
+  const protocole = req.headers["x-forwarded-proto"] || req.protocol;
+  const hote = req.headers["x-forwarded-host"] || req.headers.host;
+  const urlCentrale = `${protocole}://${hote}/api`;
+
+  let modele;
+  try {
+    modele = await fs.readFile(CHEMIN_SCRIPT_INVENTAIRE, "utf8");
+  } catch (err) {
+    console.error("Modele de script d'inventaire illisible:", err.message);
+    return res.status(500).json({
+      error: "Le modele du script est introuvable sur le serveur",
+      aide: "Il doit se trouver dans deploiement/inventaire-poste.ps1",
+    });
+  }
+
+  /* Substitution par ANCRE, jamais par recherche de l'ancienne valeur.
+     On remplace la ligne entiere reperee par son nom de variable : le
+     modele du depot peut contenir n'importe quoi, y compris une chaine
+     vide. Chercher la valeur d'exemple aurait rendu, le jour ou
+     quelqu'un modifie le modele, un script d'apparence normale mais
+     jamais rempli — l'echec le plus discret possible. */
+  const rempli = modele
+    .replace(/^\$CENTRAL_API_URL\s*=.*$/m, `$CENTRAL_API_URL = "${urlCentrale}"`)
+    .replace(/^\$AGENT_TOKEN\s*=.*$/m, `$AGENT_TOKEN     = "${site.agent_token}"`)
+    .replace(/^\$ID_SITE\s*=.*$/m, `$ID_SITE         = ${site.id_site}`);
+
+  // Garde-fou : si la substitution n'a rien fait, on refuse d'envoyer un
+  // script vide plutot que de laisser decouvrir la panne sur tout le parc.
+  if (!rempli.includes(site.agent_token)) {
+    console.error("Substitution du jeton impossible dans le modele de script.");
+    return res.status(500).json({
+      error: "Le modele du script n'a pas pu etre rempli",
+      aide: "Les lignes $CENTRAL_API_URL, $AGENT_TOKEN et $ID_SITE doivent y figurer.",
+    });
+  }
+
+  await tracer(
+    req,
+    "script_inventaire_telecharge",
+    `Script d'inventaire telecharge pour le site ${site.id_site} « ${site.nom} » ` +
+      "— il contient le jeton de ce site."
+  );
+
+  // Le BOM du modele est CONSERVE : PowerShell 5.1 lit un fichier UTF-8
+  // sans BOM comme de l'ANSI, et tous les accents deviennent illisibles.
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="inventaire-poste-site-${site.id_site}.ps1"`
+  );
+  res.send(rempli);
 });
 
 /**

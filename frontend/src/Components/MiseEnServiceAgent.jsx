@@ -59,6 +59,7 @@ export default function MiseEnServiceAgent({ idSite, onFermer }) {
   const [erreur, setErreur] = useState(null);
   const [systeme, setSysteme] = useState("linux");
   const [jetonVisible, setJetonVisible] = useState(false);
+  const [telechargement, setTelechargement] = useState(false);
   const [regeneration, setRegeneration] = useState(false);
 
   async function charger(silencieux = false) {
@@ -68,6 +69,40 @@ export default function MiseEnServiceAgent({ idSite, onFermer }) {
       setErreur(null);
     } catch (err) {
       if (!silencieux) setErreur(err.response?.data?.error || "Chargement impossible");
+    }
+  }
+
+  /**
+   * Telecharge le script d'inventaire deja rempli pour ce site.
+   *
+   * Passe par axios et non par un lien direct : la route exige le jeton
+   * d'authentification de la SESSION, qu'un `<a href>` n'enverrait pas.
+   * Le fichier revient donc en memoire, et on le remet au navigateur.
+   */
+  async function telechargerScript() {
+    setTelechargement(true);
+    try {
+      const reponse = await axios.get(`${API_URL}/sites/${idSite}/script-inventaire`, {
+        responseType: "blob",
+      });
+
+      const lien = document.createElement("a");
+      lien.href = URL.createObjectURL(reponse.data);
+      lien.download = `inventaire-poste-site-${idSite}.ps1`;
+      document.body.appendChild(lien);
+      lien.click();
+      // L'adresse temporaire est liberee : sans cela chaque
+      // telechargement laisse le fichier en memoire jusqu'au rechargement
+      // de la page.
+      document.body.removeChild(lien);
+      setTimeout(() => URL.revokeObjectURL(lien.href), 1000);
+    } catch (err) {
+      setErreur(
+        err.response?.data?.error ||
+          "Le script n'a pas pu etre prepare. Le modele deploiement/inventaire-poste.ps1 est-il present sur le serveur ?"
+      );
+    } finally {
+      setTelechargement(false);
     }
   }
 
@@ -210,6 +245,42 @@ export default function MiseEnServiceAgent({ idSite, onFermer }) {
                 valeur={infos.commandes.envManuel}
               />
             )}
+
+            {/* ── INVENTAIRE DES POSTES, PAR STRATEGIE DE GROUPE ──
+
+                Le script se telecharge DEJA REMPLI. Il portait auparavant
+                ses trois valeurs en dur : chaque rotation du jeton
+                obligeait a rouvrir le fichier et recoller la bonne ligne —
+                une modification de CODE pour une operation
+                d'EXPLOITATION.
+
+                Sur plusieurs centaines de postes, cette friction
+                n'empeche pas seulement le confort : elle empeche la
+                rotation elle-meme. On finit par ne plus jamais changer le
+                jeton, ce qui est exactement le contraire du but. */}
+            <div className="mt-4 pt-4 border-t border-[var(--color-line)]">
+              <p className="text-sm font-medium mb-1">
+                Inventaire des postes — sans rien installer
+              </p>
+              <p className="text-xs text-[var(--color-mute)] mb-2 leading-relaxed">
+                Un script PowerShell a deposer sur le partage NETLOGON du domaine
+                et a lancer par une tache planifiee de GPO. Une regle ecrite une
+                fois couvre tout le parc. Il est telecharge deja rempli avec
+                l'adresse, le numero de site et le jeton ci-dessous — aucun
+                fichier a editer, ni maintenant, ni a la prochaine rotation.
+              </p>
+              <button
+                onClick={telechargerScript}
+                disabled={telechargement}
+                className="text-xs px-3 py-1.5 rounded-lg border border-[var(--color-line)] text-[var(--color-mute)] hover:border-[var(--color-signal)] hover:text-[var(--color-signal)] transition disabled:opacity-50"
+              >
+                {telechargement ? "Preparation..." : "Telecharger le script d'inventaire"}
+              </button>
+              <p className="text-[11px] text-[var(--color-mute)] mt-1.5 leading-relaxed">
+                Ce fichier contient le jeton du site : traitez-le comme un mot de
+                passe. Son telechargement est inscrit au journal d'activite.
+              </p>
+            </div>
 
             {!infos.cidr_suggere && (
               <p className="text-[11px] text-[var(--color-warn)] mt-2">
