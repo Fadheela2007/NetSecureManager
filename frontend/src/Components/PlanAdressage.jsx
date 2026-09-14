@@ -150,29 +150,6 @@ function PlanDUnePlage({ plan, ouverte, basculer }) {
         <Chiffre valeur={plan.nb_libres} libelle="libres" detail="disponibles" />
       </div>
 
-      {plan.libres_exemples?.length > 0 && (
-        <div>
-          <p className="text-xs text-[var(--color-mute)] mb-1.5">
-            Prochaines adresses libres
-          </p>
-          <div className="flex flex-wrap gap-1.5">
-            {plan.libres_exemples.map((a) => (
-              <span
-                key={a}
-                className="font-[var(--font-mono)] text-[12px] px-2 py-0.5 rounded border border-[var(--color-line)] text-[var(--color-mute)]"
-              >
-                {a}
-              </span>
-            ))}
-            {plan.libres_tronquees && (
-              <span className="text-[12px] text-[var(--color-mute)] px-1 py-0.5">
-                … et {(plan.nb_libres - plan.libres_exemples.length).toLocaleString("fr-FR")} autres
-              </span>
-            )}
-          </div>
-        </div>
-      )}
-
       <button
         onClick={basculer}
         className="text-xs px-3 py-1.5 rounded-lg border border-[var(--color-line)] text-[var(--color-mute)] hover:border-[var(--color-signal)] hover:text-[var(--color-signal)] transition"
@@ -220,6 +197,42 @@ function PlanDUnePlage({ plan, ouverte, basculer }) {
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+
+          {/* LES ADRESSES LIBRES SONT DANS LE DÉTAIL, PAS EN TÊTE.
+
+              Elles occupaient le haut de la carte, avant même le bouton
+              de détail : vingt-quatre pastilles poussaient les trois
+              chiffres — occupées, réservées, libres — hors de vue sur un
+              écran ordinaire.
+
+              Or ces trois chiffres SONT la carte : ils répondent d'un
+              coup d'œil à « mon réseau est-il plein ? ». La liste des
+              adresses disponibles répond à une autre question, « laquelle
+              je donne à la nouvelle imprimante », qu'on ne se pose qu'au
+              moment de le faire. Elle rejoint donc les deux autres listes
+              d'adresses, derrière le même bouton. */}
+          {plan.libres_exemples?.length > 0 && (
+            <div>
+              <p className="text-xs text-[var(--color-mute)] mb-1.5">
+                Prochaines adresses libres
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {plan.libres_exemples.map((a) => (
+                  <span
+                    key={a}
+                    className="font-[var(--font-mono)] text-[12px] px-2 py-0.5 rounded border border-[var(--color-line)] text-[var(--color-mute)]"
+                  >
+                    {a}
+                  </span>
+                ))}
+                {plan.libres_tronquees && (
+                  <span className="text-[12px] text-[var(--color-mute)] px-1 py-0.5">
+                    … et {(plan.nb_libres - plan.libres_exemples.length).toLocaleString("fr-FR")} autres
+                  </span>
+                )}
+              </div>
             </div>
           )}
 
