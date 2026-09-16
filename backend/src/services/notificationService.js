@@ -19,7 +19,6 @@
  * Utiliser notifierAlerte() sans await.
  */
 const nodemailer = require("nodemailer");
-const axios = require("axios");
 const db = require("../db");
 
 // Sans ces timeouts, un SMTP injoignable peut bloquer jusqu'à 2 minutes

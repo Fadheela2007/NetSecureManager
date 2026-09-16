@@ -16,6 +16,7 @@ const { diffuser } = require("./tempsReelService");
 const { calculerDebitsEquipement, oublier: oublierTrafic } = require("./traficService");
 const { purgerAdressesSansPreuve } = require("./inventaireService");
 const { SEUIL_ALERTE_JOURS } = require("./certificatService");
+const { purgerObservations } = require("./observationDnsDepot");
 
 // Nombre d'équipements sondés simultanément. Chaque vérification peut durer
 // plusieurs secondes (ping + SNMP + diagnostic de panne sur 5 ports) : sans
@@ -244,6 +245,40 @@ async function creerAlerteCharge(equipement, metrique, valeur, seuil, nbReleves)
   );
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+   CE QUI COMPTE COMME « ELLE EST LÀ ».
+
+   Ces trois codes viennent de `diagnosePanne`. Ils ne se valent pas en
+   confort — un port ouvert est plus parlant qu'une réponse ARP — mais ils
+   se valent en VÉRITÉ : dans les trois cas, quelque chose a répondu à
+   cette adresse pendant que nous regardions.
+
+     • `pare_feu_probable` — un port TCP est ouvert ;
+     • `refus_tcp`         — aucun port ouvert, mais la machine refuse
+                             franchement la connexion : une pile réseau
+                             vivante est derrière ;
+     • `voisinage_arp`     — elle ne répond à rien au-dessus d'IP, mais
+                             elle répond en ARP sur le segment local, ce
+                             qu'aucun pare-feu Windows ne filtre.
+
+   POURQUOI CETTE LISTE EST ÉCRITE ICI PLUTÔT QU'EN DUR DANS LE TEST.
+
+   La version précédente comparait à la seule valeur `pare_feu_probable`.
+   Les deux autres preuves existaient déjà dans le balayage — une machine
+   entrait à l'inventaire en « up » sur un refus TCP — mais la supervision
+   les ignorait et la repassait en « inconnu » au bout de trois cycles.
+   La plateforme se contredisait elle-même à quelques minutes
+   d'intervalle, et c'est ce qui vidait l'écran après chaque scan.
+
+   Toute preuve future s'ajoute désormais à cette liste, à un seul
+   endroit, et les deux chemins l'appliquent ensemble.
+   ═══════════════════════════════════════════════════════════════════════ */
+const PREUVES_DE_VIE = ["pare_feu_probable", "refus_tcp", "voisinage_arp"];
+
+/** Ce que le cycle a dû prouver autrement que par le ping. Remis à zéro
+ *  et résumé en une ligne à la fin de chaque cycle — voir cycleSupervision. */
+const compteurPreuves = { pare_feu_probable: 0, refus_tcp: 0, voisinage_arp: 0 };
+
 async function checkEquipement(equipement, cfg) {
   const res = await ping.promise.probe(equipement.adresse_ip, { timeout: 2 });
 
@@ -352,17 +387,39 @@ async function checkEquipement(equipement, cfg) {
     // outil : au bout de deux semaines, plus personne ne lit ses alertes.
     const diagnostic = await diagnosePanne(equipement.adresse_ip);
 
-    if (diagnostic.code === "pare_feu_probable") {
-      // La machine répond sur un port TCP : elle est en ligne. Ne pas
+    if (PREUVES_DE_VIE.includes(diagnostic.code)) {
+      compteurPreuves[diagnostic.code]++;
+
+      // La machine a répondu à quelque chose : elle est en ligne. Ne pas
       // répondre au ping est une propriété de la machine, pas une panne.
       await db.query(
         "UPDATE EQUIPEMENT SET statut = 'up', echecs_consecutifs = 0 WHERE id_equipement = ?",
         [equipement.id_equipement]
       );
+
+      /* LA PREUVE EST ÉCRITE, ET DATÉE.
+         La fiche disait « en ligne » sans dire sur quoi la supervision se
+         fondait — or c'est précisément la question qu'on pose quand on ne
+         croit pas un écran. Le balayage enregistrait déjà sa preuve ; la
+         supervision, qui parle plus souvent que lui, ne disait rien.
+         Colonnes ajoutées le 09/09 : sur une base plus ancienne, ce
+         complément d'information s'abstient, il n'interrompt rien. */
+      await db
+        .query(
+          `UPDATE EQUIPEMENT SET preuve_existence = ?, preuve_detail = ?, date_preuve = NOW()
+           WHERE id_equipement = ?`,
+          [diagnostic.code, diagnostic.detail.slice(0, 255), equipement.id_equipement]
+        )
+        .catch(() => {});
+
       // Une alerte ouverte par une version précédente doit se refermer.
       await resoudreAlertes(equipement.id_equipement, "equipement_down");
 
-      if (equipement.statut === "down") {
+      /* Le test portait sur `=== "down"`. Il laissait donc l'écran sur
+         « inconnu » pour toutes les machines que ce nouveau barème vient
+         de rendre à l'état « up » — c'est-à-dire exactement celles que ce
+         correctif concerne. */
+      if (equipement.statut !== "up") {
         diffuser(equipement.id_site ?? null, "equipement", {
           id_equipement: equipement.id_equipement,
           statut: "up",
@@ -1224,6 +1281,29 @@ async function cycleSupervision() {
     );
   }
 
+  /* ── CE QUE LE PING N'A PAS SUFFI À PROUVER ──
+
+     Une ligne, et seulement quand il y a quelque chose à dire. Elle
+     répond à la question qu'on se pose devant un parc bureautique :
+     « ces machines sont-elles vraiment en ligne ? » — en disant sur quoi
+     la plateforme se fonde pour l'affirmer, machine muette au ping par
+     machine muette au ping. */
+  const totalPreuves =
+    compteurPreuves.pare_feu_probable +
+    compteurPreuves.refus_tcp +
+    compteurPreuves.voisinage_arp;
+  if (totalPreuves > 0) {
+    console.log(
+      `Supervision — ${totalPreuves} machine(s) muette(s) au ping mais bien en ligne : ` +
+        `${compteurPreuves.pare_feu_probable} par port ouvert, ` +
+        `${compteurPreuves.refus_tcp} par refus TCP, ` +
+        `${compteurPreuves.voisinage_arp} par réponse ARP.`
+    );
+    compteurPreuves.pare_feu_probable = 0;
+    compteurPreuves.refus_tcp = 0;
+    compteurPreuves.voisinage_arp = 0;
+  }
+
   /* ── FIN DE CYCLE : LE SEUL ÉVÉNEMENT QUI DIT « IL Y A DE NOUVELLES
      MESURES ». ──
 
@@ -1331,6 +1411,45 @@ function start() {
     try {
       purgeEnCours = true;
       await purgerReleves();
+
+      /* ── LA PURGE DES OBSERVATIONS DNS N'ÉTAIT APPELÉE NULLE PART ──
+
+         `purgerObservations()` était écrite, documentée et exportée — et
+         aucun planificateur ne l'appelait. Les domaines contactés par
+         chaque machine s'accumulaient donc SANS FIN, alors que le module
+         annonce une rétention : « une conservation sans fin
+         transformerait le relevé en historique de comportement sur
+         plusieurs années — exactement ce que le dispositif s'interdit ».
+
+         C'est la pire forme de défaut sur une fonction d'observation :
+         la règle est écrite, personne ne la remet en question, et elle
+         ne s'applique pas. Rien à l'écran ne l'aurait montré — une
+         table qui grossit ne se voit pas.
+
+         Ce que ça change : au premier passage, tout relevé dont la
+         dernière occurrence dépasse la rétention (réglage
+         `retention_observations_dns_jours`, 90 jours à défaut) est
+         effacé. Sur un site qui n'observe rien, l'appel ne supprime
+         rien et ne coûte rien.
+
+         Placée ICI et non dans son propre cron : c'est la même nature de
+         travail que la purge des relevés — du ménage horaire — et le
+         verrou `purgeEnCours` protège déjà les deux d'un recouvrement. */
+      const obs = await purgerObservations().catch((err) => {
+        // Migration du 14 septembre non passée : les tables n'existent
+        // pas encore. Ce n'est pas une panne, et cela ne doit pas
+        // empêcher la purge des relevés qui vient de réussir.
+        if (!/doesn't exist|Unknown column/i.test(err.message)) {
+          console.error("Purge des observations DNS ignorée:", err.message);
+        }
+        return null;
+      });
+      if (obs && (obs.domaines > 0 || obs.signaux > 0)) {
+        console.log(
+          `Purge des observations DNS : ${obs.domaines} domaine(s) et ` +
+            `${obs.signaux} signal(aux) effacé(s) (rétention ${obs.jours} jour(s)).`
+        );
+      }
     } catch (err) {
       console.error("Erreur de purge des relevés:", err.message);
     } finally {

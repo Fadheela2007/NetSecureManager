@@ -227,6 +227,214 @@ async function recevoirInventaire(idSite, corps) {
   return { id_equipement: idEquipement, logiciels: nbLogiciels, processus: nbProcessus };
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+   LA DEUXIÈME SOURCE : SNMP, SANS AGENT
+
+   Le scan sait désormais lire les programmes en cours et les logiciels
+   installés directement par SNMP (HOST-RESOURCES-MIB, voir
+   discoveryService.snmpInventaireLogiciel). Cette source-là ne demande
+   RIEN à installer sur la machine.
+
+   ELLE SE RANGE DANS LES MÊMES TABLES, et c'est délibéré : LOGICIEL_
+   INSTALLE et PROCESSUS_OBSERVE décrivent l'intérieur d'une machine, pas
+   la façon dont on l'a appris. Deux tables parallèles auraient obligé
+   chaque écran, chaque rapport et chaque futur module à savoir laquelle
+   interroger — et à se tromper un jour.
+
+   COMMENT ON SAIT LAQUELLE A PARLÉ. La colonne `agent_poste_version`
+   porte déjà « quel collecteur a transmis » : elle vaut le numéro de
+   version pour un agent, et la valeur littérale `snmp` pour cette
+   source. Aucune migration n'est donc nécessaire — ce qui compte ici :
+   la fonction doit marcher au redémarrage, sans commande à taper.
+
+   ═══════════════════════════════════════════════════════════════════════
+   L'AGENT L'EMPORTE TOUJOURS SUR SNMP, ET CE N'EST PAS NÉGOCIABLE
+
+   Un agent installé sait strictement plus : la version et l'éditeur de
+   chaque logiciel, et surtout SOUS QUEL COMPTE tourne chaque programme —
+   trois informations que SNMP ne donne jamais.
+
+   Si un scan écrasait l'inventaire d'un agent par le sien, la fiche
+   perdrait ces colonnes à chaque passage du scan, pour les retrouver au
+   prochain envoi de l'agent. Elles clignoteraient. Pire : personne ne
+   comprendrait pourquoi, puisque les deux sources sont justes.
+
+   Une machine équipée d'un agent est donc laissée tranquille.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** Le collecteur inscrit dans `agent_poste_version` pour la voie SNMP. */
+const SOURCE_SNMP = "snmp";
+/** Idem pour la voie WMI — les postes Windows, sans agent. */
+const SOURCE_WMI = "wmi";
+
+/**
+ * QUI L'EMPORTE SUR QUI, ET POURQUOI CET ORDRE-LÀ.
+ *
+ * Trois sources peuvent décrire l'intérieur d'une même machine. Elles ne
+ * savent pas la même chose, et laisser la dernière arrivée écraser les
+ * autres ferait clignoter la fiche au rythme des scans.
+ *
+ *   agent (3) — le seul à savoir SOUS QUEL COMPTE tourne chaque
+ *               programme, et à donner version et éditeur exacts. Il est
+ *               installé sur la machine : rien ne voit mieux.
+ *   wmi   (2) — donne les programmes, et les logiciels avec leur version
+ *               et leur éditeur quand WinRM répond. Ne dit pas le compte.
+ *   snmp  (1) — donne les programmes et le nom des logiciels, sans
+ *               version, sans éditeur, sans compte.
+ *
+ * Une source ne remplace donc que ce qui en sait autant ou moins
+ * qu'elle. Une machine équipée d'un agent est laissée tranquille par les
+ * deux autres ; une machine lue par WMI n'est pas dégradée par SNMP au
+ * scan suivant.
+ */
+const RANGS = { [SOURCE_SNMP]: 1, [SOURCE_WMI]: 2 };
+function rangSource(source) {
+  // Tout ce qui n'est ni « snmp » ni « wmi » est un numéro de version
+  // d'agent : c'est donc un agent, et il l'emporte sur tout.
+  if (!source) return 0;
+  return RANGS[source] ?? 3;
+}
+
+/**
+ * Écrit les logiciels vus à distance — par SNMP ou par WMI.
+ *
+ * POURQUOI CETTE FONCTION N'EST PAS `enregistrerLogiciels`.
+ *
+ * L'écriture de l'agent s'appuie sur la clé unique
+ * (id_equipement, nom, version) pour ne pas créer de doublon. Mais en
+ * MySQL, une clé UNIQUE dont une colonne vaut NULL n'empêche PAS les
+ * doublons : deux lignes (« Firefox », NULL) sont tenues pour
+ * distinctes. Or SNMP ne donne JAMAIS de version, et WMI n'en donne pas
+ * toujours.
+ *
+ * Passer par l'écriture de l'agent aurait donc ajouté la liste complète
+ * des logiciels À CHAQUE SCAN, et la fiche aurait montré le même
+ * logiciel dix fois au bout d'une semaine — sans qu'aucune erreur ne
+ * soit levée nulle part.
+ *
+ * On lit donc ce qui est déjà là, et on n'insère que ce qui manque. Deux
+ * requêtes de plus, payées uniquement sur les machines qui répondent.
+ */
+async function enregistrerLogicielsSnmp(idEquipement, logiciels) {
+  if (!Array.isArray(logiciels) || logiciels.length === 0) return 0;
+
+  const [existants] = await db.query(
+    "SELECT nom, version FROM LOGICIEL_INSTALLE WHERE id_equipement = ?",
+    [idEquipement]
+  );
+
+  /* La comparaison porte sur le COUPLE nom + version, pas sur le nom
+     seul : un logiciel mis à jour est une ligne nouvelle, et c'est ce
+     qui permet de lire « Firefox 128 vu en août, Firefox 133 depuis
+     septembre ». Comparer sur le nom seul aurait figé la version du
+     premier relevé pour toujours. */
+  const cle = (l) => `${String(l.nom).toLowerCase()} ${l.version ?? ""}`;
+  const deja = new Set(existants.map(cle));
+
+  const nouveaux = [];
+  const revus = [];
+  for (const l of logiciels) {
+    if (!l?.nom) continue;
+    (deja.has(cle(l)) ? revus : nouveaux).push(l);
+  }
+
+  if (nouveaux.length > 0) {
+    const TAILLE_LOT = 100;
+    for (let i = 0; i < nouveaux.length; i += TAILLE_LOT) {
+      const lot = nouveaux.slice(i, i + TAILLE_LOT);
+      await db.query(
+        `INSERT INTO LOGICIEL_INSTALLE (id_equipement, nom, version, editeur)
+         VALUES ${lot.map(() => "(?, ?, ?, ?)").join(", ")}`,
+        lot.flatMap((l) => [
+          idEquipement,
+          String(l.nom).slice(0, 200),
+          l.version ? String(l.version).slice(0, 80) : null,
+          l.editeur ? String(l.editeur).slice(0, 150) : null,
+        ])
+      );
+    }
+  }
+
+  // Ceux qui existaient déjà ont été REVUS : c'est ce couple
+  // premiere_vue / derniere_vue qui répond à « depuis quand ce logiciel
+  // est-il là, et y est-il encore ? ».
+  if (revus.length > 0) {
+    const TAILLE_LOT = 200;
+    for (let i = 0; i < revus.length; i += TAILLE_LOT) {
+      const lot = revus.slice(i, i + TAILLE_LOT);
+      await db.query(
+        `UPDATE LOGICIEL_INSTALLE SET derniere_vue = NOW()
+         WHERE id_equipement = ? AND nom IN (${lot.map(() => "?").join(",")})`,
+        [idEquipement, ...lot.map((l) => String(l.nom).slice(0, 200))]
+      );
+    }
+  }
+
+  return logiciels.length;
+}
+
+/**
+ * Enregistre ce qu'un relevé à distance a vu tourner sur une machine.
+ *
+ * @param {number} idEquipement
+ * @param {{processus: Array|null, logiciels: Array|null}} releve
+ * @param {string} [source] `snmp` ou `wmi` — voir RANGS
+ * @returns {Promise<{ecrit: boolean, raison?: string, processus?: number, logiciels?: number}>}
+ */
+async function enregistrerInventaireSnmp(idEquipement, releve, source = SOURCE_SNMP) {
+  const { processus, logiciels } = releve || {};
+
+  // Ni l'un ni l'autre : cette machine n'a rien dit. Rien à écrire, et
+  // surtout rien à effacer — voir la note sur `null` dans
+  // snmpInventaireLogiciel.
+  if (!processus && !logiciels) return { ecrit: false, raison: "aucune_reponse" };
+
+  const [[etat]] = await db.query(
+    "SELECT agent_poste_version FROM EQUIPEMENT WHERE id_equipement = ?",
+    [idEquipement]
+  );
+
+  // Une source qui en sait plus est déjà passée : on ne la dégrade pas.
+  // Voir RANGS pour l'ordre et sa justification.
+  if (etat && rangSource(etat.agent_poste_version) > rangSource(source)) {
+    return {
+      ecrit: false,
+      raison: rangSource(etat.agent_poste_version) === 3 ? "agent_prioritaire" : "source_meilleure",
+    };
+  }
+
+  const nbProcessus = processus ? await remplacerProcessus(idEquipement, processus) : 0;
+
+  /* Les logiciels passent par la même écriture prudente quelle que soit
+     la source : WMI donne la version, SNMP non, et la clé unique de
+     LOGICIEL_INSTALLE porte sur (équipement, nom, version). En MySQL,
+     une clé unique dont une colonne vaut NULL n'empêche PAS les
+     doublons — sans cette précaution, la liste doublerait à chaque scan
+     sur les machines lues en SNMP. */
+  const nbLogiciels = logiciels ? await enregistrerLogicielsSnmp(idEquipement, logiciels) : 0;
+
+  await db.query(
+    `UPDATE EQUIPEMENT
+        SET dernier_inventaire_poste = NOW(),
+            agent_poste_version = ?
+      WHERE id_equipement = ?`,
+    [source, idEquipement]
+  );
+
+  /* CE QU'ON NE FAIT PAS ICI, ET POURQUOI.
+
+     `recevoirInventaire` pose une preuve d'existence « agent_poste » :
+     il a fallu qu'une machine réelle exécute du code, c'est la preuve la
+     plus forte dont dispose la plateforme.
+
+     Une réponse SNMP n'est pas de cette nature, et le scan a DÉJÀ posé
+     la preuve qui convient (« réponse SNMP ») quelques lignes plus tôt.
+     La réécrire ici ne ferait que la dupliquer, et prétendre qu'un agent
+     est installé là où il n'y en a pas. */
+
+  return { ecrit: true, processus: nbProcessus, logiciels: nbLogiciels };
+}
+
 /** Ce qu'on sait de l'intérieur d'une machine, et depuis quand. */
 async function inventaireDeLEquipement(idEquipement) {
   const [[equipement]] = await db.query(
@@ -235,14 +443,26 @@ async function inventaireDeLEquipement(idEquipement) {
     [idEquipement]
   );
 
-  // Aucun agent : on le DIT. Une fiche vide sans ce message se lirait
-  // comme « cette machine ne fait tourner aucun logiciel ».
+  /* Rien du tout : on le DIT. Une fiche vide sans ce message se lirait
+     comme « cette machine ne fait tourner aucun logiciel ».
+
+     L'EXPLICATION A ÉTÉ CORRIGÉE, ET C'ÉTAIT NÉCESSAIRE. Elle affirmait
+     que l'intérieur d'une machine « n'est pas observable depuis le
+     réseau, quel que soit l'outil ». C'était faux depuis toujours :
+     HOST-RESOURCES-MIB expose les programmes en cours, et le scan lisait
+     déjà cette MIB pour la mémoire. Une plateforme vendue ne doit pas
+     affirmer une impossibilité qu'elle-même dément. */
   if (!equipement || !equipement.dernier_inventaire_poste) {
     return {
+      observe: false,
+      source: null,
       agent_installe: false,
       explication:
-        "aucun agent de poste n'est installé sur cette machine : son intérieur " +
-        "n'est pas observable depuis le réseau, quel que soit l'outil",
+        "cette machine n'a rien remonté de son intérieur. Le scan interroge " +
+        "pourtant trois portes sans rien installer : SNMP, puis WMI sur les " +
+        "postes Windows, et enfin l'agent s'il est présent. Aucune n'a répondu — " +
+        "soit la machine était éteinte au dernier scan, soit ces trois portes " +
+        "sont fermées sur elle",
       logiciels: [],
       processus: [],
     };
@@ -260,10 +480,43 @@ async function inventaireDeLEquipement(idEquipement) {
     [idEquipement]
   );
 
+  const collecteur = equipement.agent_poste_version;
+  const source =
+    collecteur === SOURCE_SNMP ? "snmp" : collecteur === SOURCE_WMI ? "wmi" : "agent";
+
+  /* CE QUE CHAQUE SOURCE NE SAIT PAS, dit par le serveur et non recopié
+     dans l'interface : la règle vit là où elle est appliquée, sinon les
+     deux finissent par se contredire.
+
+     Ce n'est pas une précaution de façade. Deux machines lues
+     différemment affichent des colonnes différemment remplies, et sans
+     cette mention un client comparant les deux fiches conclurait à une
+     incohérence du produit — alors que les deux relevés sont justes. */
+  const LIMITES = {
+    snmp: [
+      "relevé par SNMP, sans rien installer sur la machine",
+      "SNMP ne donne ni la version ni l'éditeur des logiciels",
+      "SNMP ne dit pas sous quel compte tourne un programme",
+    ],
+    wmi: [
+      "relevé par WMI, sans rien installer sur la machine",
+      "WMI ne dit pas sous quel compte tourne un programme",
+      "les logiciels installés ne remontent que par WinRM, pas par DCOM",
+    ],
+    agent: null,
+  };
+
   return {
-    agent_installe: true,
+    observe: true,
+    source,
+    // `agent_installe` garde son sens D'ORIGINE — un agent est réellement
+    // installé — et ne devient pas « on sait des choses ». Un écran qui
+    // proposerait d'installer l'agent là où il tourne déjà serait une
+    // régression, et c'est ce que valait le raccourci inverse.
+    agent_installe: source === "agent",
     dernier_inventaire: equipement.dernier_inventaire_poste,
-    agent_version: equipement.agent_poste_version,
+    agent_version: source === "agent" ? collecteur : null,
+    limites: LIMITES[source],
     logiciels,
     processus,
   };
@@ -275,4 +528,10 @@ module.exports = {
   trouverOuCreerEquipement,
   enregistrerLogiciels,
   remplacerProcessus,
+  // Relevés à distance — sans agent. Voir l'en-tête du bloc correspondant.
+  enregistrerInventaireSnmp,
+  enregistrerLogicielsSnmp,
+  SOURCE_SNMP,
+  SOURCE_WMI,
+  rangSource,
 };

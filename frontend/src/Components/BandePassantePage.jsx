@@ -128,6 +128,10 @@ export default function BandePassantePage({ idSite }) {
   const [detail, setDetail] = useState(null);
   const [detailEnCours, setDetailEnCours] = useState(false);
 
+  /* Le palmarès complet est replié par défaut — voir la note plus bas,
+     à l'endroit où il est coupé. */
+  const [toutLeClassement, setToutLeClassement] = useState(false);
+
   /* ─────────────────────────────────────────────────────────────────
      LARGEUR DU GRAPHIQUE, MESURÉE À LA MAIN
 
@@ -241,6 +245,24 @@ export default function BandePassantePage({ idSite }) {
 
   const classement = donnees?.classement ?? [];
 
+  /* ── LE PARC D'ABORD, LE PALMARÈS ENSUITE ──
+
+     La page déroulait les vingt premiers consommateurs. Sur un parc où
+     seules les imprimantes exposent SNMP, ça donnait une liste de vingt
+     imprimantes : l'écran répondait à « laquelle de mes imprimantes
+     consomme le plus », une question que personne ne pose, et il
+     repoussait tout en bas le chiffre qui compte — combien consomme le
+     parc, et quand.
+
+     Cinq lignes suffisent à répondre à « qui consomme le plus ». Le
+     reste se déplie pour qui veut la liste complète. Le total et la
+     courbe, eux, portent sur TOUTES les machines mesurées et non sur
+     ces cinq-là : couper l'affichage ne change aucun calcul. */
+  const TETE_CLASSEMENT = 5;
+  const classementVisible = toutLeClassement
+    ? classement
+    : classement.slice(0, TETE_CLASSEMENT);
+
   const maximum = useMemo(() => {
     let m = 0;
     for (const r of classement) {
@@ -282,7 +304,8 @@ export default function BandePassantePage({ idSite }) {
         <div>
           <h1 className="text-xl font-semibold text-[var(--color-ink)]">Bande passante</h1>
           <p className="text-sm text-[var(--color-mute)] mt-0.5">
-            Les plus gros consommateurs du parc, classés sur la moyenne de la période.
+            Ce que consomme le parc dans le temps, et les machines qui en
+            consomment le plus.
           </p>
         </div>
 
@@ -514,6 +537,18 @@ export default function BandePassantePage({ idSite }) {
         </div>
       ) : (
         <div className="rounded-xl border border-[var(--color-line)] bg-[var(--color-surface)] overflow-hidden">
+          {/* Un titre, parce que ce tableau n'est plus le sujet de la page
+              mais sa réponse secondaire : le parc d'abord, le palmarès
+              ensuite. */}
+          <div className="px-4 pt-4 pb-1">
+            <h2 className="text-sm font-medium text-[var(--color-ink)]">
+              Qui consomme le plus
+            </h2>
+            <p className="text-xs text-[var(--color-mute)] mt-0.5">
+              Parmi les machines qui exposent un compteur — classées sur la
+              moyenne de la période.
+            </p>
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -526,7 +561,7 @@ export default function BandePassantePage({ idSite }) {
                 </tr>
               </thead>
               <tbody>
-                {classement.map((r, index) => {
+                {classementVisible.map((r, index) => {
                   const moyenne = cumul(r.moy_entrant, r.moy_sortant);
                   const pic = cumul(r.pic_entrant, r.pic_sortant);
                   const actif = selection === r.id_equipement;
@@ -599,6 +634,17 @@ export default function BandePassantePage({ idSite }) {
               </tbody>
             </table>
           </div>
+
+          {classement.length > TETE_CLASSEMENT && (
+            <button
+              onClick={() => setToutLeClassement((v) => !v)}
+              className="w-full px-4 py-3 text-sm text-[var(--color-mute)] hover:text-[var(--color-ink)] border-t border-[var(--color-line)] transition cible-tactile"
+            >
+              {toutLeClassement
+                ? "Réduire"
+                : `Voir les ${classement.length - TETE_CLASSEMENT} autres équipements mesurés`}
+            </button>
+          )}
         </div>
       )}
 

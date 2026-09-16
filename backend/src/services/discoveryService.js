@@ -15,7 +15,7 @@ const ipLib = require("./adressesIp");
 const net = require("net");
 const dgram = require("dgram");
 const os = require("os");
-const { exec } = require("child_process");
+const { exec, execFile } = require("child_process");
 const { chargerRegistre, resoudreAvecRegistre } = require("./ouiService");
 const { determinerType, typeDepuisTexte } = require("./typeService");
 const { resoudreNom } = require("./nomService");
@@ -1034,6 +1034,129 @@ async function preuveDePresence(ip) {
   return null;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+   LA TABLE DE VOISINAGE : LA DERNIÈRE PREUVE, ET LA PLUS BASSE.
+
+   POURQUOI ELLE EXISTE ICI.
+
+   Un poste Windows correctement pare-feuté ne répond ni au ping, ni sur
+   aucun port : ni ouverture, ni refus, rien. Au niveau IP, il est
+   indiscernable d'une adresse vide. Et pourtant il est là, allumé, et sa
+   carte réseau RÉPOND — parce qu'elle n'a pas le choix : sans réponse
+   ARP, elle ne recevrait plus rien du tout. ARP vit sous IP, sous le
+   pare-feu, et ne peut pas être filtré sur un réseau local. C'est pour
+   cette raison que nmap emploie l'ARP ping dès que la cible est sur le
+   même segment, et que ntopng le préfère à tout le reste.
+
+   CE QU'ON LIT, ET POURQUOI CE N'EST PAS `arp -a`.
+
+   `arp -a` donne des adresses et des MAC, sans dire QUAND chacune a été
+   confirmée. Une machine partie il y a dix minutes y figure encore : la
+   lire comme une preuve de vie serait exactement le défaut qu'on
+   reproche au reste du marché — et c'est déjà ce défaut qui remplissait
+   l'inventaire de fantômes avant la sonde de refus TCP.
+
+   `Get-NetNeighbor` donne en plus l'ÉTAT de chaque entrée. Un seul de
+   ces états est une preuve : `Reachable` — le système a reçu une réponse
+   de cette machine dans les dernières dizaines de secondes. `Stale`
+   signifie « je l'ai connue, je n'ai rien vérifié depuis » ;
+   `Incomplete` et `Unreachable` signifient qu'elle n'a pas répondu à
+   l'appel. On ne retient que `Reachable`, et rien d'autre.
+
+   CE QUE ÇA NE PEUT PAS FAIRE. Une machine d'un autre sous-réseau n'a
+   aucune entrée de voisinage — les paquets partent vers la passerelle.
+   Cette preuve ne vaut donc que pour le segment local du serveur, et
+   c'est très bien ainsi : ailleurs, elle mentirait.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** Table lue en UNE fois et gardée brièvement : un cycle de supervision
+ *  interroge cent machines, il ne doit pas lancer cent lectures. */
+let voisinsCache = { instant: 0, table: new Map() };
+const VOISINAGE_TTL_MS = 20_000;
+
+function lireTableVoisinage() {
+  return new Promise((resolve) => {
+    if (process.platform !== "win32") {
+      // Sous Linux, `ip neigh` donne le même état (REACHABLE, STALE…).
+      return exec("ip neigh show", { timeout: 5000 }, (err, sortie) => {
+        if (err || !sortie) return resolve(new Map());
+        const table = new Map();
+        for (const ligne of String(sortie).split("\n")) {
+          // « 192.168.0.18 dev eth0 lladdr a4:34:d9:1f:22:03 REACHABLE »
+          const m = ligne.match(
+            /^(\d+\.\d+\.\d+\.\d+)\s.*lladdr\s+([0-9a-f:]{11,17})\s+(\w+)/i
+          );
+          if (m) {
+            table.set(m[1], {
+              mac: m[2],
+              etat: m[3].toUpperCase() === "REACHABLE" ? "Reachable" : m[3],
+            });
+          }
+        }
+        return resolve(table);
+      });
+    }
+
+    /* `execFile` et non `exec` : la commande n'est pas assemblée en une
+       chaîne que cmd.exe devrait redécouper. Le tube, les accolades et
+       les apostrophes de PowerShell partent tels quels, sans niveau de
+       guillemets supplémentaire à faire coïncider. */
+    execFile(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-NetNeighbor -AddressFamily IPv4 -ErrorAction SilentlyContinue | " +
+          "ForEach-Object { $_.IPAddress + ';' + $_.LinkLayerAddress + ';' + $_.State }",
+      ],
+      { timeout: 8000, windowsHide: true },
+      (err, sortie) => {
+        if (err || !sortie) return resolve(new Map());
+        const table = new Map();
+        for (const ligne of String(sortie).split("\n")) {
+          const [ip, mac, etat] = ligne.trim().split(";");
+          if (!ip || !mac || !etat) continue;
+          table.set(ip.trim(), { mac: mac.trim(), etat: etat.trim() });
+        }
+        resolve(table);
+      }
+    );
+  });
+}
+
+/** MAC de diffusion ou de multidiffusion : ce n'est personne. */
+function macDeGroupe(mac) {
+  const propre = String(mac || "").toLowerCase().replace(/[^0-9a-f]/g, "");
+  if (propre.length !== 12) return true;
+  if (propre === "ffffffffffff" || propre === "000000000000") return true;
+  return propre.startsWith("01005e") || propre.startsWith("3333");
+}
+
+/**
+ * Cette adresse a-t-elle répondu au niveau 2, tout récemment ?
+ * @returns {Promise<{preuve:string, detail:string}|null>}
+ */
+async function preuveVoisinage(ip) {
+  const maintenant = Date.now();
+  if (maintenant - voisinsCache.instant > VOISINAGE_TTL_MS) {
+    voisinsCache = {
+      instant: maintenant,
+      table: await lireTableVoisinage().catch(() => new Map()),
+    };
+  }
+
+  const entree = voisinsCache.table.get(String(ip));
+  if (!entree || entree.etat !== "Reachable" || macDeGroupe(entree.mac)) return null;
+
+  return {
+    preuve: "voisinage_arp",
+    detail:
+      `répond en ARP (${entree.mac}) : la machine est allumée sur le réseau ` +
+      "local, elle filtre simplement tout ce qui arrive au-dessus",
+  };
+}
+
 /**
  * Ports interrogés pour savoir si une machine muette au ping est vivante.
  *
@@ -1060,27 +1183,69 @@ const PORTS_SIGNE_DE_VIE = [445, 139, 135, 80, 443, 3389, 22, 8080, 9100, 631];
  * ralentir le cycle.
  */
 async function diagnosePanne(ip) {
+  /* ── POURQUOI `sonderPresence` ET NON `testPort` ──
+
+     Le défaut corrigé ici était invisible et il faussait tout l'écran.
+
+     `testPort` répond « ouvert » ou « pas ouvert » : il jette le REFUS de
+     connexion dans le même sac que le silence. Or le balayage, lui,
+     distingue les deux depuis l'ajout de `preuveDePresence` — un refus y
+     vaut preuve d'existence, et c'est à ce titre que des machines
+     entrent à l'inventaire en « up ».
+
+     La supervision, elle, refaisait le test avec l'ancienne règle. Une
+     machine admise par le balayage sur un refus TCP était donc dégradée
+     en « inconnu » trois cycles plus tard, par la même plateforme, sur
+     la même adresse. Deux définitions du mot « vivant » dans un même
+     produit : c'est ce qui faisait passer un parc entier en « inconnu »
+     quelques minutes après chaque scan.
+
+     Désormais les deux chemins emploient la même sonde et le même
+     barème. Ce qui prouve une existence au balayage prouve une existence
+     à la supervision. */
   const resultats = await Promise.all(
     PORTS_SIGNE_DE_VIE.map(async (port) => ({
       port,
-      ouvert: await testPort(ip, port).catch(() => false),
+      verdict: await sonderPresence(ip, port).catch(() => "silence"),
     }))
   );
 
-  const vivant = resultats.find((r) => r.ouvert);
-  if (vivant) {
+  const ouvert = resultats.find((r) => r.verdict === "ouvert");
+  if (ouvert) {
     return {
       code: "pare_feu_probable",
       detail:
-        `Ne répond pas au ping, mais le port ${vivant.port} est ouvert : ` +
+        `Ne répond pas au ping, mais le port ${ouvert.port} est ouvert : ` +
         "la machine fonctionne et bloque simplement les requêtes ICMP " +
         "(comportement par défaut d'un poste Windows).",
     };
   }
 
+  const refus = resultats.find((r) => r.verdict === "refuse");
+  if (refus) {
+    return {
+      code: "refus_tcp",
+      detail:
+        `Ne répond pas au ping et n'expose aucun service, mais REFUSE la ` +
+        `connexion sur le port ${refus.port} : une pile réseau répond à cette ` +
+        "adresse, la machine est donc allumée.",
+    };
+  }
+
+  // Dernier recours, et le seul qui atteigne un poste entièrement
+  // pare-feuté : a-t-il répondu en ARP ? Voir preuveVoisinage.
+  const voisin = await preuveVoisinage(ip).catch(() => null);
+  if (voisin) {
+    return {
+      code: "voisinage_arp",
+      detail:
+        "Ne répond ni au ping, ni sur aucun port, mais " + voisin.detail + ".",
+    };
+  }
+
   return {
     code: "injoignable_total",
-    detail: "Aucune réponse (ping et ports courants) — l'équipement semble réellement injoignable ou éteint.",
+    detail: "Aucune réponse (ping, ports courants, ARP) — l'équipement semble réellement injoignable ou éteint.",
   };
 }
 
@@ -1557,11 +1722,210 @@ async function snmpMetrics(ip, community = "public", { avecInventaire = false } 
   return { cpuPercent, ramPercent, interfaces };
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+   CE QUI TOURNE DANS UNE MACHINE, SANS Y INSTALLER QUOI QUE CE SOIT
+
+   LA PHRASE QUI ÉTAIT FAUSSE. La fiche d'équipement affichait, faute
+   d'agent : « son intérieur n'est pas observable depuis le réseau, quel
+   que soit l'outil ». C'est faux, et la plateforme en avait déjà la
+   preuve sous la main.
+
+   HOST-RESOURCES-MIB (RFC 2790) est la MIB standard des systèmes. Ce
+   fichier en lit DÉJÀ deux branches :
+
+     1.3.6.1.2.1.25.2  hrStorage    → la mémoire, affichée depuis toujours
+     1.3.6.1.2.1.25.3  hrProcessor  → le processeur, idem
+
+   Et il n'a jamais lu les deux suivantes, qui sont dans la même MIB, sur
+   le même port, avec la même communauté, servies par le même agent SNMP :
+
+     1.3.6.1.2.1.25.4  hrSWRun       → les programmes EN COURS D'EXÉCUTION
+     1.3.6.1.2.1.25.6  hrSWInstalled → les logiciels INSTALLÉS
+
+   Autrement dit : toute machine dont la fiche affiche aujourd'hui un
+   taux de mémoire peut aussi dire ce qui tourne dessus. Aucune
+   installation, aucune commande, aucun identifiant supplémentaire — la
+   réponse était déjà à portée de la question qu'on posait.
+
+   CE QUE ÇA NE COUVRE PAS, ET IL FAUT LE DIRE AU CLIENT. Un poste
+   Windows ordinaire n'active pas le service SNMP : il ne répondra rien
+   ici, et seul un agent installé dessus verra son intérieur. La
+   couverture réelle de cette fonction est donc celle du SNMP sur le
+   parc — serveurs, imprimantes, équipements réseau, machines Linux
+   supervisées. C'est déjà la majorité de ce qui compte, et c'est
+   exactement l'ensemble des machines dont on affiche déjà la charge.
+
+   LE COÛT. Quatre parcours de colonnes, lancés EN PARALLÈLE : le temps
+   d'attente est celui d'un seul, pas de quatre. Et il n'est payé que sur
+   les machines qui ont déjà répondu en SNMP pendant l'identification —
+   jamais sur les muettes, qui sont la majorité d'un parc et qui
+   coûtaient autrefois l'essentiel de la durée du scan.
+   `SCAN_INVENTAIRE_SNMP=0` le désactive pour qui préfère la vitesse.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** hrSWRunName — nom de l'exécutable de chaque programme en cours. */
+const OID_HR_SW_RUN_NAME = "1.3.6.1.2.1.25.4.2.1.2";
+/** hrSWRunType — 1 inconnu, 2 système, 3 pilote, 4 application. */
+const OID_HR_SW_RUN_TYPE = "1.3.6.1.2.1.25.4.2.1.6";
+/** hrSWRunPerfMem — mémoire occupée par ce programme, en kilo-octets. */
+const OID_HR_SW_RUN_PERF_MEM = "1.3.6.1.2.1.25.5.1.1.2";
+/** hrSWInstalledName — nom de chaque logiciel installé. */
+const OID_HR_SW_INSTALLED_NAME = "1.3.6.1.2.1.25.6.3.1.2";
+
+/**
+ * Plafonds. Une machine bavarde déclare plusieurs centaines de programmes
+ * et parfois un millier de logiciels ; au-delà de ces bornes on ne lit
+ * plus une information, on remplit une table.
+ *
+ * Les programmes gardés sont les plus GROS consommateurs de mémoire, et
+ * non les premiers rencontrés : l'ordre des index SNMP n'a aucun sens
+ * pour un humain, alors que « ce qui pèse le plus » est précisément ce
+ * qu'on vient chercher.
+ */
+const MAX_PROCESSUS_DISTINCTS = 200;
+const MAX_LOGICIELS_INSTALLES = 500;
+
+/** Libellés de hrSWRunType, pour ne pas afficher un chiffre brut. */
+const NATURES_PROGRAMME = {
+  1: null, // « inconnu » : on n'écrit rien plutôt que d'écrire « inconnu »
+  2: "système",
+  3: "pilote",
+  4: "application",
+};
+
+/** Valeur SNMP → texte propre, ou null. */
+function texteSnmp(valeur) {
+  if (valeur === null || valeur === undefined) return null;
+  const s = String(valeur).trim();
+  // Certains agents rendent une chaîne vide plutôt que d'omettre la
+  // ligne : une entrée sans nom n'est pas une entrée.
+  return s === "" ? null : s;
+}
+
+/**
+ * Lit les programmes en cours et les logiciels installés d'une machine.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * POURQUOI UNE TABLE VIDE EST RENDUE `null` ET JAMAIS `[]`
+ *
+ * C'est le point qui décide si cette fonction est utile ou dangereuse.
+ *
+ * `snmpColonne` rend `{}` dans DEUX situations que rien ne distingue :
+ * la machine n'expose pas cette branche de la MIB, ou elle l'expose et
+ * elle est vide. Or `[]` a un sens précis pour l'appelant — « j'ai
+ * regardé, il n'y a rien » — et déclenche l'EFFACEMENT de ce qui est en
+ * base (voir remplacerProcessus).
+ *
+ * Une machine allumée qui ne fait tourner aucun programme n'existe pas.
+ * Une table vide signifie donc toujours « cette machine ne répond pas
+ * sur cette branche », jamais « rien ne tourne ». On rend `null`, qui ne
+ * touche à rien.
+ *
+ * Sans cette règle, scanner une machine équipée d'un agent effacerait
+ * l'inventaire complet que l'agent venait d'y écrire — un défaut
+ * silencieux, qui ne se serait vu qu'en ouvrant la fiche.
+ *
+ * @returns {Promise<{processus: Array|null, logiciels: Array|null}>}
+ */
+async function snmpInventaireLogiciel(ip, community = "public") {
+  // En parallèle : le temps d'attente est celui du parcours le plus lent,
+  // et non leur somme. Délai plus large que pour les interfaces — ces
+  // tables comptent des centaines de lignes là où une table d'interfaces
+  // en compte quelques dizaines.
+  const [nomsCol, typesCol, memoiresCol, logicielsCol] = await Promise.all([
+    snmpColonne(ip, community, OID_HR_SW_RUN_NAME, 6000),
+    snmpColonne(ip, community, OID_HR_SW_RUN_TYPE, 6000),
+    snmpColonne(ip, community, OID_HR_SW_RUN_PERF_MEM, 6000),
+    snmpColonne(ip, community, OID_HR_SW_INSTALLED_NAME, 6000),
+  ]);
+
+  /* ── LES PROGRAMMES EN COURS, REGROUPÉS PAR NOM ──
+
+     Un navigateur ouvre trente processus du même exécutable. Les lister
+     trente fois remplit l'écran sans rien apprendre : ce qu'on veut
+     savoir, c'est QUOI tourne, en combien d'exemplaires, et ce que ça
+     pèse AU TOTAL.
+
+     C'est exactement la forme que la table PROCESSUS_OBSERVE attend déjà
+     pour les agents — mêmes colonnes, même sens. Les deux sources se
+     rangent donc au même endroit, et la fiche d'équipement n'a pas à
+     savoir laquelle a parlé. */
+  const parNom = new Map();
+  for (const [index, brut] of Object.entries(nomsCol || {})) {
+    const nom = texteSnmp(brut);
+    if (!nom) continue;
+
+    const cle = nom.toLowerCase();
+    const memoire = Number(memoiresCol?.[index]);
+    const nature = NATURES_PROGRAMME[Number(typesCol?.[index])] ?? null;
+
+    const existant = parNom.get(cle);
+    if (existant) {
+      existant.occurrences += 1;
+      if (Number.isFinite(memoire) && memoire >= 0) {
+        existant.memoire_ko = (existant.memoire_ko || 0) + memoire;
+      }
+      // La nature la plus précise l'emporte : un même exécutable peut
+      // être déclaré « inconnu » sur une ligne et « application » sur une
+      // autre, selon l'agent SNMP.
+      if (!existant.nature && nature) existant.nature = nature;
+      continue;
+    }
+
+    parNom.set(cle, {
+      nom,
+      occurrences: 1,
+      memoire_ko: Number.isFinite(memoire) && memoire >= 0 ? memoire : null,
+      nature,
+      // SNMP ne dit JAMAIS sous quel compte un programme tourne — seul un
+      // agent installé sur la machine le sait. On laisse donc vide plutôt
+      // que d'inventer : la colonne existe, et une case vide se lit
+      // « cette source-là ne le dit pas ».
+      utilisateur: null,
+    });
+  }
+
+  const processus =
+    parNom.size === 0
+      ? null
+      : [...parNom.values()]
+          .sort((a, b) => (b.memoire_ko ?? -1) - (a.memoire_ko ?? -1))
+          .slice(0, MAX_PROCESSUS_DISTINCTS);
+
+  /* ── LES LOGICIELS INSTALLÉS ──
+
+     hrSWInstalled ne donne qu'un nom — ni version, ni éditeur, ni date
+     exploitable sans décoder un format d'horodatage propre à la MIB. On
+     écrit donc le nom seul, et les colonnes `version` et `editeur`
+     restent vides : elles ne se rempliront que si un agent passe un jour
+     sur cette machine. Une colonne vide est honnête ; une colonne
+     devinée ne l'est pas. */
+  const nomsLogiciels = new Map();
+  for (const brut of Object.values(logicielsCol || {})) {
+    const nom = texteSnmp(brut);
+    if (!nom) continue;
+    if (!nomsLogiciels.has(nom.toLowerCase())) {
+      nomsLogiciels.set(nom.toLowerCase(), { nom, version: null, editeur: null });
+    }
+  }
+
+  const logiciels =
+    nomsLogiciels.size === 0
+      ? null
+      : [...nomsLogiciels.values()]
+          .sort((a, b) => a.nom.localeCompare(b.nom, "fr"))
+          .slice(0, MAX_LOGICIELS_INSTALLES);
+
+  return { processus, logiciels };
+}
+
 module.exports = {
   estAdresseReservee,
   scanRange, pingSweep, snmpProbe, snmpProbeV3, listHostsFromCidr,
-  sonderPresence, preuveDePresence,
+  sonderPresence, preuveDePresence, preuveVoisinage, lireTableVoisinage,
   diagnosePanne, scanPorts, arpComplement, snmpMetrics, nmapFingerprint,
+  // Programmes en cours et logiciels installés, lus par SNMP — sans agent.
+  snmpInventaireLogiciel,
   PORTS_SIGNE_DE_VIE, normaliserMacSimple,
   diagnostiquerPortee, sousReseauxLocaux, estDirectementAttache,
   wakeOnLan, fingerprint,

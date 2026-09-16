@@ -60,8 +60,64 @@ const COLONNES = [
   { cle: "adresse_ip", libelle: "Adresse IP", triable: true },
   { cle: "fabricant", libelle: "Fabricant", triable: true },
   { cle: "type_libelle", libelle: "Type", triable: true },
+  /* Non triable, et c'est délibéré : trier des listes de ports par ordre
+     alphabétique de leur chaîne n'aurait aucun sens utile. Pour chercher
+     un port précis, le champ de filtre au-dessus du tableau le trouve. */
+  { cle: "ports", libelle: "Ports ouverts", triable: false },
   { cle: "derniere_decouverte", libelle: "Dernière découverte", triable: true },
 ];
+
+/**
+ * Les ports d'un équipement, dans une case de tableau.
+ *
+ * LE NUMÉRO EST AFFICHÉ, LE NOM EST EN INFOBULLE. Écrire « 443/HTTPS »
+ * cent fois remplirait la colonne d'une information que celui qui la lit
+ * connaît déjà ; le numéro seul se compare d'une ligne à l'autre d'un
+ * coup d'œil, et le nom reste à portée de souris pour les ports qu'on ne
+ * reconnaît pas.
+ *
+ * Cinq ports affichés, le reste compté. Une machine qui en expose vingt
+ * déborderait sur toute la largeur de l'écran — et le fait qu'elle en
+ * expose vingt est, à lui seul, l'information à voir.
+ *
+ * Un tiret, enfin, veut dire « aucun port ouvert détecté », pas
+ * « inconnu » : le scan a bien regardé.
+ */
+function Ports({ valeur }) {
+  const liste = String(valeur || "")
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => {
+      const [port, ...reste] = p.split("/");
+      const nom = reste.join("/");
+      return { port, nom: nom && nom !== "?" ? nom : null };
+    });
+
+  if (liste.length === 0) return <span className="text-[var(--color-mute)]">—</span>;
+
+  const montres = liste.slice(0, 5);
+  const resume = liste.map((s) => (s.nom ? `${s.port} ${s.nom}` : s.port)).join(" · ");
+
+  return (
+    <span className="flex flex-wrap gap-1 items-center">
+      {montres.map((s) => (
+        <span
+          key={s.port}
+          title={s.nom ? `${s.nom} — port ${s.port}` : `port ${s.port}`}
+          className="font-[var(--font-mono)] text-[11px] px-1.5 py-0.5 rounded border border-[var(--color-line)] text-[var(--color-mute)]"
+        >
+          {s.port}
+        </span>
+      ))}
+      {liste.length > montres.length && (
+        <span className="text-[11px] text-[var(--color-mute)]" title={resume}>
+          +{liste.length - montres.length}
+        </span>
+      )}
+    </span>
+  );
+}
 
 export default function EquipementsPage({ idSite }) {
   const [equipements, setEquipements] = useState([]);
@@ -144,7 +200,13 @@ export default function EquipementsPage({ idSite }) {
         (eq.nom || "").toLowerCase().includes(recherche) ||
         eq.adresse_ip.includes(recherche) ||
         (eq.fabricant || "").toLowerCase().includes(recherche) ||
-        (eq.type_libelle || "").toLowerCase().includes(recherche)
+        (eq.type_libelle || "").toLowerCase().includes(recherche) ||
+        /* Les ports sont cherchés aussi, par numéro comme par nom :
+           taper « 445 » donne toutes les machines qui l'exposent, taper
+           « rdp » toutes celles qui laissent le bureau à distance
+           ouvert. C'est la question qu'on se pose vraiment devant un
+           parc, et elle n'avait pas de réponse en un geste. */
+        (eq.ports || "").toLowerCase().includes(recherche)
       );
     });
 
@@ -442,20 +504,27 @@ export default function EquipementsPage({ idSite }) {
                         key={c.cle}
                         className="bg-[var(--color-surface)] pb-2 pt-1 pr-4 font-medium whitespace-nowrap"
                       >
-                        <button
-                          onClick={() => basculerTri(c.cle)}
-                          className="flex items-center gap-1 hover:text-[var(--color-ink)] transition uppercase"
-                        >
-                          {c.libelle}
-                          {/* La flèche n'apparaît que sur la colonne
-                              triée : six flèches grises en permanence
-                              deviennent du bruit. */}
-                          {tri.colonne === c.cle && (
-                            <span className="text-[var(--color-signal)]">
-                              {tri.sens === "asc" ? "▲" : "▼"}
-                            </span>
-                          )}
-                        </button>
+                        {/* Une colonne non triable ne porte pas de bouton :
+                            un en-tête qui a l'air cliquable et ne fait rien
+                            est pire qu'un en-tête inerte. */}
+                        {c.triable === false ? (
+                          <span className="uppercase">{c.libelle}</span>
+                        ) : (
+                          <button
+                            onClick={() => basculerTri(c.cle)}
+                            className="flex items-center gap-1 hover:text-[var(--color-ink)] transition uppercase"
+                          >
+                            {c.libelle}
+                            {/* La flèche n'apparaît que sur la colonne
+                                triée : six flèches grises en permanence
+                                deviennent du bruit. */}
+                            {tri.colonne === c.cle && (
+                              <span className="text-[var(--color-signal)]">
+                                {tri.sens === "asc" ? "▲" : "▼"}
+                              </span>
+                            )}
+                          </button>
+                        )}
                       </th>
                     ))}
                   </tr>
@@ -524,6 +593,9 @@ export default function EquipementsPage({ idSite }) {
                         <Fabricant nom={eq.fabricant} source={eq.fabricant_source} />
                       </td>
                       <td className="py-2.5 pr-4 text-[var(--color-mute)]">{eq.type_libelle || "—"}</td>
+                      <td className="py-2.5 pr-4">
+                        <Ports valeur={eq.ports} />
+                      </td>
                       <td className="py-2.5 text-[var(--color-mute)] text-xs whitespace-nowrap">
                         {eq.derniere_decouverte
                           ? new Date(eq.derniere_decouverte).toLocaleString("fr-FR")

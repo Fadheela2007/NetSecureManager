@@ -19,9 +19,96 @@ const CHEMIN_SCRIPT_INVENTAIRE = path.join(
 );
 const { clauseSite, porteeDe, siteAutorise } = require("../middleware/porteeSite");
 const { tracer } = require("../services/journal");
+const { detecterReseaux } = require("../services/reseauxLocauxService");
 
 /** Seuil de silence au-delà duquel un agent est considéré muet (minutes). */
 const SEUIL_MUET_DEFAUT = 30;
+
+/* ═══════════════════════════════════════════════════════════════════════
+   L'ADRESSE QUE LES POSTES DOIVENT APPELER — ET LE PIÈGE QU'ELLE CACHE
+
+   LE DÉFAUT, ET IL AURAIT RUINÉ UN DÉPLOIEMENT ENTIER.
+
+   L'URL du serveur était déduite de l'en-tête `Host` de la requête.
+   C'est juste en production, où l'on ouvre la plateforme par son vrai
+   nom. Mais pendant la mise au point, on l'ouvre sur « localhost ».
+
+   Le script téléchargé partait alors avec :
+
+       $CENTRAL_API_URL = "http://localhost:5000/api"
+
+   Déposé sur le partage du domaine et exécuté sur cent postes, chaque
+   poste aurait appelé... LUI-MÊME. Cent échecs, aucune remontée, et RIEN
+   pour le faire comprendre : le script aurait consciencieusement
+   journalisé « impossible de se connecter » sur chacune des cent
+   machines, là où personne ne va lire.
+
+   C'est le pire cas possible : le déploiement a lieu, la stratégie de
+   groupe est correcte, l'informaticien a fait son travail — et la
+   plateforme reste vide. On cherche alors le défaut partout sauf dans
+   une adresse écrite au moment du téléchargement.
+
+   LA RÈGLE. Une adresse de bouclage ne désigne que la machine qui la
+   prononce : elle n'est jamais joignable par quelqu'un d'autre. Quand on
+   en détecte une, on la remplace par l'adresse réelle de ce serveur sur
+   le réseau — que la plateforme sait déjà lire, puisqu'elle s'en sert
+   pour proposer les plages à scanner.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** Cette adresse ne désigne que la machine qui la prononce. */
+function estBouclage(hote) {
+  const nom = String(hote || "").split(":")[0].toLowerCase();
+  return nom === "localhost" || nom === "127.0.0.1" || nom === "::1" || nom === "[::1]";
+}
+
+/**
+ * L'adresse par laquelle les POSTES peuvent joindre ce serveur.
+ * @returns {{url: string, corrigee: boolean, avertissement: string|null}}
+ */
+function adresseJoignable(req) {
+  const protocole = req.headers["x-forwarded-proto"] || req.protocol;
+  const hote = req.headers["x-forwarded-host"] || req.headers.host || "";
+
+  if (!estBouclage(hote)) {
+    return { url: `${protocole}://${hote}/api`, corrigee: false, avertissement: null };
+  }
+
+  const port = String(hote).includes(":") ? `:${String(hote).split(":")[1]}` : "";
+
+  /* Les interfaces physiques d'abord : detecterReseaux() range déjà les
+     virtuelles (VirtualBox, WSL, Docker) en dernier, et l'adresse d'une
+     carte virtuelle n'est pas plus joignable depuis un poste du réseau
+     qu'une adresse de bouclage. */
+  let reelle = null;
+  try {
+    const reseaux = detecterReseaux();
+    reelle = reseaux.find((r) => !r.virtuelle) || reseaux[0] || null;
+  } catch {
+    reelle = null;
+  }
+
+  if (!reelle) {
+    return {
+      url: `${protocole}://${hote}/api`,
+      corrigee: false,
+      avertissement:
+        "Cette plateforme a été ouverte sur « localhost » et aucune adresse réseau " +
+        "n'a pu être lue sur ce serveur. L'adresse ci-dessus ne fonctionnera QUE sur " +
+        "le serveur lui-même : corrigez-la à la main avant de déposer le script sur " +
+        "le partage du domaine.",
+    };
+  }
+
+  return {
+    url: `${protocole}://${reelle.adresse}${port}/api`,
+    corrigee: true,
+    avertissement:
+      "Cette plateforme a été ouverte sur « localhost ». L'adresse a été remplacée par " +
+      `${reelle.adresse}, celle de ce serveur sur le réseau — sans quoi chaque poste ` +
+      "aurait appelé lui-même au lieu d'appeler la plateforme. Vérifiez qu'elle est " +
+      "bien celle par laquelle les postes joignent ce serveur.",
+  };
+}
 
 /**
  * Qualifie l'état de l'agent d'un site à partir de son dernier push.
@@ -173,6 +260,26 @@ router.get("/sites/:id/agent", requireRole("admin"), async (req, res) => {
   }
   const site = rows[0];
 
+  /* L'interrupteur d'observation est lu à PART, et c'est délibéré.
+
+     Le joindre à la requête ci-dessus aurait été plus court d'une ligne
+     et aurait cassé tout l'écran de mise en service sur une base où la
+     migration du 14 septembre n'est pas passée : « Unknown column »
+     remonte en erreur 500, et l'administrateur perd l'accès au jeton de
+     son agent pour une fonction qu'il n'utilise même pas.
+
+     Une nouveauté ne doit jamais pouvoir empêcher ce qui marchait déjà. */
+  let observationDns = false;
+  try {
+    const [obs] = await db.query(
+      "SELECT observation_dns FROM SITE WHERE id_site = ?",
+      [site.id_site]
+    );
+    observationDns = Boolean(obs[0] && obs[0].observation_dns);
+  } catch (err) {
+    if (!/Unknown column|doesn't exist/i.test(err.message)) throw err;
+  }
+
   // Plage déjà déclarée pour ce site : évite à l'administrateur de la
   // ressaisir, et rend la commande directement exécutable.
   const [plages] = await db.query(
@@ -181,11 +288,11 @@ router.get("/sites/:id/agent", requireRole("admin"), async (req, res) => {
   );
   if (plages.length > 0) site.cidr_suggere = plages[0].cidr;
 
-  // L'URL publique de la plateforme n'est pas devinable côté serveur :
-  // on part de l'en-tête de la requête, que l'administrateur peut corriger.
-  const protocole = req.headers["x-forwarded-proto"] || req.protocol;
-  const hote = req.headers["x-forwarded-host"] || req.headers.host;
-  const urlCentrale = `${protocole}://${hote}/api`;
+  // L'URL publique de la plateforme n'est pas devinable côté serveur : on
+  // part de l'en-tête de la requête, en refusant une adresse de bouclage
+  // qu'aucun poste ne pourrait joindre. Voir adresseJoignable().
+  const adresse = adresseJoignable(req);
+  const urlCentrale = adresse.url;
 
   // Nombre d'équipements déjà remontés : la preuve que ça marche.
   const [[{ nb }]] = await db.query(
@@ -199,9 +306,15 @@ router.get("/sites/:id/agent", requireRole("admin"), async (req, res) => {
     ville: site.ville,
     agent_token: site.agent_token,
     dernier_push: site.dernier_push,
+    observation_dns: observationDns,
     agent: etatAgent(site.dernier_push),
     equipements_remontes: nb,
     url_centrale: urlCentrale,
+    // L'écran doit pouvoir DIRE que l'adresse a été corrigée : une
+    // substitution silencieuse serait une deuxième surprise, au lieu
+    // d'une première évitée.
+    url_corrigee: adresse.corrigee,
+    avertissement_url: adresse.avertissement,
     cidr_suggere: site.cidr_suggere || null,
     commandes: commandesInstallation(site, urlCentrale),
   });
@@ -241,9 +354,13 @@ router.get("/sites/:id/script-inventaire", requireRole("admin"), async (req, res
   }
   const site = rows[0];
 
-  const protocole = req.headers["x-forwarded-proto"] || req.protocol;
-  const hote = req.headers["x-forwarded-host"] || req.headers.host;
-  const urlCentrale = `${protocole}://${hote}/api`;
+  /* C'EST ICI QUE LE PIÈGE SE REFERMAIT.
+
+     Ce fichier part sur le partage du domaine et s'exécute sur tout le
+     parc. Une adresse de bouclage écrite dedans, et les cent postes
+     appellent chacun eux-mêmes. Voir adresseJoignable(). */
+  const adresse = adresseJoignable(req);
+  const urlCentrale = adresse.url;
 
   let modele;
   try {
@@ -281,17 +398,107 @@ router.get("/sites/:id/script-inventaire", requireRole("admin"), async (req, res
     req,
     "script_inventaire_telecharge",
     `Script d'inventaire telecharge pour le site ${site.id_site} « ${site.nom} » ` +
-      "— il contient le jeton de ce site."
+      `— adresse ${urlCentrale}` +
+      (adresse.corrigee ? " (corrigee, la plateforme etait ouverte sur localhost)" : "") +
+      ". Il contient le jeton de ce site."
   );
+
+  /* L'AVERTISSEMENT VOYAGE DANS LE FICHIER, PAS SEULEMENT À L'ÉCRAN.
+
+     Ce script est téléchargé, puis déposé sur un partage, puis lu par
+     quelqu'un d'autre, parfois des jours plus tard. Un message affiché
+     au moment du clic n'aura pas survécu au trajet. Écrit en tête du
+     fichier, il est encore là quand l'informaticien l'ouvre. */
+  const entete = adresse.avertissement
+    ? `# ATTENTION — ${adresse.avertissement.replace(/\s+/g, " ")}\r\n` +
+      `# Adresse retenue : ${urlCentrale}\r\n`
+    : "";
 
   // Le BOM du modele est CONSERVE : PowerShell 5.1 lit un fichier UTF-8
   // sans BOM comme de l'ANSI, et tous les accents deviennent illisibles.
+  // L'avertissement s'insere donc APRES le BOM, jamais avant.
+  const sortie = entete
+    ? rempli.charCodeAt(0) === 0xfeff
+      ? rempli[0] + entete + rempli.slice(1)
+      : entete + rempli
+    : rempli;
+
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
   res.setHeader(
     "Content-Disposition",
     `attachment; filename="inventaire-poste-site-${site.id_site}.ps1"`
   );
-  res.send(rempli);
+  res.send(sortie);
+});
+
+/**
+ * PATCH /api/sites/:id/observation-dns
+ * Allume ou éteint l'observation des domaines pour un site.
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * POURQUOI CETTE ROUTE EST À PART, ET RÉSERVÉE AUX ADMINISTRATEURS
+ *
+ * Elle ne règle pas un paramètre technique : elle décide que la
+ * plateforme se met à observer ce que font les gens. Le résolveur du
+ * site commence à journaliser, et chaque poste voit ses usages remonter.
+ *
+ * Le geste doit donc être VOLONTAIRE, TRAÇABLE et DATÉ :
+ *   - réservé aux administrateurs ;
+ *   - inscrit au journal d'activité, avec le nom de qui l'a fait ;
+ *   - `observation_dns_depuis` retient la date, pour qu'on puisse
+ *     toujours répondre à « depuis quand ces données existent-elles ? ».
+ *
+ * L'agent applique la décision au cycle suivant : il interroge le
+ * serveur, écrit ou retire le fichier de journalisation, et redémarre le
+ * résolveur. Rien n'est journalisé tant que ce cycle n'a pas eu lieu.
+ */
+router.patch("/sites/:id/observation-dns", requireRole("admin"), async (req, res) => {
+  const actif = req.body?.active === true;
+
+  if (!siteAutorise(req, Number(req.params.id))) {
+    return res.status(403).json({ error: "Vous n'êtes pas autorisé à modifier ce site" });
+  }
+
+  try {
+    const [rows] = await db.query("SELECT nom FROM SITE WHERE id_site = ?", [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: "Site introuvable" });
+
+    await db.query(
+      `UPDATE SITE
+          SET observation_dns = ?,
+              observation_dns_depuis = CASE WHEN ? = 1 THEN NOW() ELSE NULL END
+        WHERE id_site = ?`,
+      [actif ? 1 : 0, actif ? 1 : 0, req.params.id]
+    );
+
+    await tracer(
+      req,
+      actif ? "observation_dns_activee" : "observation_dns_arretee",
+      `Observation des domaines ${actif ? "ACTIVÉE" : "arrêtée"} sur le site ` +
+        `${req.params.id} « ${rows[0].nom} ». ` +
+        (actif
+          ? "Le résolveur de ce site va journaliser les requêtes ; l'agent " +
+            "n'en transmet que des domaines agrégés, sans horodatage."
+          : "Plus aucune requête n'y sera journalisée. Les relevés déjà " +
+            "enregistrés restent consultables jusqu'à leur expiration.")
+    );
+
+    res.json({
+      active: actif,
+      message: actif
+        ? "Observation activée. Elle prendra effet au prochain cycle de l'agent."
+        : "Observation arrêtée. L'agent cessera de journaliser au prochain cycle.",
+    });
+  } catch (err) {
+    if (/Unknown column|doesn't exist/i.test(err.message)) {
+      return res.status(503).json({
+        error: "L'observation des domaines n'est pas installée sur cette base",
+        aide: "node tools\\appliquer-migrations.js",
+      });
+    }
+    console.error("Bascule de l'observation DNS impossible:", err.message);
+    res.status(500).json({ error: "Modification impossible" });
+  }
 });
 
 /**

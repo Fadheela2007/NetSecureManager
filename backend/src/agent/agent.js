@@ -33,6 +33,7 @@ const axios = require("axios");
 const cron = require("node-cron");
 const { scanRange, snmpMetrics } = require("../services/discoveryService");
 const { calculerDebitsEquipement } = require("../services/traficService");
+const { agregerRequetes } = require("../services/observationDnsService");
 const dnsGuard = require("./dnsGuard");
 const pageBlocage = require("./pageBlocage");
 
@@ -284,6 +285,75 @@ async function appliquerPolitiqueWeb() {
  * Un total par jour, rien d'autre : ni domaine, ni adresse de poste, ni
  * heure. Voir dnsGuard.relever() pour la raison technique de ce choix.
  */
+/**
+ * Observation des domaines contactés — l'étape qui protège.
+ *
+ * TOUT LE TRAVAIL SE FAIT ICI, SUR L'AGENT, avant le moindre envoi. Le
+ * journal des requêtes est lu, réduit à des couples (poste, domaine,
+ * compteur), puis effacé. Ce qui part vers la plateforme ne permet plus
+ * de reconstituer une navigation : ni heure, ni nom complet.
+ *
+ * L'agent DEMANDE au serveur si le site est concerné. La décision vit
+ * dans la base centrale, à un seul endroit — pas dans un fichier de
+ * configuration recopié sur chaque site, qu'on oublierait d'éteindre.
+ */
+async function observerDomaines() {
+  let actif = false;
+  try {
+    const { data } = await axios.get(`${CENTRAL_API_URL}/agent/observation-dns`, {
+      params: { id_site: ID_SITE },
+      headers: { Authorization: `Bearer ${AGENT_TOKEN}` },
+      timeout: 15000,
+    });
+    actif = Boolean(data && data.active);
+  } catch {
+    // Serveur injoignable : on ne CHANGE RIEN. Allumer par défaut serait
+    // inacceptable ; éteindre à chaque coupure réseau ferait clignoter le
+    // service DNS du site au rythme des pannes.
+    return;
+  }
+
+  const etat = await dnsGuard.configurerObservation(actif);
+  if (!etat.ok) {
+    annoncer("observation_dns", `Observation des domaines : ${etat.raison}`, true);
+    return;
+  }
+  if (etat.change) {
+    annoncer(
+      "observation_dns",
+      actif
+        ? "Observation des domaines ACTIVÉE sur ce résolveur."
+        : "Observation des domaines arrêtée : plus aucune requête n'est journalisée."
+    );
+  }
+  if (!actif) return;
+
+  const journal = await dnsGuard.journalRequetes(Number(SCAN_INTERVAL_MINUTES) + 1);
+  if (!journal.texte) return;
+
+  const releves = agregerRequetes(journal.texte);
+  if (releves.length === 0) return;
+
+  try {
+    const { data } = await axios.post(
+      `${CENTRAL_API_URL}/agent/observations-dns`,
+      { id_site: Number(ID_SITE), releves },
+      { headers: { Authorization: `Bearer ${AGENT_TOKEN}` }, timeout: 30000 }
+    );
+    console.log(
+      `[Agent site ${ID_SITE}] Domaines : ${data.machines ?? 0} machine(s), ` +
+        `${data.domaines ?? 0} domaine(s)` +
+        (data.inconnues ? `, ${data.inconnues} adresse(s) hors inventaire` : "") +
+        (data.signaux ? `, ${data.signaux} signal(aux)` : "")
+    );
+  } catch (err) {
+    console.error(
+      `[Agent site ${ID_SITE}] Envoi des domaines refusé : ` +
+        (err.response?.data?.error || err.message)
+    );
+  }
+}
+
 async function remonterStatistiques() {
   try {
     const releve = await dnsGuard.relever();
@@ -393,6 +463,7 @@ async function runScanAndPush() {
     console.log(`[Agent site ${ID_SITE}] Cycle ${numeroCycle} — politique web uniquement.`);
     await appliquerPolitiqueWeb();
     await remonterStatistiques();
+    await observerDomaines();
     return;
   }
   console.log(`[Agent site ${ID_SITE}] Cycle ${numeroCycle} — scan de ${CIDR}...`);
@@ -488,6 +559,10 @@ async function runScanAndPush() {
   // déjà arrivés.
   await appliquerPolitiqueWeb();
   await remonterStatistiques();
+  // En dernier : l'observation lit un journal produit pendant tout le
+  // cycle. La placer avant reviendrait à relever une fenêtre plus courte
+  // que l'intervalle, et à perdre les requêtes du scan lui-même.
+  await observerDomaines();
 
   console.log(
     `[Agent site ${ID_SITE}] Cycle terminé en ${Math.round((Date.now() - debutScan) / 1000)} s — ` +

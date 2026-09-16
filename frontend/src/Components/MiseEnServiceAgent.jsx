@@ -60,12 +60,17 @@ export default function MiseEnServiceAgent({ idSite, onFermer }) {
   const [systeme, setSysteme] = useState("linux");
   const [jetonVisible, setJetonVisible] = useState(false);
   const [telechargement, setTelechargement] = useState(false);
+  const [observation, setObservation] = useState(null);
+  const [bascule, setBascule] = useState(false);
   const [regeneration, setRegeneration] = useState(false);
 
   async function charger(silencieux = false) {
     try {
       const { data } = await axios.get(`${API_URL}/sites/${idSite}/agent`);
       setInfos(data);
+      if (typeof data.observation_dns !== "undefined") {
+        setObservation(Boolean(data.observation_dns));
+      }
       setErreur(null);
     } catch (err) {
       if (!silencieux) setErreur(err.response?.data?.error || "Chargement impossible");
@@ -79,6 +84,44 @@ export default function MiseEnServiceAgent({ idSite, onFermer }) {
    * d'authentification de la SESSION, qu'un `<a href>` n'enverrait pas.
    * Le fichier revient donc en memoire, et on le remet au navigateur.
    */
+  /**
+   * Allume ou éteint l'observation des domaines pour ce site.
+   *
+   * Une confirmation est demandée à l'ALLUMAGE seulement. Éteindre est
+   * toujours sûr ; allumer change ce que la plateforme sait des gens, et
+   * ce genre de geste ne doit pas partir d'un clic distrait.
+   */
+  async function basculerObservation(actif) {
+    if (actif) {
+      const accepte = window.confirm(
+        "Activer l'observation des domaines sur ce site ?\n\n" +
+          "Le résolveur DNS va journaliser les requêtes. L'agent n'en transmet " +
+          "que des domaines agrégés — jamais l'adresse complète, jamais l'heure " +
+          "d'une requête.\n\n" +
+          "Cela reste une observation de ce que font les postes. Prévenir les " +
+          "personnes concernées relève de votre organisation, pas de la " +
+          "plateforme.\n\n" +
+          "Ce choix est inscrit au journal d'activité avec votre nom."
+      );
+      if (!accepte) return;
+    }
+
+    setBascule(true);
+    setErreur(null);
+    try {
+      const { data } = await axios.patch(
+        `${API_URL}/sites/${idSite}/observation-dns`,
+        { active: actif }
+      );
+      setObservation(data.active);
+      setMessage(data.message);
+    } catch (err) {
+      setErreur(err.response?.data?.error || "Modification impossible");
+    } finally {
+      setBascule(false);
+    }
+  }
+
   async function telechargerScript() {
     setTelechargement(true);
     try {
@@ -194,6 +237,20 @@ export default function MiseEnServiceAgent({ idSite, onFermer }) {
       </div>
 
       <div className="p-5 space-y-5">
+        {/* L'ADRESSE CORRIGÉE SE DIT, ELLE NE SE CORRIGE PAS EN SILENCE.
+
+            Le serveur remplace une adresse de bouclage — « localhost » —
+            par l'adresse réelle de cette machine sur le réseau, sans
+            quoi chaque poste appellerait lui-même. Mais une substitution
+            muette serait une deuxième surprise au lieu d'une première
+            évitée : c'est l'adresse que l'exploitant va recopier sur un
+            partage, il doit la reconnaître. */}
+        {infos.avertissement_url && (
+          <p className="text-xs leading-relaxed rounded-lg border border-[var(--color-warn)]/40 bg-[var(--color-warn)]/5 px-3 py-2 text-[var(--color-mute)]">
+            {infos.avertissement_url}
+          </p>
+        )}
+
         <ol className="space-y-4">
           <li>
             <p className="text-sm font-medium mb-1">
@@ -258,6 +315,42 @@ export default function MiseEnServiceAgent({ idSite, onFermer }) {
                 n'empeche pas seulement le confort : elle empeche la
                 rotation elle-meme. On finit par ne plus jamais changer le
                 jeton, ce qui est exactement le contraire du but. */}
+            {/* ── OBSERVATION DES DOMAINES ──
+
+                Placée ici, avec les autres décisions de mise en service,
+                et non dans un écran de réglages : c'est un choix qui se
+                prend en connaissance de cause, une fois, pas un
+                interrupteur qu'on croise en cherchant autre chose. */}
+            <div className="mt-4 pt-4 border-t border-[var(--color-line)]">
+              <p className="text-sm font-medium mb-1">
+                Observer les domaines contactés
+              </p>
+              <p className="text-xs text-[var(--color-mute)] mb-2 leading-relaxed">
+                Le résolveur du site voit passer ce que chaque machine cherche à
+                joindre — y compris les téléphones, les imprimantes et les appareils
+                sur lesquels aucun agent ne sera jamais installé. Sert à repérer le
+                minage de cryptomonnaie, les outils de prise de contrôle à distance
+                et les fuites de données déguisées en requêtes DNS.
+              </p>
+              <p className="text-[11px] text-[var(--color-mute)] mb-2 leading-relaxed">
+                Seul le domaine est conservé — <em>dropbox.com</em>, jamais l'adresse
+                complète — et aucune heure de requête n'est enregistrée. C'est un
+                relevé d'usage, pas un historique de navigation. Éteint par défaut ;
+                l'activation est inscrite au journal.
+              </p>
+              <button
+                onClick={() => basculerObservation(!observation)}
+                disabled={bascule}
+                className="text-xs px-3 py-1.5 rounded-lg border border-[var(--color-line)] text-[var(--color-mute)] hover:border-[var(--color-signal)] hover:text-[var(--color-signal)] transition disabled:opacity-50"
+              >
+                {bascule
+                  ? "…"
+                  : observation
+                    ? "Arrêter l'observation"
+                    : "Activer l'observation"}
+              </button>
+            </div>
+
             <div className="mt-4 pt-4 border-t border-[var(--color-line)]">
               <p className="text-sm font-medium mb-1">
                 Inventaire des postes — sans rien installer

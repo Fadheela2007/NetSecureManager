@@ -1,0 +1,266 @@
+{
+  "_lisez_moi": [
+    "À quoi sert un domaine, quand on le reconnaît.",
+    "",
+    "POURQUOI C'EST UNE DONNÉE ET NON DU CODE. La liste est forcément",
+    "incomplète — il existe des millions de domaines. Un client qui voit",
+    "passer un service absent d'ici doit pouvoir l'ajouter sans toucher au",
+    "code ni attendre une nouvelle version.",
+    "",
+    "UN DOMAINE ABSENT N'EST PAS SUSPECT. Il est simplement inconnu, et",
+    "l'écran le dit ainsi. Traiter l'inconnu comme du danger produirait",
+    "des centaines de fausses alertes le premier jour, et la liste ne",
+    "serait plus jamais regardée.",
+    "",
+    "LA RECHERCHE VA DU PLUS PRÉCIS AU PLUS GÉNÉRAL. Pour",
+    "« files.eu.dropbox.com » on essaie le nom entier, puis",
+    "« eu.dropbox.com », puis « dropbox.com ». Une entrée précise l'emporte",
+    "donc sur une entrée générale : « teams.microsoft.com » peut être rangé",
+    "en collaboration sans que tout microsoft.com le soit.",
+    "",
+    "Ne mettez pas ici un domaine trop large. « google.com » y a figuré une",
+    "fois, en « mise à jour de logiciel » : ouvrir une page de recherche",
+    "était alors présenté comme une mise à jour."
+  ],
+  "categories": {
+    "collaboration": {
+      "libelle": "Messagerie et travail en équipe",
+      "gravite": "information",
+      "domaines": [
+        "teams.microsoft.com",
+        "office.com",
+        "sharepoint.com",
+        "slack.com",
+        "zoom.us",
+        "webex.com",
+        "meet.google.com",
+        "discord.com",
+        "whatsapp.net"
+      ]
+    },
+    "partage_fichiers": {
+      "libelle": "Partage de fichiers vers l'extérieur",
+      "gravite": "avertissement",
+      "_pourquoi": [
+        "Ce ne sont pas des services malveillants — la plupart des",
+        "entreprises en utilisent un. Le signal n'est pas leur présence,",
+        "c'est leur présence sur une machine qui ne devrait pas en avoir",
+        "besoin, ou un service que la société n'a pas choisi."
+      ],
+      "domaines": [
+        "dropbox.com",
+        "wetransfer.com",
+        "mega.nz",
+        "mediafire.com",
+        "sendspace.com",
+        "box.com",
+        "pcloud.com",
+        "smash.fr",
+        "swisstransfer.com",
+        "anonfiles.com",
+        "gofile.io",
+        "file.io"
+      ]
+    },
+    "acces_distant": {
+      "libelle": "Prise de contrôle à distance",
+      "gravite": "avertissement",
+      "_pourquoi": [
+        "La catégorie la plus parlante de toute cette liste. Un outil de",
+        "prise de contrôle installé sur un poste ouvre une porte qui",
+        "traverse le pare-feu — c'est son métier. Légitime quand c'est le",
+        "service informatique qui l'a posé ; c'est aussi, très exactement,",
+        "ce qu'installe une escroquerie au faux support technique."
+      ],
+      "domaines": [
+        "teamviewer.com",
+        "anydesk.com",
+        "ngrok.com",
+        "ngrok.io",
+        "logmein.com",
+        "gotomypc.com",
+        "splashtop.com",
+        "rustdesk.com",
+        "screenconnect.com",
+        "connectwise.com",
+        "supremocontrol.com"
+      ]
+    },
+    "minage": {
+      "libelle": "Minage de cryptomonnaie",
+      "gravite": "critique",
+      "_pourquoi": [
+        "Aucune raison professionnelle. Une machine de bureau qui parle à",
+        "un pool de minage a été compromise, ou détournée par quelqu'un",
+        "qui utilise l'électricité et le matériel de l'entreprise. Le",
+        "constat est net : ces domaines n'ont pas d'autre usage."
+      ],
+      "domaines": [
+        "minexmr.com",
+        "nanopool.org",
+        "ethermine.org",
+        "f2pool.com",
+        "supportxmr.com",
+        "moneroocean.stream",
+        "nicehash.com",
+        "2miners.com",
+        "hiveon.net",
+        "herominers.com",
+        "unmineable.com"
+      ]
+    },
+    "anonymisation": {
+      "libelle": "Tunnel ou anonymisation",
+      "gravite": "avertissement",
+      "_pourquoi": [
+        "Un tunnel chiffré depuis un poste de travail contourne le",
+        "filtrage, la journalisation et le pare-feu de l'entreprise. Ce",
+        "n'est pas illégal, mais ça rend aveugle tout le reste du",
+        "dispositif — y compris cette plateforme."
+      ],
+      "domaines": [
+        "nordvpn.com",
+        "expressvpn.com",
+        "protonvpn.com",
+        "surfshark.com",
+        "cyberghostvpn.com",
+        "torproject.org",
+        "psiphon.ca",
+        "hide.me",
+        "windscribe.com",
+        "tunnelbear.com"
+      ]
+    },
+    "divertissement": {
+      "libelle": "Streaming et réseaux sociaux",
+      "gravite": "information",
+      "domaines": [
+        "youtube.com",
+        "netflix.com",
+        "tiktok.com",
+        "tiktokcdn.com",
+        "facebook.com",
+        "instagram.com",
+        "twitter.com",
+        "x.com",
+        "spotify.com",
+        "twitch.tv",
+        "dailymotion.com",
+        "snapchat.com"
+      ]
+    },
+    "partage_pair_a_pair": {
+      "libelle": "Échange pair à pair",
+      "gravite": "avertissement",
+      "domaines": [
+        "thepiratebay.org",
+        "1337x.to",
+        "rarbg.to",
+        "yts.mx",
+        "torrentz2.eu",
+        "nyaa.si",
+        "opentrackr.org",
+        "torrent.eu.org"
+      ]
+    },
+    "editeur_logiciel": {
+      "libelle": "Éditeur de logiciel",
+      "gravite": "information",
+      "_pourquoi": [
+        "RENOMMÉE APRÈS ESSAI. La catégorie s'appelait « Mise à jour de",
+        "logiciel » et rangeait google.com et apple.com. Résultat : ouvrir",
+        "une page de recherche était présenté comme une mise à jour, et un",
+        "iPhone qui synchronise devenait un « logiciel Apple installé ».",
+        "",
+        "Contacter le domaine d'un éditeur SUGGÈRE qu'un de ses produits",
+        "tourne sur la machine. Ça ne le prouve pas — quelqu'un a pu",
+        "simplement visiter son site. L'écran doit dire l'un, pas l'autre."
+      ],
+      "domaines": [
+        "windowsupdate.com",
+        "update.microsoft.com",
+        "adobe.com",
+        "oracle.com",
+        "java.com",
+        "mozilla.org",
+        "canonical.com",
+        "ubuntu.com",
+        "avast.com",
+        "kaspersky.com",
+        "eset.com",
+        "bitdefender.com",
+        "malwarebytes.com",
+        "sophos.com",
+        "trendmicro.com"
+      ]
+    }
+  },
+  "_infrastructure": [
+    "Domaines dont les sous-noms sont ALÉATOIRES PAR CONSTRUCTION.",
+    "",
+    "Un réseau de distribution de contenu fabrique des noms comme",
+    "« d1a2b3c4e5f6.cloudfront.net » : ils ressemblent trait pour trait à",
+    "ce qu'un logiciel malveillant génère pour joindre son serveur.",
+    "",
+    "Sans cette liste, la détection de noms improbables désignerait",
+    "d'abord Amazon, Microsoft et Google — c'est-à-dire qu'elle serait",
+    "ignorée dès la première lecture, et avec elle les vrais signaux."
+  ],
+  "infrastructure": [
+    "cloudfront.net",
+    "akamai.net",
+    "akamaiedge.net",
+    "akadns.net",
+    "amazonaws.com",
+    "azureedge.net",
+    "azure.com",
+    "windows.net",
+    "cloudflare.net",
+    "cloudflare.com",
+    "fastly.net",
+    "edgekey.net",
+    "edgesuite.net",
+    "googleusercontent.com",
+    "gvt1.com",
+    "gvt2.com",
+    "1e100.net",
+    "doubleclick.net",
+    "cdn77.org",
+    "stackpathdns.com",
+    "llnwd.net",
+    "footprint.net",
+    "trafficmanager.net",
+    "msedge.net"
+  ],
+  "_suffixes_composes": [
+    "Suffixes à deux niveaux, pour que « exemple.co.uk » soit reconnu",
+    "comme un domaine entier et non réduit à « co.uk ». La liste",
+    "officielle en compte des milliers ; ceux-ci couvrent le cas courant",
+    "et surtout le Cameroun."
+  ],
+  "suffixes_composes": [
+    "co.uk",
+    "org.uk",
+    "gov.uk",
+    "ac.uk",
+    "co.jp",
+    "com.au",
+    "co.za",
+    "com.br",
+    "com.cn",
+    "co.in",
+    "com.mx",
+    "com.tr",
+    "com.ar",
+    "com.cm",
+    "co.cm",
+    "net.cm",
+    "org.cm",
+    "gov.cm",
+    "com.ng",
+    "com.gh",
+    "co.ke",
+    "com.sn",
+    "com.ci"
+  ]
+}

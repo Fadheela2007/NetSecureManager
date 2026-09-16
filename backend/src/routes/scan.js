@@ -18,7 +18,7 @@ const {
 } = require("../middleware/porteeSite");
 const {
   scanRange, scanPorts, wakeOnLan, snmpMetrics, tableCommutation,
-  diagnostiquerPortee,
+  diagnostiquerPortee, snmpInventaireLogiciel,
 } = require("../services/discoveryService");
 const { detecterReseaux } = require("../services/reseauxLocauxService");
 const {
@@ -36,10 +36,23 @@ const { detecterConflits, decrireConflit } = require("../services/conflitIpServi
 const { creerAlerte } = require("../services/monitoringService");
 const { purgerAdressesSansPreuve } = require("../services/inventaireService");
 const { faillesDeLEquipement } = require("../services/faillesService");
-const { inventaireDeLEquipement } = require("../services/inventairePosteService");
+const {
+  inventaireDeLEquipement,
+  enregistrerInventaireSnmp,
+  SOURCE_WMI,
+} = require("../services/inventairePosteService");
+// La porte des postes Windows : ni agent, ni SNMP. Voir le service.
+const inventaireWindows = require("../services/inventaireWindowsService");
+const { parLots } = require("../services/parLots");
+const { observationsDeLEquipement } = require("../services/observationDnsDepot");
 
 // Avertissement de migration manquante : une seule fois par démarrage.
 let colonnesVersionSignalees = false;
+/* Idem pour l'inventaire logiciel lu par SNMP : la migration du
+   10 septembre porte les colonnes et les tables qu'il remplit. Sans
+   ce drapeau, une base non migrée produirait un message par machine et
+   par scan — le genre de bruit qui apprend à ne plus lire la console. */
+let inventaireSnmpIndisponible = false;
 let tableCertificatsSignalee = false;
 // Même règle que celle qui calcule le total : voir le détail par port.
 const { estIgnoree } = require("../services/traficService");
@@ -415,6 +428,17 @@ async function scannerUnePlage(req, id_site, cidr, snmp_community) {
        encore là — pas à un scan qui passe une fois. */
     let ignores_sans_preuve = 0;
 
+    /* Combien de machines ont dit ce qui tourne dessus, et combien de
+       programmes distincts au total. Compté pour pouvoir le DIRE : sans
+       ce chiffre, un onglet « intérieur » vide se lit comme une panne du
+       produit, alors qu'il traduit l'absence de SNMP sur le parc. */
+    let machinesAvecInventaire = 0;
+    let programmesVus = 0;
+
+    /* Les postes Windows repérés pendant la boucle, interrogés APRÈS
+       elle et en parallèle. Voir `lireInterieursWindows`. */
+    const candidatsWindows = [];
+
     for (const eq of equipements) {
       // L'échec d'un seul équipement ne doit pas annuler tout le scan.
       try {
@@ -649,17 +673,107 @@ async function scannerUnePlage(req, id_site, cidr, snmp_community) {
           eq.type_source === "snmp" ||
           eq.nom_source === "snmp";
 
+        /* ── CANDIDAT À LA LECTURE WINDOWS ──
+
+           Mesuré sur un parc réel de 105 équipements : 7 répondent en
+           SNMP, et ce sont sept imprimantes. Les 98 autres sont des
+           postes Windows, muets en SNMP par construction.
+
+           On les repère à ce qu'ils EXPOSENT, pas à ce que nmap suppose :
+           les ports 135 (RPC) et 445 (partage de fichiers) sont ouverts
+           sur tout Windows du réseau, et fermés sur une imprimante ou un
+           commutateur. C'est un signal direct, pas une déduction.
+
+           La liste est traitée APRÈS la boucle, en parallèle : voir
+           `lireInterieursWindows`. Interroger ici, une machine après
+           l'autre, ajouterait plusieurs secondes par poste à un scan qui
+           est déjà le point douloureux du produit. */
+        const exposeWindows = services.some((s) => s.port === 135 || s.port === 445);
+        if (exposeWindows) {
+          candidatsWindows.push({ idEquipement, ip: eq.adresse_ip });
+        }
+
         if (aReponduEnSnmp) {
           await enregistrerInterfaces(
             idEquipement,
             eq.adresse_ip,
             options.snmpCommunity || "public"
           );
+
+          /* ── CE QUI TOURNE À L'INTÉRIEUR, PAR LA MÊME PORTE ──
+
+             Même garde-fou que pour les interfaces, et pour la même
+             raison : on ne repose pas à une machine muette une question
+             dont l'identification vient d'établir qu'elle n'y répondra
+             pas. Le coût n'est donc payé que sur les machines qui
+             parlent déjà SNMP — celles dont la fiche affiche déjà un
+             taux de mémoire.
+
+             Ne remonte JAMAIS d'erreur : un agent SNMP qui refuse la
+             branche hrSWRun est un cas ordinaire, pas un échec de scan.
+             Et un équipement dont un agent de poste s'occupe déjà est
+             laissé tranquille par le service — voir
+             enregistrerInventaireSnmp. */
+          /* DÉSORMAIS ÉTEINTE PAR DÉFAUT — retrait du 15/09/2026.
+
+             La lecture de l'intérieur des machines a été retirée de la
+             plateforme : mesurée sur un parc réel de 105 équipements,
+             elle ne rapportait rien (7 réponses SNMP, toutes des
+             imprimantes, aucune ne publiant hrSWRun) et coûtait du temps
+             de scan à chaque passage.
+
+             Le code reste en place et intact : `SCAN_INVENTAIRE_SNMP=1`
+             le rallume, sans autre changement. C'est l'inverse de la
+             règle précédente, où il fallait `=0` pour l'éteindre. */
+          if (process.env.SCAN_INVENTAIRE_SNMP === "1" && !inventaireSnmpIndisponible) {
+            const releve = await snmpInventaireLogiciel(
+              eq.adresse_ip,
+              options.snmpCommunity || "public"
+            ).catch((e) => {
+              console.error(`Inventaire logiciel de ${eq.adresse_ip} ignoré:`, e.message);
+              return null;
+            });
+
+            if (releve) {
+              const bilan = await enregistrerInventaireSnmp(idEquipement, releve).catch((e) => {
+                // Migration du 10 septembre non passée : on le dit UNE
+                // fois, avec la commande, et on cesse d'essayer pour le
+                // reste du scan plutôt que de répéter par machine.
+                if (/doesn't exist|Unknown column/i.test(e.message)) {
+                  if (!inventaireSnmpIndisponible) {
+                    inventaireSnmpIndisponible = true;
+                    console.warn(
+                      "\n⚠  Inventaire logiciel DÉSACTIVÉ : les tables LOGICIEL_INSTALLE /\n" +
+                        "   PROCESSUS_OBSERVE sont absentes de la base. Le scan continue\n" +
+                        "   normalement, mais ne peut pas ranger ce qui tourne sur les machines.\n" +
+                        "   Pour l'activer :  node tools\\appliquer-migrations.js\n"
+                    );
+                  }
+                  return null;
+                }
+                console.error(
+                  `Inventaire logiciel de ${eq.adresse_ip} non enregistré:`,
+                  e.message
+                );
+                return null;
+              });
+              if (bilan?.ecrit) {
+                machinesAvecInventaire++;
+                programmesVus += bilan.processus || 0;
+              }
+            }
+          }
         }
       } catch (errEq) {
         console.error(`Erreur d'enregistrement pour ${eq.adresse_ip}:`, errEq.message);
       }
     }
+
+    /* ── L'INTÉRIEUR DES POSTES WINDOWS ──
+       Payé une fois, en parallèle, sur les seules machines concernées. */
+    const bilanWindows = await lireInterieursWindows(candidatsWindows);
+    machinesAvecInventaire += bilanWindows.machines;
+    programmesVus += bilanWindows.programmes;
 
     /* ── NETTOYAGE DE L'INVENTAIRE, ICI ET AUTOMATIQUEMENT ──
 
@@ -681,16 +795,159 @@ async function scannerUnePlage(req, id_site, cidr, snmp_community) {
     // doit être COMPTÉE et DITE, pas passée sous silence. Sans ce chiffre,
     // la nouvelle règle donnerait l'impression que le scan trouve moins
     // qu'avant, sans expliquer pourquoi.
+    if (machinesAvecInventaire > 0) {
+      console.log(
+        `Scan de ${cidr} — intérieur relevé sur ${machinesAvecInventaire} machine(s), ` +
+          `${programmesVus} programme(s) distinct(s) au total.`
+      );
+    }
+
     return {
       cidr,
       equipements,
       ignores_sans_preuve,
       adresses_retirees: nettoyage.retires || 0,
+      machines_avec_inventaire: machinesAvecInventaire,
+      programmes_vus: programmesVus,
     };
   } catch (err) {
     err.cidr = cidr;
     throw err;
   }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   L'INTÉRIEUR DES POSTES WINDOWS
+
+   POURQUOI CE TRAVAIL EST FAIT À PART, APRÈS LA BOUCLE.
+
+   Interroger un poste en WMI coûte de deux à dix secondes — et jusqu'à
+   quarante sur une machine éteinte, le temps que les deux voies
+   expirent. Le faire DANS la boucle d'enregistrement, qui est
+   séquentielle, ajouterait ce prix cent fois de suite : sur un parc de
+   cent postes, le scan y passerait plusieurs minutes de plus.
+
+   Or ces attentes ne se disputent rien : elles ne consomment ni
+   processeur ni base, elles attendent le réseau. Les recouvrir est donc
+   gratuit. Huit à la fois ramènent cent postes à environ une minute.
+
+   POURQUOI HUIT, ET PAS TRENTE. C'est le même raisonnement que pour le
+   balayage : le facteur limitant n'est pas notre serveur mais le réseau
+   supervisé, et huit connexions d'administration simultanées restent ce
+   qu'un parc voit passer tous les jours. Réglable par
+   WINDOWS_CONCURRENCE, plafonné à 24.
+
+   NE LÈVE JAMAIS. Un poste éteint, un refus d'accès, un PowerShell
+   absent : chacun rend une raison, aucun n'interrompt le scan.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** Avertissements dits une seule fois par démarrage. */
+let windowsRefusSignale = false;
+let windowsPorteFermeeSignalee = false;
+
+async function lireInterieursWindows(candidats) {
+  const bilan = { machines: 0, programmes: 0, refus: 0, injoignables: 0 };
+  /* Les adresses qui ONT répondu. Le bilan ne comptait que les échecs, et
+     nommait leurs adresses ; le succès n'était qu'un nombre. On savait
+     donc qu'une machine avait parlé sans savoir LAQUELLE — et il fallait
+     ouvrir les fiches une par une pour retrouver celle qui avait le
+     résultat qu'on venait de produire. */
+  const ontRepondu = [];
+
+  if (!Array.isArray(candidats) || candidats.length === 0) return bilan;
+  if (!inventaireWindows.estDisponible()) return bilan;
+
+  const brut = Number(process.env.WINDOWS_CONCURRENCE);
+  const concurrence = Number.isFinite(brut) && brut > 0 ? Math.min(24, Math.floor(brut)) : 8;
+
+  console.log(
+    `Lecture Windows : ${candidats.length} poste(s) à interroger, ${concurrence} à la fois…`
+  );
+
+  await parLots(candidats, concurrence, async (candidat) => {
+    const releve = await inventaireWindows.lireMachine(candidat.ip);
+
+    if (!releve.ok) {
+      if (releve.raison === "acces_refuse") {
+        bilan.refus++;
+        if (!windowsRefusSignale) {
+          windowsRefusSignale = true;
+          /* LE MESSAGE DOIT NOMMER LE COMPTE RÉELLEMENT UTILISÉ.
+
+             Il parlait du « compte de WINDOWS_UTILISATEUR » dans tous les
+             cas. Or ce réglage est facultatif, et l'usage ordinaire s'en
+             passe : la plateforme se sert alors du compte Windows sous
+             lequel le serveur tourne. On envoyait donc chercher un
+             réglage vide, pour un problème qui vient d'un compte dont ce
+             réglage ne parle pas. */
+          const compte = inventaireWindows.identifiants();
+          console.warn(
+            `\n⚠  Lecture Windows REFUSÉE sur ${candidat.ip}.\n` +
+              "   Les ports sont ouverts : c'est un problème de DROITS, pas de réseau.\n" +
+              (compte
+                ? `   Le compte ${compte.utilisateur} n'a pas le droit d'interroger ce poste.\n`
+                : "   Le compte Windows sous lequel ce serveur tourne n'a pas le droit\n" +
+                  "   d'interroger ce poste.\n") +
+              "   Il faut un compte administrateur des postes du domaine — soit en\n" +
+              "   démarrant le serveur avec, soit via WINDOWS_UTILISATEUR dans .env.\n"
+          );
+        }
+      } else if (releve.raison === "injoignable") {
+        bilan.injoignables++;
+        if (!windowsPorteFermeeSignalee) {
+          windowsPorteFermeeSignalee = true;
+          console.log(
+            `Lecture Windows : ${candidat.ip} ne répond ni en WinRM (5985) ni en DCOM (135). ` +
+              "Si tout le parc est dans ce cas, ces ports sont fermés par le pare-feu " +
+              "des postes — cela se débloque par une GPO."
+          );
+        }
+      }
+      return;
+    }
+
+    const ecriture = await enregistrerInventaireSnmp(
+      candidat.idEquipement,
+      releve,
+      SOURCE_WMI
+    ).catch((e) => {
+      console.error(`Inventaire Windows de ${candidat.ip} non enregistré:`, e.message);
+      return null;
+    });
+
+    if (ecriture?.ecrit) {
+      bilan.machines++;
+      bilan.programmes += ecriture.processus || 0;
+      ontRepondu.push(candidat.ip);
+    }
+  });
+
+  if (bilan.machines > 0) {
+    console.log(
+      `Lecture Windows : ${bilan.machines} poste(s) ont dit ce qui y tourne` +
+        (bilan.injoignables > 0 ? `, ${bilan.injoignables} injoignable(s)` : "") +
+        (bilan.refus > 0 ? `, ${bilan.refus} refus d'accès` : "") +
+        "."
+    );
+    /* LES ADRESSES QUI ONT RÉPONDU, ÉCRITES EN CLAIR.
+
+       C'est là qu'il faut aller regarder pour VOIR le résultat. Le bilan
+       nommait les adresses en ÉCHEC et se contentait d'un nombre pour
+       les succès : on apprenait qu'une machine avait parlé sans savoir
+       laquelle, et il fallait ouvrir les fiches une par une pour
+       retrouver celle qui portait ce qu'on venait de produire. */
+    console.log(
+      `   à regarder : ${ontRepondu.slice(0, 8).join(", ")}` +
+        (ontRepondu.length > 8 ? ` … et ${ontRepondu.length - 8} autre(s)` : "")
+    );
+  } else if (candidats.length > 0) {
+    console.log(
+      `Lecture Windows : aucun des ${candidats.length} poste(s) n'a répondu ` +
+        `(${bilan.injoignables} injoignable(s), ${bilan.refus} refus).`
+    );
+  }
+
+  return bilan;
 }
 
 /**
@@ -739,15 +996,22 @@ router.post("/scan", requireRole("admin", "operateur"), async (req, res) => {
   }
 
   try {
-    const { equipements, ignores_sans_preuve, adresses_retirees } = await scannerUnePlage(
-      req, id_site, cidr, snmp_community
-    );
+    const {
+      equipements,
+      ignores_sans_preuve,
+      adresses_retirees,
+      machines_avec_inventaire,
+      programmes_vus,
+    } = await scannerUnePlage(req, id_site, cidr, snmp_community);
     const conflits = await conflitsDuSite(id_site);
 
     res.json({
       message: "Scan terminé",
       nb_equipements: equipements.length,
       ignores_sans_preuve: ignores_sans_preuve || 0,
+      // Ce que le scan a appris de l'INTÉRIEUR des machines, sans agent.
+      machines_avec_inventaire: machines_avec_inventaire || 0,
+      programmes_vus: programmes_vus || 0,
       // Ce que le scan a RETIRÉ, au même titre que ce qu'il a trouvé. Une
       // ligne qui disparaît de l'inventaire sans un mot inquiète à juste
       // titre : on dit combien, et pourquoi.
@@ -1576,22 +1840,63 @@ router.get("/oui/etat", async (req, res) => {
  *     colonnes fait de cette sortie une décision, et non un effet de
  *     bord de la structure de la base.
  */
+/* ── LES PORTS, DANS LA LISTE ET PLUS SEULEMENT DANS LA FICHE ──
+
+   Ils étaient déjà collectés et déjà affichés — mais un par un, en
+   ouvrant chaque équipement. Sur un parc de cent machines, la question
+   qu'on se pose n'est jamais « quels ports a CELLE-CI », c'est « qui
+   expose quoi ». Il fallait cent clics pour y répondre.
+
+   SOUS-REQUÊTE CORRÉLÉE PLUTÔT QUE JOINTURE. Une jointure sur
+   SERVICE_DETECTE multiplierait les lignes par le nombre de ports et
+   obligerait à un GROUP BY sur toutes les colonnes — que le mode
+   ONLY_FULL_GROUP_BY de MySQL 8 rend fragile au moindre ajout de
+   colonne. La sous-requête rend une chaîne par équipement, et la forme
+   de la requête principale ne change pas.
+
+   Chaque port est renvoyé sous la forme `80/HTTP` : le numéro pour
+   l'affichage, le nom pour l'infobulle. GROUP_CONCAT tronque à 1024
+   caractères par défaut, soit largement plus que ce qu'une machine
+   saine expose ; une machine qui dépasserait ce seuil serait elle-même
+   l'information intéressante. */
+const SOUS_REQUETE_PORTS = `
+  (SELECT GROUP_CONCAT(CONCAT(s.port, '/', COALESCE(s.nom_service, '?'))
+                       ORDER BY s.port SEPARATOR ',')
+     FROM SERVICE_DETECTE s
+    WHERE s.id_equipement = e.id_equipement) AS ports`;
+
 router.get("/equipements", async (req, res) => {
   const { id_site } = req.query;
   const portee = clauseSite(req, "e.id_site");
-  const [rows] = await db.query(
-    `SELECT e.id_equipement, e.id_site, e.nom, e.nom_personnalise, e.nom_source,
+
+  const colonnes = `e.id_equipement, e.id_site, e.nom, e.nom_personnalise, e.nom_source,
             e.adresse_ip, e.adresse_mac, e.statut,
             e.fabricant, e.fabricant_source, e.type_source,
             e.os_detecte, e.derniere_decouverte,
             e.sys_descr IS NOT NULL AS expose_snmp,
             e.preuve_existence, e.preuve_detail, e.date_preuve,
-            t.libelle AS type_libelle
+            t.libelle AS type_libelle`;
+
+  const requete = (avecPorts) => `
+    SELECT ${colonnes}${avecPorts ? `,${SOUS_REQUETE_PORTS}` : ""}
      FROM EQUIPEMENT e
      LEFT JOIN TYPE_EQUIPEMENT t ON t.id_type = e.id_type
-     WHERE (? IS NULL OR e.id_site = ?) AND ${portee.clause}`,
-    [id_site || null, id_site || null, ...portee.params]
-  );
+     WHERE (? IS NULL OR e.id_site = ?) AND ${portee.clause}`;
+
+  const params = [id_site || null, id_site || null, ...portee.params];
+
+  let rows;
+  try {
+    [rows] = await db.query(requete(true), params);
+  } catch (err) {
+    // Base antérieure à SERVICE_DETECTE : la liste s'affiche sans les
+    // ports plutôt que de renvoyer une erreur. Même principe que
+    // partout ailleurs — une colonne absente retire une information,
+    // elle ne casse pas l'écran.
+    if (!colonneManquante(err)) throw err;
+    [rows] = await db.query(requete(false), params);
+  }
+
   res.json(rows);
 });
 
@@ -2101,7 +2406,70 @@ router.post("/equipements/:id/reveiller", requireRole("admin", "operateur"), asy
  * stocké, il serait faux dès le lendemain — et une valeur périmée qui a
  * l'air fraîche est pire qu'une valeur absente.
  */
-router.get("/equipements/:id/certificats", async (req, res) => {
+/**
+ * GET /api/equipements/:id/observations-dns
+ * Ce que cette machine cherche à joindre.
+ *
+ * La réponse porte TOUJOURS `active`. Une liste vide sans ce drapeau se
+ * lirait « cette machine ne contacte rien », ce qui est faux de toute
+ * machine allumée : elle signifie en réalité « personne n'écoute ».
+ * Même règle que pour les failles et l'inventaire de poste.
+ */
+/* ═══════════════════════════════════════════════════════════════════
+   POURQUOI CES QUATRE LECTURES SONT RÉSERVÉES, ALORS QUE LE RESTE DE LA
+   FICHE D'ÉQUIPEMENT RESTE OUVERT À TOUS LES RÔLES.
+
+   Le rôle « lecteur » existe pour consulter l'ÉTAT DU PARC : qui est en
+   ligne, quelles alertes sont ouvertes, quel équipement est branché où.
+   Ces quatre routes-là ne disent pas l'état du parc.
+
+     • observations-dns — les domaines qu'une machine contacte, c'est-à-
+       dire le comportement de la personne qui s'en sert. ACTIVER cette
+       collecte est réservé à un administrateur (PATCH /sites/:id/
+       observation-dns), et c'est écrit noir sur blanc dans ce fichier :
+       « le geste doit être VOLONTAIRE, TRAÇABLE et DATÉ ». La LECTURE,
+       elle, était restée ouverte à tout compte authentifié. Entourer la
+       décision de précautions puis laisser tout le monde lire le
+       résultat vide la précaution de son sens.
+
+     • inventaire-poste — les logiciels installés ET les processus en
+       cours, avec le COMPTE qui les exécute (colonne
+       PROCESSUS_OBSERVE.utilisateur). C'est nommément « qui travaille
+       sur cette machine, et sur quoi ».
+
+     • failles et certificats — les CVE publiées pour les versions
+       annoncées, et ce qui expire, est auto-signé ou accepte encore du
+       TLS ancien. Mises bout à bout sur tout le parc, ces deux listes
+       forment l'ordre dans lequel attaquer ce réseau. Or un compte en
+       lecture seule est justement celui qu'on distribue le plus
+       largement — stagiaire, prestataire, direction.
+
+   Le cloisonnement par site continue de s'appliquer PAR-DESSUS, via
+   verifierAccesEquipement : un opérateur du site 2 ne lit rien du site 1.
+   ═══════════════════════════════════════════════════════════════════ */
+router.get("/equipements/:id/observations-dns", requireRole("admin"), async (req, res) => {
+  const acces = await verifierAccesEquipement(req, req.params.id);
+  if (!acces.ok) return res.status(acces.statut).json({ error: acces.erreur });
+
+  try {
+    res.json(await observationsDeLEquipement(req.params.id));
+  } catch (err) {
+    if (/doesn't exist|Unknown column/i.test(err.message)) {
+      return res.json({
+        active: false,
+        explication:
+          "l'observation des domaines n'est pas installée sur cette base " +
+          "(node tools\\appliquer-migrations.js)",
+        domaines: [],
+        signaux: [],
+      });
+    }
+    console.error("Lecture des observations DNS impossible:", err.message);
+    res.status(500).json({ error: "Impossible de lire les domaines contactés" });
+  }
+});
+
+router.get("/equipements/:id/certificats", requireRole("admin", "operateur"), async (req, res) => {
   const acces = await verifierAccesEquipement(req, req.params.id);
   if (!acces.ok) return res.status(acces.statut).json({ error: acces.erreur });
 
@@ -2125,7 +2493,7 @@ router.get("/equipements/:id/certificats", async (req, res) => {
   }
 });
 
-router.get("/equipements/:id/inventaire-poste", async (req, res) => {
+router.get("/equipements/:id/inventaire-poste", requireRole("admin", "operateur"), async (req, res) => {
   const acces = await verifierAccesEquipement(req, req.params.id);
   if (!acces.ok) return res.status(acces.statut).json({ error: acces.erreur });
 
@@ -2143,7 +2511,7 @@ router.get("/equipements/:id/inventaire-poste", async (req, res) => {
   }
 });
 
-router.get("/equipements/:id/failles", async (req, res) => {
+router.get("/equipements/:id/failles", requireRole("admin", "operateur"), async (req, res) => {
   const acces = await verifierAccesEquipement(req, req.params.id);
   if (!acces.ok) return res.status(acces.statut).json({ error: acces.erreur });
 

@@ -63,8 +63,8 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
   const [interfaces, setInterfaces] = useState([]);
   const [services, setServices] = useState([]);
   const [failles, setFailles] = useState(null);
-  const [interieur, setInterieur] = useState(null);
   const [certificats, setCertificats] = useState([]);
+  const [domainesDns, setDomainesDns] = useState(null);
   const [dispo, setDispo] = useState(null);
   const [periodeDispo, setPeriodeDispo] = useState(30);
 
@@ -269,18 +269,21 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
   /* Certificats des services chiffrés. Le nombre de jours restants est
      calculé par le serveur à chaque lecture, jamais stocké : figé, il
      serait faux dès le lendemain. */
+  /* Domaines contactés. Éteint par défaut sur un site : la réponse porte
+     `active`, et l'écran doit dire « personne n'écoute » plutôt que de
+     laisser croire que la machine ne contacte rien. */
+  useEffect(() => {
+    setDomainesDns(null);
+    axios.get(`${API_URL}/equipements/${equipement.id_equipement}/observations-dns`)
+      .then(({ data }) => setDomainesDns(data))
+      .catch(() => setDomainesDns(null));
+  }, [equipement.id_equipement]);
+
   useEffect(() => {
     setCertificats([]);
     axios.get(`${API_URL}/equipements/${equipement.id_equipement}/certificats`)
       .then(({ data }) => setCertificats(Array.isArray(data) ? data : []))
       .catch(() => setCertificats([]));
-  }, [equipement.id_equipement]);
-
-  useEffect(() => {
-    setInterieur(null);
-    axios.get(`${API_URL}/equipements/${equipement.id_equipement}/inventaire-poste`)
-      .then(({ data }) => setInterieur(data))
-      .catch(() => setInterieur(false));
   }, [equipement.id_equipement]);
 
   useEffect(() => {
@@ -638,120 +641,6 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
           </div>
         )}
 
-        {/* ── L'INTÉRIEUR DE LA MACHINE ──
-
-            Ce qu'aucun scan réseau ne peut voir. Les processus affichés
-            par Zabbix viennent du Zabbix agent, ceux de CheckMK de
-            l'agent CheckMK, ceux de Nagios de NRPE : sans agent, on n'a
-            pas accès à l'API du système ni aux exécutables locaux.
-
-            Le cas SANS agent est traité en premier et affiché en toutes
-            lettres. Une fiche vide sans ce message se lirait « cette
-            machine ne fait tourner aucun logiciel » — une affirmation
-            fausse, produite par une absence d'information. */}
-        {interieur && interieur.agent_installe === false && (
-          <div className="mb-5">
-            <h3 className="text-xs uppercase tracking-wide text-[var(--color-mute)] mb-2">
-              Intérieur de la machine
-            </h3>
-            <p className="text-xs text-[var(--color-mute)] leading-relaxed">
-              {interieur.explication}. Pour l'observer, installez l'agent de poste
-              (<span className="font-[var(--font-mono)]">src/agent-poste</span>) sur
-              cette machine.
-            </p>
-          </div>
-        )}
-
-        {interieur && interieur.agent_installe && (
-          <div className="mb-5">
-            <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
-              <h3 className="text-xs uppercase tracking-wide text-[var(--color-mute)]">
-                Intérieur de la machine
-              </h3>
-              {/* La DATE de la photographie, jamais séparée de son contenu :
-                  sans elle, on lit un instantané d'il y a trois jours en
-                  croyant voir maintenant. */}
-              <span className="text-[11px] text-[var(--color-mute)]">
-                relevé le {new Date(interieur.dernier_inventaire).toLocaleString("fr-FR")}
-                {interieur.agent_version ? ` — agent ${interieur.agent_version}` : ""}
-              </span>
-            </div>
-
-            {interieur.processus.length > 0 && (
-              <div className="mb-3">
-                <p className="text-xs mb-1.5">
-                  Programmes en cours ({interieur.processus.length})
-                </p>
-                <div className="flex flex-wrap gap-1.5">
-                  {interieur.processus.slice(0, 30).map((p) => (
-                    <span
-                      key={p.nom}
-                      title={
-                        p.memoire_ko
-                          ? `${Math.round(p.memoire_ko / 1024)} Mo` +
-                            (p.occurrences > 1 ? ` — ${p.occurrences} exemplaires` : "")
-                          : undefined
-                      }
-                      className="text-xs px-2 py-1 rounded-lg border border-[var(--color-line)] text-[var(--color-mute)]"
-                    >
-                      {p.nom}
-                      {p.occurrences > 1 && (
-                        <span className="text-[10px]"> ×{p.occurrences}</span>
-                      )}
-                    </span>
-                  ))}
-                  {interieur.processus.length > 30 && (
-                    <span className="text-xs text-[var(--color-mute)] px-1 py-1">
-                      … et {interieur.processus.length - 30} autres
-                    </span>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {interieur.logiciels.length > 0 && (
-              <div>
-                <p className="text-xs mb-1.5">
-                  Logiciels installés ({interieur.logiciels.length})
-                </p>
-                <div className="table-scroll max-h-72 overflow-y-auto">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="text-left text-[11px] uppercase tracking-wide text-[var(--color-mute)] border-b border-[var(--color-line)]">
-                        <th className="pb-1.5 font-medium">Nom</th>
-                        <th className="pb-1.5 font-medium">Version</th>
-                        <th className="pb-1.5 font-medium">Éditeur</th>
-                        <th className="pb-1.5 font-medium">Installé le</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[var(--color-line)]">
-                      {interieur.logiciels.map((l) => (
-                        <tr key={`${l.nom}-${l.version || ""}`}>
-                          <td className="py-1.5">{l.nom}</td>
-                          <td className="py-1.5 font-[var(--font-mono)] text-[var(--color-mute)]">
-                            {l.version || "—"}
-                          </td>
-                          <td className="py-1.5 text-[var(--color-mute)]">{l.editeur || "—"}</td>
-                          <td className="py-1.5 text-[var(--color-mute)]">
-                            {l.date_installation
-                              ? new Date(l.date_installation).toLocaleDateString("fr-FR")
-                              : "—"}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-
-            <p className="text-[11px] text-[var(--color-mute)] mt-2 leading-relaxed">
-              Remonté par l'agent installé sur cette machine. Les programmes en
-              cours sont une photographie de l'instant du relevé, pas un historique.
-            </p>
-          </div>
-        )}
-
         {/* ── CERTIFICATS DES SERVICES CHIFFRÉS ──
 
             Placé HAUT dans la fiche, avant les ports : c'est la seule
@@ -833,6 +722,115 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
             <p className="text-[11px] text-[var(--color-mute)] mt-2 leading-relaxed">
               Lu pendant le scan, dans la carte d'identité que chaque service chiffré
               présente à la connexion — comme le fait un navigateur. Rien n'a été envoyé.
+            </p>
+          </div>
+        )}
+
+        {/* ── CE QUE CETTE MACHINE CHERCHE À JOINDRE ──
+
+            Le seul écran de la fiche qui ne dépend NI d'un agent installé,
+            NI d'un port ouvert. Il vaut pour un téléphone, une imprimante,
+            une caméra, une machine de passage — tout ce sur quoi on ne
+            posera jamais de logiciel.
+
+            Les signaux d'abord, la liste ensuite : une machine contacte
+            couramment plusieurs centaines de domaines dont aucun ne pose
+            question. Montrer la liste en premier noierait les deux lignes
+            qui comptent. */}
+        {domainesDns && domainesDns.active === false && (
+          <div className="mb-5">
+            <h3 className="text-xs uppercase tracking-wide text-[var(--color-mute)] mb-2">
+              Domaines contactés
+            </h3>
+            <p className="text-xs text-[var(--color-mute)] leading-relaxed">
+              {domainesDns.explication}.
+            </p>
+          </div>
+        )}
+
+        {domainesDns && domainesDns.active && (
+          <div className="mb-5">
+            <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
+              <h3 className="text-xs uppercase tracking-wide text-[var(--color-mute)]">
+                Domaines contactés
+              </h3>
+              <span className="text-[11px] text-[var(--color-mute)]">
+                {domainesDns.total_domaines} domaine(s)
+                {domainesDns.depuis
+                  ? ` — depuis le ${new Date(domainesDns.depuis).toLocaleDateString("fr-FR")}`
+                  : ""}
+              </span>
+            </div>
+
+            {domainesDns.signaux?.length > 0 && (
+              <div className="space-y-1.5 mb-3">
+                {domainesDns.signaux.map((s) => (
+                  <div
+                    key={`${s.code}-${s.domaine}`}
+                    className="border rounded-lg p-2.5"
+                    style={{
+                      borderColor:
+                        s.gravite === "critique"
+                          ? "var(--color-crit)"
+                          : "var(--color-warn)",
+                    }}
+                  >
+                    <p
+                      className="text-xs"
+                      style={{
+                        color:
+                          s.gravite === "critique"
+                            ? "var(--color-crit)"
+                            : "var(--color-warn)",
+                      }}
+                    >
+                      <span className="font-[var(--font-mono)]">{s.domaine}</span>
+                      {s.occurrences > 1 ? ` · vu ${s.occurrences} fois` : ""}
+                    </p>
+                    {/* Le POURQUOI, toujours affiché. Ces signaux se
+                        trompent parfois ; un constat qu'on ne peut pas
+                        contester est un constat qu'on finit par ignorer. */}
+                    <p className="text-[11px] text-[var(--color-mute)] mt-0.5 leading-relaxed">
+                      {s.detail}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {domainesDns.domaines?.length > 0 && (
+              <div className="table-scroll max-h-72 overflow-y-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left text-[11px] uppercase tracking-wide text-[var(--color-mute)] border-b border-[var(--color-line)]">
+                      <th className="pb-1.5 font-medium">Domaine</th>
+                      <th className="pb-1.5 font-medium">Catégorie</th>
+                      <th className="pb-1.5 font-medium text-right">Requêtes</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--color-line)]">
+                    {domainesDns.domaines.map((d) => (
+                      <tr key={d.domaine}>
+                        <td className="py-1.5 font-[var(--font-mono)] text-[12px]">
+                          {d.domaine}
+                        </td>
+                        <td className="py-1.5 text-[var(--color-mute)]">
+                          {d.categorie || "—"}
+                        </td>
+                        <td className="py-1.5 text-right tabular-nums text-[var(--color-mute)]">
+                          {Number(d.compteur).toLocaleString("fr-FR")}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <p className="text-[11px] text-[var(--color-mute)] mt-2 leading-relaxed">
+              Relevé par le résolveur du site. Seul le domaine est conservé, jamais
+              l'adresse complète, et aucune heure de requête n'est enregistrée : c'est
+              un relevé d'usage, pas un historique de navigation.
             </p>
           </div>
         )}

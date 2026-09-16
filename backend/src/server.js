@@ -24,8 +24,10 @@ const scanRoutes = require("./routes/scan");
 const authRoutes = require("./routes/auth");
 const { requireAuth } = require("./middleware/authMiddleware");
 const monitoringService = require("./services/monitoringService");
+const netflowService = require("./services/netflowService");
 const { evaluerChargeDepuisPush } = require("./services/monitoringService");
 const { recevoirInventaire } = require("./services/inventairePosteService");
+const { recevoirReleves } = require("./services/observationDnsDepot");
 const db = require("./db");
 const sitesRoutes = require("./routes/sites");
 const rapportsRoutes = require("./routes/rapports");
@@ -743,6 +745,96 @@ app.post("/api/agent/push", async (req, res) => {
  * autre poste du même site. Il ne peut RIEN lire — ce jeton n'ouvre
  * aucune route de lecture.
  */
+/**
+ * GET /api/agent/observation-dns?id_site=1
+ * L'agent demande si ce site journalise les requêtes.
+ *
+ * LA DÉCISION VIT ICI, DANS LA BASE, ET NULLE PART AILLEURS. Elle
+ * pourrait être un réglage du fichier de configuration de chaque agent —
+ * ce serait plus simple, et ce serait une faute : on découvrirait des
+ * mois plus tard qu'un site journalise encore parce que personne n'a
+ * pensé à éditer son fichier. Un interrupteur qu'on ne peut pas voir de
+ * l'extérieur est un interrupteur qui reste allumé.
+ */
+app.get("/api/agent/observation-dns", async (req, res) => {
+  const idSite = Number(req.query.id_site);
+  const header = req.headers.authorization;
+  if (!idSite || !header || !header.startsWith("Bearer ")) {
+    return res.status(400).json({ error: "id_site et jeton d'agent requis" });
+  }
+
+  try {
+    const [rows] = await db.query(
+      "SELECT agent_token, observation_dns FROM SITE WHERE id_site = ?",
+      [idSite]
+    );
+    if (!rows[0] || rows[0].agent_token !== header.slice(7)) {
+      return res.status(403).json({ error: "Token d'agent invalide pour ce site" });
+    }
+    res.json({ active: Boolean(rows[0].observation_dns) });
+  } catch (err) {
+    // Colonne absente (migration 2026-09-14 non passée) : on répond
+    // « éteint ». Le repli d'une fonction d'observation doit toujours
+    // être l'inaction, jamais la collecte.
+    if (/Unknown column|doesn't exist/i.test(err.message)) return res.json({ active: false });
+    console.error("Lecture de l'observation DNS impossible:", err.message);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+/**
+ * POST /api/agent/observations-dns
+ * Le relevé agrégé des domaines contactés.
+ *
+ * CE QUI ARRIVE ICI EST DÉJÀ RÉDUIT : un domaine enregistrable, un
+ * compteur, par machine. L'agrégation a eu lieu sur l'agent, et le
+ * journal complet n'a pas quitté la machine qui l'a produit. Le serveur
+ * ne reçoit donc jamais de quoi reconstituer une navigation — même s'il
+ * le voulait, même s'il était compromis.
+ *
+ * Le serveur REVÉRIFIE que le site est bien activé. Un agent resté
+ * allumé après une désactivation, ou un agent d'une version antérieure,
+ * ne doit pas pouvoir continuer d'alimenter la base.
+ */
+app.post("/api/agent/observations-dns", async (req, res) => {
+  const { id_site, releves } = req.body || {};
+  const header = req.headers.authorization;
+
+  if (!id_site || !Array.isArray(releves)) {
+    return res.status(400).json({ error: "id_site et releves (tableau) sont requis" });
+  }
+  if (!header || !header.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Token d'agent manquant" });
+  }
+
+  try {
+    const [rows] = await db.query(
+      "SELECT agent_token, observation_dns FROM SITE WHERE id_site = ?",
+      [id_site]
+    );
+    if (!rows[0] || rows[0].agent_token !== header.slice(7)) {
+      return res.status(403).json({ error: "Token d'agent invalide pour ce site" });
+    }
+    if (!rows[0].observation_dns) {
+      return res.status(409).json({
+        error: "L'observation des domaines n'est pas activée sur ce site",
+        aide: "Rien n'a été enregistré. L'agent cessera d'envoyer au prochain cycle.",
+      });
+    }
+
+    res.json(await recevoirReleves(id_site, releves));
+  } catch (err) {
+    if (/Unknown column|doesn't exist/i.test(err.message)) {
+      return res.status(503).json({
+        error: "L'observation des domaines n'est pas installée sur cette base",
+        aide: "node tools\\appliquer-migrations.js",
+      });
+    }
+    console.error("Erreur observations DNS:", err);
+    res.status(500).json({ error: "Erreur serveur pendant la réception des observations" });
+  }
+});
+
 app.post("/api/agent/inventaire-poste", async (req, res) => {
   const { id_site, adresse_ip } = req.body || {};
 
@@ -901,4 +993,12 @@ const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`NetSecureManager backend démarré sur le port ${PORT}`);
   monitoringService.start();
+
+  /* ── COLLECTEUR NETFLOW ──
+     Éteint tant que NETFLOW_PORT n'est pas renseigné : ouvrir un port
+     UDP est un acte d'exploitation, il ne doit pas arriver par surprise
+     à la mise à jour. Le service dit lui-même ce qu'il écoute et ce
+     qu'il reste à configurer sur le routeur. Son échec éventuel ne
+     concerne que lui — voir netflowService.js. */
+  netflowService.demarrer();
 });

@@ -44,6 +44,101 @@ const { detecterReseaux } = require("./reseauxLocauxService");
 /** Combien d'adresses libres on cite en exemple. */
 const EXEMPLES_LIBRES = 24;
 
+/* ═══════════════════════════════════════════════════════════════════════
+   LES ADRESSES LIBRES, EN INTERVALLES PLUTÔT QU'UNE PAR UNE
+
+   POURQUOI LA LISTE PLATE NE RÉPONDAIT PAS À LA QUESTION.
+
+   L'écran citait vingt-quatre adresses disponibles, les unes après les
+   autres. Cela répond à « donne-moi UNE adresse », et à rien d'autre. Or
+   les vraies questions d'un exploitant devant un plan d'adressage sont :
+
+     « où ai-je encore de la place pour dix serveurs d'affilée ? »
+     « ce /23 est-il occupé de façon tassée, ou troué partout ? »
+     « où commence la zone que je peux réserver au Wi-Fi invité ? »
+
+   Vingt-quatre adresses isolées ne répondent à aucune des trois. Pire :
+   sur un réseau à moitié plein, elles viennent toutes du même trou — ce
+   qui laisse croire qu'il n'y a de place qu'à cet endroit.
+
+   UN INTERVALLE RÉPOND AUX TROIS D'UN COUP : « 192.168.1.48 →
+   192.168.1.99, 52 adresses ». On voit la place, sa taille, et où elle
+   commence.
+
+   POURQUOI ON NE CONSTRUIT PAS LA LISTE COMPLÈTE. Un /16 compte 65 534
+   adresses attribuables. On parcourt la plage une fois — c'est
+   instantané — mais on ne RETIENT que les intervalles, dont le nombre
+   est borné. Au-delà, on dit combien il en reste plutôt que de les
+   envoyer : un tableau de plusieurs milliers de lignes a déjà fait
+   tomber ce serveur une fois.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** Nombre d'intervalles renvoyés au plus. Au-delà, on compte. */
+const MAX_INTERVALLES = 60;
+
+/**
+ * Au-delà de cette taille, on ne calcule plus les intervalles.
+ *
+ * Le parcours resterait rapide, mais une plage démesurée vient toujours
+ * d'une faute de saisie (« 10.0.0.0/8 » pour « 10.0.0.0/24 »), et le
+ * produit refuse déjà de la scanner. Il serait incohérent de la
+ * cartographier ici.
+ */
+const MAX_ADRESSES_PARCOURUES = 100_000;
+
+/**
+ * Regroupe les adresses libres en intervalles contigus.
+ *
+ * @param {object} sousReseau   résultat de cidrSubnet()
+ * @param {Set<string>} prises  adresses occupées ou réservées
+ * @param {function} estReservee  (ip) => bool, pour les .0 et .255 intérieurs
+ * @returns {{intervalles: Array, tronques: number}|null} null si trop large
+ */
+function intervallesLibres(sousReseau, prises, estReservee) {
+  const debut = toLong(sousReseau.firstAddress);
+  const fin = toLong(sousReseau.lastAddress);
+
+  if (fin - debut + 1 > MAX_ADRESSES_PARCOURUES) return null;
+
+  const intervalles = [];
+  let courantDebut = null;
+  let courantFin = null;
+  let tronques = 0;
+
+  /** Referme l'intervalle en cours, s'il y en a un. */
+  const fermer = () => {
+    if (courantDebut === null) return;
+    if (intervalles.length < MAX_INTERVALLES) {
+      intervalles.push({
+        debut: fromLong(courantDebut >>> 0),
+        fin: fromLong(courantFin >>> 0),
+        nb: courantFin - courantDebut + 1,
+      });
+    } else {
+      tronques++;
+    }
+    courantDebut = null;
+    courantFin = null;
+  };
+
+  for (let n = debut; n <= fin; n++) {
+    const a = fromLong(n >>> 0);
+    /* EXACTEMENT le même critère que `libres_exemples` : ne jamais
+       proposer une adresse que le balayage n'ira pas voir. Deux écrans du
+       même logiciel qui se contrediraient là-dessus seraient pires que
+       pas d'écran du tout. */
+    if (!prises.has(a) && !estReservee(a)) {
+      if (courantDebut === null) courantDebut = n;
+      courantFin = n;
+    } else {
+      fermer();
+    }
+  }
+  fermer();
+
+  return { intervalles, tronques };
+}
+
 /**
  * Nombre d'adresses attribuables à une machine.
  * /31 et /32 sont des cas à part : ils n'ont ni réseau ni diffusion à
@@ -210,6 +305,12 @@ async function planDUnePlage(idSite, cidr) {
     }
   }
 
+  /* Les intervalles sont calculés APRÈS `prises`, qui contient à ce
+     stade les occupées, les adresses du serveur et les réservées de
+     norme. Le même ensemble sert donc aux deux vues — elles ne peuvent
+     pas diverger. */
+  const groupes = intervallesLibres(sousReseau, prises, estOctetReserve);
+
   return {
     cidr,
     prefixe,
@@ -228,6 +329,27 @@ async function planDUnePlage(idSite, cidr) {
     reservees,
     libres_exemples: exemples,
     libres_tronquees: libresTotal > exemples.length,
+
+    /* ── LA PLACE DISPONIBLE, TELLE QU'ON LA CHERCHE ──
+
+       `libres_intervalles` répond à « où ai-je de la place, et
+       combien ? » ; `libres_exemples` répond à « donne-moi une adresse
+       pour cette imprimante ». Deux questions, deux formes, les deux
+       calculées sur le même ensemble.
+
+       `null` quand la plage est trop large pour être parcourue : c'est
+       une absence de calcul, pas une absence de place, et l'interface
+       doit pouvoir faire la différence. */
+    libres_intervalles: groupes ? groupes.intervalles : null,
+    libres_intervalles_tronques: groupes ? groupes.tronques : 0,
+    /* Le plus grand bloc d'un seul tenant. C'est le chiffre qui décide
+       si l'on peut encore réserver une zone — un réseau avec 200
+       adresses libres éparpillées une par une est PLEIN pour qui veut
+       poser dix serveurs consécutifs, et rien dans les trois compteurs
+       ne le disait. */
+    plus_grand_bloc_libre: groupes
+      ? groupes.intervalles.reduce((max, i) => Math.max(max, i.nb), 0)
+      : null,
 
     // La limite, écrite dans la réponse et non reléguée à une note de bas
     // de page : c'est elle qui empêche de lire ce tableau pour ce qu'il
@@ -262,4 +384,12 @@ async function planDuSite(idSite) {
   return plans;
 }
 
-module.exports = { planDUnePlage, planDuSite, nbAttribuables, nbIntermediairesReservees };
+module.exports = {
+  planDUnePlage,
+  planDuSite,
+  nbAttribuables,
+  nbIntermediairesReservees,
+  // Exposé pour les tests : logique pure, sans base ni réseau.
+  intervallesLibres,
+  MAX_INTERVALLES,
+};

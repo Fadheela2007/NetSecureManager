@@ -8,6 +8,27 @@
  * remonté à la plateforme vient de `dnsmasq --stats`, qui ne donne que
  * des totaux.
  *
+ * ─────────────────────────────────────────────────────────────────────
+ * L'EXCEPTION, ET CE QUI L'ENCADRE (14 septembre 2026)
+ *
+ * L'observation des domaines contactés a besoin de ce journal. La
+ * décision ci-dessus n'est pas annulée : elle reste le comportement par
+ * défaut, et l'exception est bornée par quatre choses.
+ *
+ *   1. Elle s'active site par site, depuis la plateforme, et vaut NON
+ *      tant que personne ne l'a dit.
+ *   2. Le journal est lu, agrégé, puis EFFACÉ par `journalRequetes()`.
+ *      Il ne s'accumule pas sur le disque de l'agent.
+ *   3. Ce qui part vers la plateforme n'est pas le journal mais un
+ *      relevé : un domaine, un compteur. Ni heure, ni nom complet.
+ *   4. `log-queries` vit dans SON PROPRE fichier de configuration, pas
+ *      dans celui du blocage. Le couper ne touche pas au filtrage, et
+ *      un bogue du filtrage ne peut pas rallumer le journal.
+ *
+ * Ce qui subsiste sur cette machine entre deux relevés est donc au pire
+ * quelques minutes de journal. C'est le prix de la fonction, il est dit,
+ * et il n'est pas payé par les sites qui ne l'ont pas demandée.
+ *
  * Prérequis non logiciels, à traiter chez le client :
  *   1. dnsmasq installé sur la machine de l'agent ;
  *   2. le DHCP du site distribue l'IP de l'agent comme serveur DNS ;
@@ -24,6 +45,14 @@ const { exec } = require("child_process");
 
 const CHEMIN_CONF =
   process.env.DNSMASQ_CONF || "/etc/dnsmasq.d/netsecuremanager.conf";
+
+/* Fichier SÉPARÉ de celui du blocage, et c'est délibéré : couper
+   l'observation ne doit pas pouvoir toucher au filtrage, et un défaut du
+   filtrage ne doit pas pouvoir rallumer l'observation. Deux fonctions,
+   deux fichiers, deux pannes possibles au lieu d'une commune. */
+const CHEMIN_CONF_OBSERVATION =
+  process.env.DNSMASQ_CONF_OBSERVATION ||
+  "/etc/dnsmasq.d/netsecuremanager-observation.conf";
 
 /** Exécute une commande, sans jamais lever. */
 function commande(cmd, timeoutMs = 15000) {
@@ -277,4 +306,90 @@ function ipLocale() {
   return null;
 }
 
-module.exports = { verifierPrerequis, appliquer, retirer, relever, ipLocale, CHEMIN_CONF };
+/**
+ * Allume ou éteint la journalisation des requêtes.
+ *
+ * Retourne `{ change: false }` quand l'état demandé est déjà en place :
+ * sans cette comparaison, chaque cycle de l'agent redémarrerait dnsmasq
+ * et couperait la résolution DNS du site toutes les cinq minutes.
+ *
+ * @param {boolean} actif
+ */
+async function configurerObservation(actif) {
+  if (process.platform === "win32") return { ok: false, raison: "Windows non pris en charge" };
+
+  const present = fs.existsSync(CHEMIN_CONF_OBSERVATION);
+  if (Boolean(actif) === present) return { ok: true, change: false, actif: present };
+
+  try {
+    if (actif) {
+      fs.writeFileSync(
+        CHEMIN_CONF_OBSERVATION,
+        "# Écrit par NetSecureManager — observation des domaines contactés.\n" +
+          "# Activée depuis la page Sites de la plateforme. Retirer ce fichier\n" +
+          "# et redémarrer dnsmasq suffit à revenir au comportement d'origine.\n" +
+          "log-queries\n",
+        { mode: 0o644 }
+      );
+    } else {
+      fs.unlinkSync(CHEMIN_CONF_OBSERVATION);
+    }
+  } catch (err) {
+    return { ok: false, raison: `Écriture impossible : ${err.message}` };
+  }
+
+  const r = await commande("systemctl restart dnsmasq", 60000);
+  if (!r.ok) return { ok: false, raison: r.sortie.slice(0, 200) };
+  return { ok: true, change: true, actif: Boolean(actif) };
+}
+
+/**
+ * Lit les requêtes journalisées, puis EFFACE ce qu'elle vient de lire.
+ *
+ * L'effacement n'est pas du ménage : c'est ce qui empêche la machine de
+ * l'agent de devenir, au fil des jours, le journal de navigation complet
+ * que l'en-tête de ce fichier refuse. Ce qui subsiste entre deux relevés
+ * est au pire l'intervalle d'un cycle.
+ *
+ * `--since` borné à l'intervalle demandé, et `--vacuum-time` ensuite :
+ * on ne supprime que ce qui a été lu, jamais le journal des autres
+ * services de la machine.
+ *
+ * @param {number} minutes  fenêtre à relire
+ * @returns {Promise<{texte:string|null, raison?:string}>}
+ */
+async function journalRequetes(minutes = 6) {
+  if (process.platform === "win32") return { texte: null, raison: "Windows non pris en charge" };
+  if (!fs.existsSync(CHEMIN_CONF_OBSERVATION)) {
+    return { texte: null, raison: "observation non activée sur cet agent" };
+  }
+
+  const fenetre = Math.max(1, Math.min(60, Number(minutes) || 6));
+  const lecture = await commande(
+    `journalctl -u dnsmasq --since "-${fenetre} min" --no-pager 2>/dev/null | grep " query\\[" | tail -50000`,
+    30000
+  );
+  if (!lecture.ok || !lecture.sortie.trim()) return { texte: null, raison: "aucune requête lue" };
+
+  // Purge du journal dnsmasq une fois la lecture faite. En cas d'échec on
+  // n'interrompt rien : un journal non purgé est un problème d'espace
+  // disque, pas une panne de la supervision — mais il doit se voir.
+  const purge = await commande('journalctl --vacuum-time=1s --unit=dnsmasq 2>/dev/null');
+  if (!purge.ok) {
+    console.error("[dnsGuard] Journal dnsmasq non purgé après lecture — vérifiez l'espace disque.");
+  }
+
+  return { texte: lecture.sortie };
+}
+
+module.exports = {
+  verifierPrerequis,
+  appliquer,
+  retirer,
+  relever,
+  ipLocale,
+  configurerObservation,
+  journalRequetes,
+  CHEMIN_CONF,
+  CHEMIN_CONF_OBSERVATION,
+};

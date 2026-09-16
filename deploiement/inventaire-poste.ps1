@@ -82,16 +82,53 @@ $VERSION = "1.0.0-ps"
 # Le journal vit dans ProgramData : lisible par l'administrateur, ecrit
 # par SYSTEM, et il survit au changement d'utilisateur. Sans journal, un
 # script pousse par GPO qui echoue le fait en silence sur 559 postes.
-$dossierJournal = Join-Path $env:ProgramData "NetSecureManager"
-$journal = Join-Path $dossierJournal "inventaire.log"
+#
+# ── AVEC UN REPLI DANS LE DOSSIER DE L'UTILISATEUR ──
+#
+# Ce script ne demande AUCUN droit d'administration : lire le registre
+# des logiciels installes et lister les processus, un utilisateur
+# ordinaire le fait. C'est ce qui permet de le poser en SCRIPT
+# D'OUVERTURE DE SESSION plutot qu'en tache planifiee — la demande la
+# plus facile a obtenir d'un service informatique, parce qu'elle ne
+# donne aucun privilege a personne.
+#
+# Mais un utilisateur ordinaire n'ecrit pas toujours dans ProgramData :
+# selon la strategie du domaine, le dossier peut lui etre ferme. Le
+# journal basculait alors dans le vide silencieusement — et un script
+# qui echoue sans journal sur 559 postes est exactement ce qu'on
+# cherchait a eviter en ecrivant un journal.
+#
+# On verifie donc qu'on peut vraiment ecrire, et sinon on retombe sur le
+# dossier personnel, ou tout utilisateur ecrit par construction.
+function Trouver-DossierJournal {
+    foreach ($base in @($env:ProgramData, $env:LOCALAPPDATA, $env:TEMP)) {
+        if (-not $base) { continue }
+        $candidat = Join-Path $base "NetSecureManager"
+        try {
+            if (-not (Test-Path $candidat)) {
+                New-Item -ItemType Directory -Path $candidat -Force -ErrorAction Stop | Out-Null
+            }
+            # Test d'ecriture reel : un dossier qui existe n'est pas un
+            # dossier ou l'on peut ecrire.
+            $temoin = Join-Path $candidat ".ecriture"
+            Set-Content -Path $temoin -Value "1" -ErrorAction Stop
+            Remove-Item $temoin -Force -ErrorAction SilentlyContinue
+            return $candidat
+        } catch {
+            continue
+        }
+    }
+    return $null
+}
+
+$dossierJournal = Trouver-DossierJournal
+$journal = if ($dossierJournal) { Join-Path $dossierJournal "inventaire.log" } else { $null }
 
 function Ecrire($message) {
     $ligne = "{0}  {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $message
     Write-Host $ligne
+    if (-not $journal) { return }   # aucun dossier accessible : l'ecran suffit
     try {
-        if (-not (Test-Path $dossierJournal)) {
-            New-Item -ItemType Directory -Path $dossierJournal -Force | Out-Null
-        }
         # Rotation simple : au-dela de 1 Mo on repart de zero. Un journal
         # qui grossit sans fin sur 559 postes finit par etre le probleme.
         if ((Test-Path $journal) -and ((Get-Item $journal).Length -gt 1MB)) {

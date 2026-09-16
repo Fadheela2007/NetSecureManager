@@ -147,76 +147,118 @@ function PlanDUnePlage({ plan, ouverte, basculer }) {
           detail={`${plan.taux_occupation} % de la plage`}
         />
         <Chiffre valeur={plan.nb_reservees} libelle="réservées" detail="non attribuables" />
-        <Chiffre valeur={plan.nb_libres} libelle="libres" detail="disponibles" />
+        {/* « DONT N D'AFFILÉE » — le chiffre qui manquait.
+
+            200 adresses libres éparpillées une par une et 200 adresses
+            libres d'un seul tenant s'affichaient exactement pareil. Or
+            le réseau est PLEIN dans le premier cas pour qui veut poser
+            dix serveurs consécutifs, et largement ouvert dans le second. */}
+        <Chiffre
+          valeur={plan.nb_libres}
+          libelle="libres"
+          detail={
+            plan.plus_grand_bloc_libre
+              ? `dont ${plan.plus_grand_bloc_libre.toLocaleString("fr-FR")} d'affilée`
+              : "disponibles"
+          }
+        />
       </div>
 
       <button
         onClick={basculer}
         className="text-xs px-3 py-1.5 rounded-lg border border-[var(--color-line)] text-[var(--color-mute)] hover:border-[var(--color-signal)] hover:text-[var(--color-signal)] transition"
       >
-        {ouverte ? "Masquer le détail" : "Voir le détail des adresses"}
+        {/* L'intitulé dit ce qu'on va VOIR, pas qu'on va « voir plus ».
+            « Détail des adresses » ne laissait pas deviner que la
+            réponse à « où poser la prochaine machine » était derrière. */}
+        {ouverte ? "Masquer les adresses libres" : "Voir les adresses libres"}
       </button>
 
       {ouverte && (
-        <div className="space-y-4 pt-1">
-          {plan.occupees.length > 0 && (
-            <div className="table-scroll">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left text-[11px] uppercase tracking-wide text-[var(--color-mute)] border-b border-[var(--color-line)]">
-                    <th className="pb-2 font-medium">Adresse</th>
-                    <th className="pb-2 font-medium">Équipement</th>
-                    <th className="pb-2 font-medium">Type</th>
-                    <th className="pb-2 font-medium">Pourquoi elle est occupée</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[var(--color-line)]">
-                  {plan.occupees.map((e) => (
-                    <tr key={e.id_equipement}>
-                      <td className="py-2 font-[var(--font-mono)] text-[13px]">
-                        {e.adresse_ip}
-                      </td>
-                      <td className="py-2">
-                        {e.nom || (
-                          <span className="text-[var(--color-mute)]">
-                            {e.fabricant ? `Appareil ${e.fabricant}` : "sans nom"}
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-2 text-[var(--color-mute)]">{e.type || "inconnu"}</td>
-                      {/* LA COLONNE QUI FAIT LA DIFFÉRENCE.
+        <div className="space-y-5 pt-1">
+          {/* ── OÙ IL RESTE DE LA PLACE — EN PREMIER, ET C'EST LE SUJET ──
 
-                          Les autres plateformes montrent un inventaire.
-                          Celle-ci montre l'inventaire ET sa justification :
-                          une ligne contestée se défend en la lisant, au
-                          lieu de se discuter. */}
-                      <td className="py-2 text-[var(--color-mute)] text-xs">
-                        {e.preuve_detail || e.preuve_existence || "preuve antérieure au suivi"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+              Le détail s'ouvrait sur le tableau des adresses ATTRIBUÉES.
+              Sur un site de cent onze machines, il fallait donc faire
+              défiler cent onze lignes pour atteindre ce qu'on était venu
+              chercher : les adresses encore disponibles.
 
-          {/* LES ADRESSES LIBRES SONT DANS LE DÉTAIL, PAS EN TÊTE.
+              L'ordre disait la mauvaise chose. Cet écran s'appelle « plan
+              d'adressage » : on l'ouvre pour savoir où poser la
+              prochaine machine, pas pour relire l'inventaire — qui a son
+              propre écran, fait pour ça.
 
-              Elles occupaient le haut de la carte, avant même le bouton
-              de détail : vingt-quatre pastilles poussaient les trois
-              chiffres — occupées, réservées, libres — hors de vue sur un
-              écran ordinaire.
+              Les intervalles passent donc devant, et le tableau des
+              attribuées descend derrière son propre bouton. */}
+          <div>
+            <p className="text-xs mb-2">Où il reste de la place</p>
 
-              Or ces trois chiffres SONT la carte : ils répondent d'un
-              coup d'œil à « mon réseau est-il plein ? ». La liste des
-              adresses disponibles répond à une autre question, « laquelle
-              je donne à la nouvelle imprimante », qu'on ne se pose qu'au
-              moment de le faire. Elle rejoint donc les deux autres listes
-              d'adresses, derrière le même bouton. */}
+            {plan.libres_intervalles === null ? (
+              /* Pas de calcul n'est pas « pas de place » : la nuance
+                 doit être écrite, sinon une plage démesurée se lirait
+                 comme un réseau plein. */
+              <p className="text-xs text-[var(--color-mute)]">
+                Plage trop large pour être cartographiée adresse par adresse.
+                Découpez-la en plages plus petites — un /24 par VLAN est l'usage.
+              </p>
+            ) : plan.libres_intervalles?.length > 0 ? (
+              <>
+                <ul className="space-y-1">
+                  {plan.libres_intervalles.map((i) => {
+                    const leMeilleur = i.nb === plan.plus_grand_bloc_libre;
+                    return (
+                      <li
+                        key={i.debut}
+                        className={`flex flex-wrap items-baseline justify-between gap-2 rounded-lg px-2.5 py-1.5 border ${
+                          leMeilleur
+                            ? "border-[var(--color-signal)]/40 bg-[var(--color-signal)]/5"
+                            : "border-[var(--color-line)]"
+                        }`}
+                      >
+                        <span className="font-[var(--font-mono)] text-[13px]">
+                          {/* Un intervalle d'une seule adresse ne s'écrit
+                              pas « x → x » : c'est une adresse, et
+                              l'écrire deux fois fait douter du calcul. */}
+                          {i.nb === 1 ? i.debut : `${i.debut} → ${i.fin}`}
+                        </span>
+                        <span
+                          className={`text-xs tabular-nums ${
+                            leMeilleur
+                              ? "text-[var(--color-signal)]"
+                              : "text-[var(--color-mute)]"
+                          }`}
+                        >
+                          {i.nb.toLocaleString("fr-FR")} adresse{i.nb > 1 ? "s" : ""}
+                          {leMeilleur && plan.libres_intervalles.length > 1
+                            ? " — le plus grand bloc"
+                            : ""}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+                {plan.libres_intervalles_tronques > 0 && (
+                  <p className="text-[11px] text-[var(--color-mute)] mt-1.5">
+                    … et {plan.libres_intervalles_tronques.toLocaleString("fr-FR")} autre(s)
+                    intervalle(s) non listé(s).
+                  </p>
+                )}
+              </>
+            ) : (
+              <p className="text-xs text-[var(--color-mute)]">
+                Aucune adresse libre dans cette plage — elle est pleine.
+              </p>
+            )}
+          </div>
+
+          {/* La liste plate répond à une AUTRE question que les
+              intervalles : « laquelle je donne à cette imprimante, là,
+              maintenant ». Elle reste donc, juste en dessous, et elle est
+              copiable telle quelle. */}
           {plan.libres_exemples?.length > 0 && (
             <div>
               <p className="text-xs text-[var(--color-mute)] mb-1.5">
-                Prochaines adresses libres
+                Prochaines adresses libres, à prendre telles quelles
               </p>
               <div className="flex flex-wrap gap-1.5">
                 {plan.libres_exemples.map((a) => (
@@ -249,6 +291,12 @@ function PlanDUnePlage({ plan, ouverte, basculer }) {
               </ul>
             </div>
           )}
+
+          {/* Les attribuées EN DERNIER, et repliées. L'information reste
+              accessible — avec sa colonne de preuve, qui est ce que ce
+              produit a de plus défendable — mais elle ne fait plus écran
+              à ce qu'on vient chercher ici. */}
+          {plan.occupees.length > 0 && <Attribuees occupees={plan.occupees} />}
         </div>
       )}
 
@@ -257,6 +305,69 @@ function PlanDUnePlage({ plan, ouverte, basculer }) {
       <p className="text-[11px] text-[var(--color-mute)] leading-relaxed border-t border-[var(--color-line)] pt-3">
         {plan.avertissement}
       </p>
+    </div>
+  );
+}
+
+/**
+ * Le tableau des adresses attribuées, replié par défaut.
+ *
+ * Son propre état d'ouverture, et non celui du détail : on ouvre le
+ * détail pour voir la place disponible, pas pour relire l'inventaire. Les
+ * deux gestes sont distincts, les deux boutons aussi.
+ */
+function Attribuees({ occupees }) {
+  const [ouvert, setOuvert] = useState(false);
+
+  return (
+    <div>
+      <button
+        onClick={() => setOuvert((o) => !o)}
+        className="text-xs text-[var(--color-mute)] hover:text-[var(--color-ink)] transition"
+      >
+        {ouvert ? "▾" : "▸"} Adresses attribuées ({occupees.length.toLocaleString("fr-FR")})
+      </button>
+
+      {ouvert && (
+        <div className="table-scroll mt-2">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-[11px] uppercase tracking-wide text-[var(--color-mute)] border-b border-[var(--color-line)]">
+                <th className="pb-2 pr-4 font-medium">Adresse</th>
+                <th className="pb-2 pr-4 font-medium">Équipement</th>
+                <th className="pb-2 pr-4 font-medium">Type</th>
+                <th className="pb-2 font-medium">Pourquoi elle est occupée</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[var(--color-line)]">
+              {occupees.map((e) => (
+                <tr key={e.id_equipement}>
+                  <td className="py-2 pr-4 font-[var(--font-mono)] text-[13px]">
+                    {e.adresse_ip}
+                  </td>
+                  <td className="py-2 pr-4">
+                    {e.nom || (
+                      <span className="text-[var(--color-mute)]">
+                        {e.fabricant ? `Appareil ${e.fabricant}` : "sans nom"}
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-2 pr-4 text-[var(--color-mute)]">{e.type || "inconnu"}</td>
+                  {/* LA COLONNE QUI FAIT LA DIFFÉRENCE.
+
+                      Les autres plateformes montrent un inventaire.
+                      Celle-ci montre l'inventaire ET sa justification :
+                      une ligne contestée se défend en la lisant, au lieu
+                      de se discuter. */}
+                  <td className="py-2 text-[var(--color-mute)] text-xs">
+                    {e.preuve_detail || e.preuve_existence || "preuve antérieure au suivi"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
