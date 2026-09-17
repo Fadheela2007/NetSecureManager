@@ -47,6 +47,25 @@ export default function ScanLauncher({ idSite }) {
      minutes sans douter. */
   const [secondes, setSecondes] = useState(0);
 
+  /* ── ET MAINTENANT, L'AVANCEMENT RÉEL ──
+
+     Le compteur de secondes ci-dessus prouve que le temps passe. Il ne
+     dit pas OÙ ON EN EST, et c'est ce qui manquait : devant « 4 min 12 »,
+     personne ne sait s'il reste dix secondes ou dix minutes.
+
+     Le serveur tient désormais ce compte — nombre de machines analysées
+     sur nombre de machines vivantes, plage courante sur nombre de plages
+     — et l'expose par GET /scan/progression. On l'interroge pendant le
+     scan seulement.
+
+     RIEN N'EST INVENTÉ ICI. Si le serveur ne répond pas (version plus
+     ancienne, route absente), la valeur reste nulle et l'écran retombe
+     exactement sur ce qu'il affichait avant : le compteur de secondes.
+     Une barre qui avancerait toute seule pour faire patienter serait
+     pire que pas de barre — elle ferait attendre au lieu de faire
+     chercher. */
+  const [progression, setProgression] = useState(null);
+
   /* ── LE CHAMP EST PRÉ-REMPLI AVEC LA VRAIE PLAGE DU SITE ──
 
      Il ne portait qu'un exemple grisé, « 192.168.1.0/24 ». Recopié tel
@@ -89,8 +108,63 @@ export default function ScanLauncher({ idSite }) {
     return () => clearInterval(minuteur);
   }, [loading]);
 
+  /* Interrogation toutes les deux secondes, et seulement pendant le scan.
+     Deux secondes : assez court pour que la barre vive, assez long pour
+     que trente machines analysées à la minute se voient passer une à une.
+     L'appel ne coûte au serveur qu'une lecture en mémoire. */
+  useEffect(() => {
+    if (loading === null || !idSite) {
+      setProgression(null);
+      return;
+    }
+    let annule = false;
+
+    const lire = () =>
+      axios
+        .get(`${API_URL}/scan/progression`, { params: { id_site: idSite } })
+        .then(({ data }) => {
+          if (!annule) setProgression(data?.connu ? data : null);
+        })
+        // Silencieux : l'avancement est un confort. Une erreur ici ne doit
+        // ni s'afficher ni interrompre le scan, qui tourne côté serveur.
+        .catch(() => {
+          if (!annule) setProgression(null);
+        });
+
+    lire();
+    const minuteur = setInterval(lire, 2000);
+    return () => {
+      annule = true;
+      clearInterval(minuteur);
+    };
+  }, [loading, idSite]);
+
   const duree = (s) =>
     s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${String(s % 60).padStart(2, "0")} s`;
+
+  /**
+   * Ce que fait le serveur en ce moment, en une phrase.
+   *
+   * Chaque étape dit son propre décompte plutôt qu'un « traitement en
+   * cours » générique : « 23 machines sur 73 » se vérifie, et donne une
+   * idée du temps restant qu'aucun pourcentage seul ne donne.
+   */
+  const phrasePhase = (p) => {
+    if (!p) return null;
+    if (p.etape === "balayage") {
+      return p.total > 0
+        ? `Balayage du réseau — ${p.total} adresses à interroger`
+        : "Balayage du réseau";
+    }
+    if (p.etape === "identification") {
+      return `Analyse des machines trouvées — ${p.courant} sur ${p.total}`;
+    }
+    if (p.etape === "enregistrement") {
+      return `Enregistrement — ${p.total} équipement(s)`;
+    }
+    if (p.etape === "termine") return "Terminé";
+    return "Préparation…";
+  };
 
   /**
    * Propose les plages déduites des interfaces du serveur.
@@ -206,6 +280,66 @@ export default function ScanLauncher({ idSite }) {
           {loading === "plage" ? "Scan en cours..." : "Scanner cette plage"}
         </button>
       </form>
+
+      {/* ══ LA BARRE D'AVANCEMENT ══
+          Affichée seulement quand le serveur a répondu. Le pourcentage
+          est calculé sur des comptes réels : machines analysées sur
+          machines vivantes, pondéré par les plages restantes. Il n'avance
+          donc pas pendant qu'il ne se passe rien — et c'est voulu : une
+          barre bloquée est une information, elle dit d'aller regarder. */}
+      {loading !== null && progression && (
+        <div style={{ marginTop: "0.75rem" }}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "baseline",
+              gap: "0.75rem",
+              marginBottom: "0.35rem",
+            }}
+          >
+            <span style={{ fontSize: "0.85rem" }}>{phrasePhase(progression)}</span>
+            <strong style={{ fontSize: "0.95rem", fontVariantNumeric: "tabular-nums" }}>
+              {progression.pourcentage} %
+            </strong>
+          </div>
+
+          <div
+            role="progressbar"
+            aria-valuenow={progression.pourcentage}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            style={{
+              height: "8px",
+              borderRadius: "999px",
+              background: "var(--color-surface-2)",
+              border: "1px solid var(--color-line)",
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                width: `${progression.pourcentage}%`,
+                height: "100%",
+                background: "var(--color-signal)",
+                /* La transition lisse le saut entre deux interrogations :
+                   sans elle, la barre avance par à-coups de deux secondes
+                   et donne l'impression d'un écran qui rame. */
+                transition: "width 0.5s ease-out",
+              }}
+            />
+          </div>
+
+          {/* La plage en cours n'est dite que s'il y en a plusieurs : sur
+              un scan de plage unique, « plage 1 sur 1 » n'apprend rien. */}
+          {progression.plages_total > 1 && (
+            <p className="aide" style={{ marginTop: "0.35rem" }}>
+              Plage {progression.plage} sur {progression.plages_total}
+              {progression.cidr && ` — ${progression.cidr}`}
+            </p>
+          )}
+        </div>
+      )}
 
       {loading !== null && (
         <p className="aide">

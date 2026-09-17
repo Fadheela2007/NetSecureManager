@@ -33,6 +33,23 @@ function formaterDebit(kbps) {
   return `${n.toFixed(1)} kbit/s`;
 }
 
+/**
+ * Un temps de réponse, à l'échelle qui se lit.
+ *
+ * Trois décimales sur un réseau local seraient du bruit : la mesure vient
+ * d'un ping, dont la précision est de l'ordre de la milliseconde. En
+ * dessous de 10 ms on garde deux décimales — c'est là que se lit la
+ * différence entre un poste filaire et un poste en Wi-Fi.
+ */
+function formaterLatence(ms) {
+  if (ms === null || ms === undefined) return "—";
+  const n = Number(ms);
+  if (!Number.isFinite(n)) return "—";
+  if (n >= 100) return `${Math.round(n)} ms`;
+  if (n >= 10) return `${n.toFixed(1)} ms`;
+  return `${n.toFixed(2)} ms`;
+}
+
 /** Total entrant + sortant, en tolérant qu'un des deux sens soit NULL. */
 function cumul(a, b) {
   if (a === null && b === null) return null;
@@ -111,6 +128,168 @@ function useLargeurObservee() {
   return [attacher, largeur];
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+   LA COUVERTURE DE LA MESURE
+
+   CE QUE CE BLOC REMPLACE. Une phrase : « 12 équipements mesurés sur
+   182 ». Elle était exacte et laissait la question entière — pourquoi
+   pas les 170 autres, et lesquels ?
+
+   LES OMETTRE EN SILENCE ET LEUR AFFICHER UN ZÉRO SONT DEUX FAUTES
+   SYMÉTRIQUES. Un zéro se lit « cette machine ne consomme rien » ; la
+   vérité est « rien n'a pu être mesuré ». Ces appareils sont donc
+   NOMMÉS, avec la raison, et sans aucune valeur en face.
+
+   C'est aussi ce qui protège le produit : un client qui connaît son
+   réseau voit d'abord ce qui manque. Qu'il trouve la réponse à l'écran
+   plutôt qu'un vide fait la différence entre « l'outil ne sait pas les
+   voir » et « mon parc ne les expose pas ».
+   ═══════════════════════════════════════════════════════════════════════ */
+
+const RAISONS = {
+  port_partage: {
+    court: "port partagé",
+    long:
+      "plusieurs machines vues sur le même port du commutateur — un switch " +
+      "non administrable, un répéteur ou une borne WiFi s'interpose. Le " +
+      "compteur du port existe mais mélange plusieurs machines.",
+  },
+  aucune_source: {
+    court: "aucune source",
+    long:
+      "ni compteur SNMP sur l'appareil, ni port de commutateur administrable " +
+      "connu. WiFi, ou branché derrière du matériel qui ne déclare rien.",
+  },
+};
+
+function LigneCategorie({ couleur, libelle, valeur, total, precision }) {
+  if (!valeur) return null;
+  const part = total > 0 ? Math.round((valeur / total) * 100) : 0;
+  return (
+    <div className="flex items-baseline gap-2 text-sm">
+      <span className="w-2 h-2 rounded-full shrink-0" style={{ background: couleur }} />
+      <span className="text-[var(--color-ink)] tabular-nums font-medium">{valeur}</span>
+      <span className="text-[var(--color-mute)]">{libelle}</span>
+      <span className="text-[var(--color-mute)] text-xs">({part} %)</span>
+      {precision && (
+        <span className="text-[var(--color-mute)] text-xs hidden md:inline">
+          — {precision}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function Couverture({ couverture }) {
+  const [voirListe, setVoirListe] = useState(false);
+  const c = couverture.categories;
+  const total = couverture.equipements || 0;
+  const liste = couverture.non_mesurables || [];
+
+  return (
+    <div className="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-4 py-3">
+      <p className="text-sm text-[var(--color-mute)]">
+        <span className="text-[var(--color-ink)] font-medium">
+          {couverture.avec_mesure} équipement{couverture.avec_mesure > 1 ? "s" : ""} mesuré
+          {couverture.avec_mesure > 1 ? "s" : ""} sur {total}.
+        </span>{" "}
+        Le total et la courbe ci-dessus ne portent que sur ceux-là.
+      </p>
+
+      {c && (
+        <div className="mt-3 space-y-1.5">
+          <LigneCategorie
+            couleur="var(--color-ok)"
+            valeur={c.direct}
+            total={total}
+            libelle="mesurés en direct"
+            precision="compteur SNMP de l'appareil lui-même"
+          />
+          <LigneCategorie
+            couleur="var(--color-signal)"
+            valeur={c.par_port}
+            total={total}
+            libelle="mesurés par le port de leur commutateur"
+            precision="seuls sur leur port, le compteur leur appartient"
+          />
+          <LigneCategorie
+            couleur="var(--color-warn)"
+            valeur={c.port_partage}
+            total={total}
+            libelle="sur un port partagé"
+            precision={RAISONS.port_partage.court}
+          />
+          <LigneCategorie
+            couleur="var(--color-mute)"
+            valeur={c.aucune_source}
+            total={total}
+            libelle="sans aucune source de mesure"
+            precision="ni SNMP, ni port de commutateur connu"
+          />
+        </div>
+      )}
+
+      {liste.length > 0 && (
+        <>
+          <button
+            onClick={() => setVoirListe((v) => !v)}
+            className="mt-3 text-sm text-[var(--color-mute)] hover:text-[var(--color-ink)] transition cible-tactile"
+          >
+            {voirListe
+              ? "Masquer le détail"
+              : `Voir les ${liste.length} appareil${liste.length > 1 ? "s" : ""} non mesurable${
+                  liste.length > 1 ? "s" : ""
+                }`}
+          </button>
+
+          {voirListe && (
+            <div className="mt-3 border-t border-[var(--color-line)] pt-3">
+              {/* La phrase qui empêche la mauvaise lecture. Elle est
+                  écrite ici, au-dessus de la liste, et pas en note de bas
+                  de page : c'est au moment de lire les noms qu'on risque
+                  de croire à un défaut de l'outil. */}
+              <p className="text-xs text-[var(--color-mute)] mb-2 leading-relaxed">
+                Ces appareils sont supervisés — état, alertes, disponibilité —
+                mais leur débit n'est mesurable par aucune source connue. Aucune
+                valeur ne leur est attribuée : un zéro se lirait « aucun trafic »,
+                ce qui serait faux.
+              </p>
+              <div className="max-h-72 overflow-y-auto">
+                <table className="w-full text-xs">
+                  <tbody>
+                    {liste.map((eq) => (
+                      <tr
+                        key={eq.id_equipement}
+                        className="border-b border-[var(--color-line)] last:border-0"
+                      >
+                        <td className="py-1.5 pr-3 text-[var(--color-ink)] truncate max-w-[14rem]">
+                          {eq.nom || "—"}
+                        </td>
+                        <td className="py-1.5 pr-3 font-[var(--font-mono)] text-[var(--color-mute)] whitespace-nowrap">
+                          {eq.adresse_ip}
+                        </td>
+                        <td className="py-1.5 pr-3 text-[var(--color-mute)] hidden sm:table-cell">
+                          {eq.type_equipement || "non classé"}
+                        </td>
+                        <td
+                          className="py-1.5 text-[var(--color-mute)] text-right"
+                          title={RAISONS[eq.raison]?.long}
+                        >
+                          {RAISONS[eq.raison]?.court || eq.raison}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function BandePassantePage({ idSite }) {
   const [heures, setHeures] = useState(24);
   // Horodatage du dernier rafraîchissement réussi : sur un écran qui se
@@ -159,6 +338,15 @@ export default function BandePassantePage({ idSite }) {
   const [conteneurGlobal, largeurGlobale] = useLargeurObservee();
   const [historique, setHistorique] = useState(null);
 
+  /* ── QUALITÉ DU RÉSEAU ──
+     La latence est la seule mesure que ce parc produise pour presque
+     toutes ses machines : elle ne demande ni SNMP, ni commutateur
+     administrable, ni NetFlow. Elle vit sur cette page parce qu'elle
+     répond à la question voisine — non pas « combien ça consomme »,
+     mais « est-ce que ça répond bien ». */
+  const [conteneurQualite, largeurQualite] = useLargeurObservee();
+  const [qualite, setQualite] = useState(null);
+
   /* ── CHARGEMENT, PUIS RAFRAÎCHISSEMENT SILENCIEUX ──
 
      Le premier chargement affiche « Chargement… » : l'écran est vide, il
@@ -192,10 +380,16 @@ export default function BandePassantePage({ idSite }) {
         axios
           .get(`${API_URL}/bande-passante/historique`, { params: { heures } })
           .catch(() => null),
+        /* Troisième appel, facultatif au même titre que l'historique : sur
+           une version du serveur qui n'a pas encore cette route, on reçoit
+           un 404, la section de qualité ne s'affiche pas, et le reste de
+           la page fonctionne exactement comme avant. */
+        axios.get(`${API_URL}/reseau/qualite`, { params: { heures } }).catch(() => null),
       ])
-        .then(([reponseClassement, reponseHistorique]) => {
+        .then(([reponseClassement, reponseHistorique, reponseQualite]) => {
           const data = reponseClassement.data;
           setHistorique(reponseHistorique?.data ?? null);
+          setQualite(reponseQualite?.data ?? null);
           setDonnees(data);
           setMaj(new Date());
           setErreur(null);
@@ -293,6 +487,20 @@ export default function BandePassantePage({ idSite }) {
       sortant: p.sortant === null ? null : Number(p.sortant),
     }));
   }, [historique, heures]);
+
+  /* Deux séries : la moyenne du parc, et la plus mauvaise mesure de la
+     tranche. La moyenne seule lisse tout — un poste à 400 ms noyé dans
+     soixante-dix postes à 2 ms ne se voit pas. Le pic, lui, le montre :
+     c'est l'écart entre les deux courbes qui se lit, pas leur niveau. */
+  const courbeQualite = useMemo(() => {
+    if (!qualite?.points) return [];
+    return qualite.points.map((p) => ({
+      t: dateCourte(p.instant, heures),
+      moyenne: p.moyenne === null ? null : Number(p.moyenne),
+      pic: p.pic === null ? null : Number(p.pic),
+      equipements: Number(p.equipements || 0),
+    }));
+  }, [qualite, heures]);
 
   const selectionne = classement.find((r) => r.id_equipement === selection);
   const couverture = donnees?.couverture;
@@ -505,16 +713,218 @@ export default function BandePassantePage({ idSite }) {
         </div>
       )}
 
-      {couverture && couverture.avec_mesure < couverture.equipements && (
-        <div className="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-4 py-3 text-sm text-[var(--color-mute)]">
-          <span className="text-[var(--color-ink)] font-medium">
-            {couverture.avec_mesure} équipement{couverture.avec_mesure > 1 ? "s" : ""} mesuré
-            {couverture.avec_mesure > 1 ? "s" : ""} sur {couverture.equipements}.
-          </span>{" "}
-          Le débit se lit en SNMP : les équipements qui ne l'exposent pas
-          (postes Windows par défaut, matériel grand public) ne peuvent pas
-          être classés. Ils restent supervisés par ailleurs.
+      {/* ══════════════════════════════════════════════════════════════
+          QUALITÉ DU RÉSEAU — LE GRAPHE QUI, LUI, EST PLEIN
+
+          Le débit dépend du SNMP, et sur ce parc douze machines y
+          répondent : la courbe du dessus est vraie, mais étroite, et le
+          bloc de couverture le dit sans détour.
+
+          Le temps de réponse, lui, est mesuré à chaque cycle pour chaque
+          machine qui répond au ping — sans rien installer, sans
+          commutateur administrable, sans communauté SNMP à demander. Il
+          ne dit pas combien de données circulent ; il dit si le réseau
+          répond bien, ce qui est la première question qu'on se pose en
+          ouvrant une supervision.
+
+          L'EFFECTIF EST AFFICHÉ À CÔTÉ DE LA MOYENNE, TOUJOURS. Les
+          postes qui bloquent l'ICMP — Windows le fait par défaut —
+          n'entrent pas dans ce calcul, même en étant parfaitement en
+          ligne. Écrire « 12 ms » sans dire sur combien de machines
+          laisserait croire à une mesure du parc entier.
+          ══════════════════════════════════════════════════════════════ */}
+      {qualite && (
+        <div className="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-4 py-4">
+          <div className="flex flex-wrap items-baseline justify-between gap-2 mb-1">
+            <h2 className="text-sm font-medium text-[var(--color-ink)]">
+              Qualité du réseau — temps de réponse
+            </h2>
+            <span className="text-xs text-[var(--color-mute)]">
+              {qualite.couverture.avec_latence} des {qualite.couverture.equipements}{" "}
+              machines répondent au ping et alimentent cette courbe
+              {qualite.pas_minutes > 1 && ` — un point toutes les ${qualite.pas_minutes} min`}
+            </span>
+          </div>
+
+          <p className="text-xs text-[var(--color-mute)] mb-3">
+            Les autres ne sont pas absentes : elles bloquent l'ICMP, et leur
+            présence est prouvée autrement (port TCP, table ARP).
+          </p>
+
+          {courbeQualite.length < 2 ? (
+            <p className="text-xs text-[var(--color-mute)]">
+              Pas encore assez de mesures sur cette période. La latence est
+              enregistrée à chaque cycle de supervision : la courbe démarre
+              après quelques minutes de fonctionnement du serveur.
+            </p>
+          ) : (
+            <>
+              {/* Trois chiffres, et pas un de plus. La moyenne pondérée par
+                  le nombre de mesures — une tranche de nuit à deux relevés
+                  ne pèse pas autant qu'une tranche de journée à trois
+                  cents —, la pire mesure de la période avec son heure, et
+                  le nombre de machines qui répondaient au même moment. */}
+              <div className="flex flex-wrap gap-6 mb-3">
+                <div>
+                  <p className="text-[11px] uppercase tracking-wide text-[var(--color-mute)]">
+                    Moyenne
+                  </p>
+                  <p className="text-lg font-semibold text-[var(--color-ink)] tabular-nums">
+                    {formaterLatence(qualite.resume.moyenne)}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[11px] uppercase tracking-wide text-[var(--color-mute)]">
+                    Pire mesure
+                  </p>
+                  <p className="text-lg font-semibold text-[var(--color-warn)] tabular-nums">
+                    {formaterLatence(qualite.resume.pic)}
+                    {qualite.resume.instant_pic && (
+                      <span className="text-xs font-normal text-[var(--color-mute)] ml-1.5">
+                        à {dateCourte(qualite.resume.instant_pic, heures)}
+                      </span>
+                    )}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[11px] uppercase tracking-wide text-[var(--color-mute)]">
+                    Machines mesurées en même temps
+                  </p>
+                  <p className="text-lg font-semibold text-[var(--color-ink)] tabular-nums">
+                    {qualite.couverture.simultanees_max}
+                  </p>
+                </div>
+              </div>
+
+              <div ref={conteneurQualite} className="w-full" style={{ minHeight: 200 }}>
+                {largeurQualite > 0 && (
+                  <AreaChart
+                    data={courbeQualite}
+                    width={largeurQualite}
+                    height={200}
+                    margin={{ top: 4, right: 8, bottom: 0, left: 0 }}
+                  >
+                    <defs>
+                      <linearGradient id="grad-qualite-moyenne" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="var(--color-signal)" stopOpacity={0.35} />
+                        <stop offset="100%" stopColor="var(--color-signal)" stopOpacity={0} />
+                      </linearGradient>
+                      <linearGradient id="grad-qualite-pic" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="var(--color-warn)" stopOpacity={0.18} />
+                        <stop offset="100%" stopColor="var(--color-warn)" stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid stroke="var(--color-line)" strokeDasharray="3 3" vertical={false} />
+                    <XAxis
+                      dataKey="t"
+                      tick={{ fontSize: 11, fill: "var(--color-mute)" }}
+                      tickLine={false}
+                      axisLine={false}
+                      minTickGap={24}
+                    />
+                    <YAxis
+                      tick={{ fontSize: 11, fill: "var(--color-mute)" }}
+                      tickLine={false}
+                      axisLine={false}
+                      width={70}
+                      tickFormatter={formaterLatence}
+                    />
+                    <Tooltip
+                      contentStyle={{
+                        background: "var(--color-surface-2)",
+                        border: "1px solid var(--color-line)",
+                        borderRadius: 8,
+                        fontSize: 12,
+                        color: "var(--color-ink)",
+                      }}
+                      formatter={(v, n, entree) => {
+                        if (n === "moyenne") {
+                          const nb = entree?.payload?.equipements;
+                          return [
+                            `${formaterLatence(v)}${nb ? ` sur ${nb} machine(s)` : ""}`,
+                            "Moyenne",
+                          ];
+                        }
+                        return [formaterLatence(v), "Pire mesure"];
+                      }}
+                    />
+                    {/* Le pic est tracé EN PREMIER, donc dessous : la
+                        moyenne, qui est la lecture principale, ne doit pas
+                        disparaître sous l'aplat de l'autre série. */}
+                    <Area
+                      type="monotone"
+                      dataKey="pic"
+                      stroke="var(--color-warn)"
+                      strokeWidth={1}
+                      strokeDasharray="4 3"
+                      fill="url(#grad-qualite-pic)"
+                      connectNulls={false}
+                      dot={false}
+                      isAnimationActive={false}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="moyenne"
+                      stroke="var(--color-signal)"
+                      strokeWidth={2}
+                      fill="url(#grad-qualite-moyenne)"
+                      connectNulls={false}
+                      dot={courbeQualite.length <= 8}
+                      isAnimationActive={false}
+                    />
+                  </AreaChart>
+                )}
+              </div>
+
+              {/* LES PLUS LENTES, ET CE QUE ÇA VEUT DIRE.
+                  Une latence élevée n'est pas une panne : un portable en
+                  Wi-Fi au fond du bâtiment répond en 80 ms sans que rien
+                  ne soit cassé. Ce qui se lit ici, c'est un ÉCART — une
+                  machine dix fois plus lente que ses voisines filaires,
+                  ou une machine habituellement rapide qui ne l'est plus. */}
+              {qualite.pires.length > 0 && (
+                <div className="mt-4 pt-3 border-t border-[var(--color-line)]">
+                  <p className="text-xs font-medium text-[var(--color-ink)] mb-2">
+                    Les plus lentes à répondre
+                  </p>
+                  <div className="space-y-1">
+                    {qualite.pires.slice(0, 5).map((m) => (
+                      <div
+                        key={m.id_equipement}
+                        className="flex items-baseline justify-between gap-3 text-xs"
+                      >
+                        <span className="truncate text-[var(--color-mute)]">
+                          {(m.nom_personnalise || "").trim() ||
+                            (m.nom || "").trim() ||
+                            m.adresse_ip}
+                          <span className="font-[var(--font-mono)] opacity-60 ml-1.5">
+                            {m.adresse_ip}
+                          </span>
+                        </span>
+                        <span className="tabular-nums whitespace-nowrap text-[var(--color-ink)]">
+                          {formaterLatence(m.moyenne)}
+                          <span className="text-[var(--color-mute)] ml-1.5">
+                            pic {formaterLatence(m.pic)} · {m.mesures} mesures
+                          </span>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-[var(--color-mute)] mt-2">
+                    Une latence élevée n'est pas une panne : un poste en Wi-Fi
+                    répond plus lentement qu'un poste filaire, normalement. Ce
+                    qui se regarde, c'est l'écart avec les autres — et son
+                    évolution.
+                  </p>
+                </div>
+              )}
+            </>
+          )}
         </div>
+      )}
+
+      {couverture && couverture.avec_mesure < couverture.equipements && (
+        <Couverture couverture={couverture} />
       )}
 
       {erreur && (

@@ -513,6 +513,124 @@ async function arpComplement(cidr, aliveHostsFromPing, arpEntries = null) {
   return complements.map((e) => ({ ip: e.ip, mac: e.mac, viaArp: true }));
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+   LE BALAYAGE PAR NMAP — POURQUOI IL EST MEILLEUR, ET QUAND IL S'APPLIQUE
+
+   CE QUE LE BALAYAGE MAISON NE PEUT PAS FAIRE. Il envoie un ping ICMP,
+   puis complète en lisant le cache ARP du système. Deux faiblesses
+   structurelles : un poste Windows ne répond pas au ping par défaut, et
+   un cache est un SOUVENIR — il contient des machines parties depuis
+   plusieurs minutes.
+
+   Émettre soi-même une requête ARP réglerait les deux d'un coup : à la
+   couche 2, aucune machine du segment ne peut se taire, et la réponse
+   est du présent, pas du souvenir. Mais forger une trame ARP demande un
+   accès aux paquets bruts, donc des droits d'administrateur et une
+   dépendance native. Node ne le fait pas.
+
+   NMAP, LUI, LE FAIT — ET IL EST DÉJÀ LÀ. Cette plateforme l'appelle
+   depuis longtemps pour l'empreinte de système (voir nmapFingerprint).
+   Le même binaire sait balayer un réseau entier en ARP. Mesuré sur le
+   parc de test : 239 adresses en 2,9 secondes, là où le ping sweep
+   demande plusieurs minutes et rate les postes pare-feutés.
+
+   CE QU'ON LUI DEMANDE, ET CE QU'ON NE LUI DEMANDE PAS.
+
+     -sn   découverte seule : aucun port n'est scanné. Le scan de ports
+           reste le nôtre, ciblé et discret.
+     -n    pas de résolution DNS : la plateforme a son propre nommage à
+           cinq sources, et la résolution de nmap coûterait une seconde
+           et demie pour un résultat moins bon.
+
+   Nmap choisit l'ARP de lui-même quand la cible est sur le segment
+   local ET qu'il a les droits nécessaires. On ne force donc pas `-PR` :
+   sur un site distant il n'aurait aucun sens, et nmap sait mieux que
+   nous ce qui s'applique.
+
+   TROIS REPLIS, ET AUCUN N'INTERROMPT LE SCAN. Nmap absent, nmap sans
+   droits suffisants, nmap qui ne rend rien : dans les trois cas on
+   revient au balayage maison, exactement comme avant. La console dit
+   laquelle des deux méthodes a servi — une mesure dont on ignore la
+   provenance ne vaut pas mieux qu'une supposition.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Lit la sortie de `nmap -sn`. Fonction PURE, donc vérifiable sans réseau.
+ *
+ * Nmap n'imprime que les machines VIVANTES quand on ne lui demande pas
+ * de détail — une adresse absente de la sortie est une adresse muette.
+ * La ligne « MAC Address » n'apparaît que si la découverte a eu lieu en
+ * ARP : sa présence est donc la preuve que nmap a bien travaillé à la
+ * couche 2, et pas en repli TCP faute de droits.
+ */
+function lireBalayageNmap(sortie) {
+  const hotes = [];
+  let courant = null;
+
+  for (const ligne of String(sortie || "").split("\n")) {
+    const rapport = ligne.match(/^Nmap scan report for (?:\S+ \()?(\d+\.\d+\.\d+\.\d+)\)?/);
+    if (rapport) {
+      // Une adresse explicitement annoncée éteinte n'entre pas.
+      if (/\[host down\]/i.test(ligne)) {
+        courant = null;
+        continue;
+      }
+      courant = { ip: rapport[1], latency: null, mac: null };
+      hotes.push(courant);
+      continue;
+    }
+    if (!courant) continue;
+
+    const vivant = ligne.match(/^Host is up(?: \(([\d.]+)s latency\))?/);
+    if (vivant) {
+      courant.latency = vivant[1] ? Math.round(Number(vivant[1]) * 1000) : null;
+      continue;
+    }
+
+    const mac = ligne.match(/^MAC Address: ([0-9A-Fa-f:]{17})/);
+    if (mac) courant.mac = mac[1].toUpperCase();
+  }
+
+  return hotes;
+}
+
+/**
+ * Balaye un réseau avec nmap. Rend `null` — et non un tableau vide — si
+ * nmap n'a pas pu travailler : l'appelant doit distinguer « nmap dit
+ * qu'il n'y a personne » de « nmap n'a rien pu dire », et retomber sur
+ * le balayage maison dans le second cas seulement.
+ */
+function balayageNmap(cidr, nbAdresses) {
+  return new Promise((resolve) => {
+    /* Le délai suit la taille du réseau. Mesure de référence : 239
+       adresses en 2,9 s. On accorde très large — vingt fois la mesure —
+       parce qu'un réseau chargé ralentit nmap, et qu'un délai trop court
+       transformerait un succès lent en repli inutile. */
+    const delaiMs = Math.min(300_000, 20_000 + nbAdresses * 250);
+
+    exec(
+      `nmap -sn -n ${cidr}`,
+      { timeout: delaiMs, maxBuffer: 16 * 1024 * 1024 },
+      (erreur, sortie) => {
+        if (!sortie) return resolve(null);
+        void erreur; // nmap sort en code non nul pour des avertissements bénins
+
+        const hotes = lireBalayageNmap(sortie);
+        if (hotes.length === 0) return resolve(null);
+
+        resolve({
+          hotes,
+          // Vrai si au moins une MAC est remontée : preuve que la
+          // découverte s'est faite en ARP, donc au niveau 2.
+          parArp: hotes.some((h) => h.mac),
+        });
+      }
+    );
+  });
+}
+
+let balayageNmapSignale = false;
+
 /**
  * @param {function} [onProgress]  (etape, courant, total) — appelé pendant
  *   le scan. Sur une plage large, l'identification des machines se compte
@@ -536,14 +654,50 @@ async function scanRange({
 
   const hosts = listHostsFromCidr(cidr);
   avancer("balayage", 0, hosts.length);
-  const aliveHosts = await pingSweep(hosts);
+
+  /* ── LE BALAYAGE : NMAP D'ABORD, LE NÔTRE ENSUITE ──
+     Voir le grand commentaire au-dessus de balayageNmap. `SCAN_BALAYAGE_NMAP=0`
+     revient au balayage maison sans toucher au code. */
+  const macsNmap = new Map();
+  let aliveHosts = null;
+
+  if (process.env.SCAN_BALAYAGE_NMAP !== "0") {
+    const resultat = await balayageNmap(cidr, hosts.length).catch(() => null);
+    if (resultat) {
+      aliveHosts = resultat.hotes.map((h) => ({ ip: h.ip, latency: h.latency }));
+      for (const h of resultat.hotes) if (h.mac) macsNmap.set(h.ip, h.mac);
+
+      if (!balayageNmapSignale) {
+        balayageNmapSignale = true;
+        console.log(
+          `Balayage par nmap : ${resultat.hotes.length} machine(s) vivante(s)` +
+            (resultat.parArp
+              ? " — découvertes en ARP, au niveau 2 : aucune machine du segment ne peut s'y soustraire."
+              : " — sans ARP (droits insuffisants ou site distant) : nmap a sondé en TCP/ICMP.")
+        );
+      }
+    } else if (!balayageNmapSignale) {
+      balayageNmapSignale = true;
+      console.log(
+        "Balayage par nmap indisponible (nmap absent, ou sans résultat) :" +
+          " repli sur le ping + table ARP, comme avant."
+      );
+    }
+  }
+
+  if (!aliveHosts) aliveHosts = await pingSweep(hosts);
 
   // Table ARP lue UNE SEULE FOIS par scan : elle sert à la fois à compléter le
   // ping sweep et à retrouver la MAC de n'importe quel hôte découvert.
   const toutesLesEntreesArp = await readArpTable();
 
-  // Complète avec les appareils vus en ARP mais qui n'ont pas répondu au ping
-  const arpSupplement = await arpComplement(cidr, aliveHosts, toutesLesEntreesArp);
+  /* Le complément par cache ARP n'a de sens QUE derrière le ping sweep.
+     Quand nmap a balayé en ARP, il a déjà interrogé chaque adresse du
+     segment : y ajouter le cache du système ne pourrait qu'introduire
+     des machines parties depuis — exactement les fantômes que ce projet
+     passe son temps à écarter. */
+  const arpSupplement =
+    macsNmap.size > 0 ? [] : await arpComplement(cidr, aliveHosts, toutesLesEntreesArp);
   const tousLesHotes = [...aliveHosts, ...arpSupplement.map((a) => ({ ip: a.ip, latency: null }))];
 
   // Registre OUI chargé UNE fois pour tout le scan : la résolution du
@@ -646,8 +800,14 @@ async function scanRange({
       //
       // MAC inconnue des deux côtés : on refait le travail. Mieux vaut
       // sept secondes qu'une identité recopiée sur la mauvaise machine.
+      /* La MAC vue par nmap prime sur celle du cache ARP : elle vient
+         d'une réponse obtenue à l'instant, là où le cache peut porter
+         l'adresse d'une machine partie depuis. Comparer une identité
+         sur un souvenir ferait réutiliser l'empreinte du poste d'hier
+         pour la caméra d'aujourd'hui — exactement ce que ce contrôle
+         existe pour empêcher. */
       const macActuelle = normaliserMacSimple(
-        (toutesLesEntreesArp.find((a) => a.ip === host.ip) || {}).mac
+        macsNmap.get(host.ip) || (toutesLesEntreesArp.find((a) => a.ip === host.ip) || {}).mac
       );
       const ancien = connus instanceof Map ? connus.get(host.ip) : null;
       const peutReutiliser =
@@ -683,7 +843,8 @@ async function scanRange({
       }
 
       const arpMatch = toutesLesEntreesArp.find((a) => a.ip === host.ip);
-      const mac = arpMatch ? arpMatch.mac : null;
+      // Même règle : la mesure fraîche de nmap avant le souvenir du cache.
+      const mac = macsNmap.get(host.ip) || (arpMatch ? arpMatch.mac : null);
       const parOui = registreOui ? resoudreAvecRegistre(mac, registreOui) : null;
 
       // BANNIÈRE WEB — seulement quand SNMP n'a rien donné.
@@ -827,14 +988,28 @@ async function scanRange({
       // ORDRE DE CONFIANCE :
       //   1. sysName SNMP — le nom que la machine se donne elle-même ;
       //   2. DNS inverse  — le nom que le réseau lui reconnaît ;
-      //   3. NetBIOS      — le nom que le poste annonce lui-même ;
-      //   4. rien.
+      //   3. SMB          — le nom annoncé par le partage de fichiers
+      //                     Windows, avant toute authentification ;
+      //   4. NetBIOS      — le nom que le poste annonce lui-même ;
+      //   5. mDNS         — le nom que l'appareil diffuse ;
+      //   6. rien.
       //
       // Voir services/nomService.js pour le détail. Les sources réseau
       // ne sont interrogées que si SNMP n'a rien donné.
+      /* LA SONDE SMB N'EST LANCÉE QUE SI LE PORT 445 EST OUVERT.
+         Elle nomme les postes Windows où NetBIOS est désactivé — sur ce
+         parc, la majorité. Mais elle ouvre une connexion TCP, donc elle
+         laisse une trace dans le journal du poste, là où NetBIOS et mDNS
+         sont de simples questions en UDP. La lancer sur une adresse dont
+         on sait déjà qu'elle n'écoute pas sur 445 serait du bruit pur :
+         aucune chance de réponse, et une ligne de plus dans les journaux
+         d'un réseau qui n'est pas le nôtre. */
+      const exposeSmb = portsOuverts.some((s) => s.port === 445);
+
       const { nom, source: nomSource } = await resoudreNom(
         host.ip,
-        snmpData ? snmpData.sysName : null
+        snmpData ? snmpData.sysName : null,
+        { smb: exposeSmb }
       );
 
       /* ── QU'EST-CE QUI PROUVE QUE CETTE MACHINE EXISTE ? ──

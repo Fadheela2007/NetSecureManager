@@ -54,6 +54,35 @@ export function nomAffiche(eq) {
   return (eq.nom || "").trim();
 }
 
+/**
+ * D'où vient le nom affiché — phrase lisible, destinée à l'infobulle.
+ *
+ * Chaque source a une fiabilité différente et le dire change la décision
+ * qu'on prend devant l'écran : un nom SNMP est celui que la machine se
+ * donne, un nom DNS a été posé par un administrateur, un nom NetBIOS ou
+ * mDNS est annoncé par l'appareil lui-même. Aucun n'est inventé par la
+ * plateforme — et c'est précisément ce que cette phrase permet de
+ * vérifier ligne par ligne.
+ */
+const ORIGINE_NOM = {
+  snmp: "Nom SNMP — celui que la machine se donne elle-même (sysName).",
+  dns: "DNS inverse — nom enregistré sur le serveur DNS du réseau.",
+  smb: "SMB — nom que la machine annonce sur son partage de fichiers, avant toute authentification.",
+  netbios:
+    "NetBIOS — nom que le poste Windows annonce lui-même sur le port 137.",
+  mdns: "mDNS — nom que l'appareil diffuse lui-même sur le réseau local.",
+};
+
+export function origineDuNom(eq) {
+  if (!eq) return undefined;
+  if ((eq.nom_personnalise || "").trim()) {
+    return eq.nom
+      ? `Nom donné à la main. Nom découvert sur le réseau : ${eq.nom}.`
+      : "Nom donné à la main dans la plateforme.";
+  }
+  return ORIGINE_NOM[eq.nom_source] || "Nom découvert sur le réseau.";
+}
+
 const COLONNES = [
   { cle: "statut", libelle: "Statut", triable: true },
   { cle: "nom", libelle: "Nom", triable: true },
@@ -547,7 +576,16 @@ export default function EquipementsPage({ idSite }) {
                       <td className="py-2.5 pr-4">
                         {nomAffiche(eq) ? (
                           <>
-                            <span>{nomAffiche(eq)}</span>
+                            {/* D'OÙ VIENT CE NOM — en infobulle, pas à
+                                l'écran. La question ne se pose qu'au
+                                moment où l'on doute d'une ligne ; l'écrire
+                                sur chacune des 182 lignes ajouterait du
+                                bruit à 181 endroits pour servir une fois.
+                                Mais il faut qu'elle ait une réponse : un
+                                nom dont on ignore la provenance ne se
+                                vérifie pas, et ce qui ne se vérifie pas
+                                finit par ne plus être cru. */}
+                            <span title={origineDuNom(eq)}>{nomAffiche(eq)}</span>
                             {eq.nom_personnalise && eq.nom && (
                               <span className="block text-xs text-[var(--color-mute)] font-[var(--font-mono)]">
                                 {eq.nom}

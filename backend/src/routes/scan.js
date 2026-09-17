@@ -36,6 +36,7 @@ const { detecterConflits, decrireConflit } = require("../services/conflitIpServi
 const { creerAlerte } = require("../services/monitoringService");
 const { purgerAdressesSansPreuve } = require("../services/inventaireService");
 const { faillesDeLEquipement } = require("../services/faillesService");
+const progressionScan = require("../services/progressionScan");
 const {
   inventaireDeLEquipement,
   enregistrerInventaireSnmp,
@@ -54,6 +55,85 @@ let colonnesVersionSignalees = false;
    par scan — le genre de bruit qui apprend à ne plus lire la console. */
 let inventaireSnmpIndisponible = false;
 let tableCertificatsSignalee = false;
+/* Colonne `premiere_detection`, migration du 16/09. Elle est écrite à
+   CHAQUE insertion d'équipement : sans ce drapeau, une base non migrée
+   ferait échouer l'enregistrement de tout le parc, scan après scan. */
+let premiereDetectionAbsente = false;
+
+/**
+ * La requête d'insertion d'un équipement, avec ou sans
+ * `premiere_detection`.
+ *
+ * ── POURQUOI CETTE COLONNE N'EST PAS DANS LA MISE À JOUR ──
+ *
+ * Elle est écrite à la première insertion et plus jamais touchée. La
+ * recopier dans le ON DUPLICATE KEY UPDATE la remettrait à l'heure du
+ * dernier scan, et « première détection » finirait par vouloir dire
+ * « dernière fois qu'on l'a vue » — le contraire de ce qu'on lit.
+ *
+ * C'est elle, et elle seule, qui permet à un écran de distinguer un
+ * équipement apparu ce matin d'un équipement présent depuis trois
+ * semaines. Sans elle, « nouvel équipement détecté » ne veut rien dire.
+ *
+ * Les paramètres sont IDENTIQUES dans les deux variantes : la colonne est
+ * remplie par NOW(), pas par un marqueur. Le repli ne demande donc aucun
+ * réarrangement de la liste d'arguments — ce qui évite la classe de bug
+ * la plus pénible à retrouver sur une requête à quinze marqueurs.
+ */
+function sqlInsertionEquipement(avecPremiereDetection) {
+  return `INSERT INTO EQUIPEMENT (id_site, id_type, type_source, nom, nom_source,
+                                   adresse_ip, adresse_mac,
+                                   fabricant, fabricant_source, sys_descr, os_detecte,
+                                   statut, derniere_decouverte${
+                                     avecPremiereDetection ? ", premiere_detection" : ""
+                                   },
+                                   preuve_existence, preuve_detail, date_preuve)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW()${
+             avecPremiereDetection ? ", NOW()" : ""
+           }, ?, ?, NOW())
+           ON DUPLICATE KEY UPDATE
+             /* type_source et nom_source sont enregistrés au même titre
+                que la valeur qu'ils expliquent : savoir QUELLE règle a
+                décidé est ce qui permet de défendre une classification
+                devant un client, ou de corriger la bonne règle quand elle
+                se trompe.
+
+                nom = COALESCE(VALUES(nom), nom) et non VALUES(nom) : la
+                résolution de nom passe par le réseau et échoue par
+                intermittence — poste éteint, pare-feu momentané, perte d'un
+                paquet UDP. Écraser franchement effacerait un nom correct au
+                premier scan malchanceux. On ne remplace que par mieux,
+                jamais par du vide. */
+             id_type = VALUES(id_type), type_source = VALUES(type_source),
+             nom = COALESCE(VALUES(nom), nom),
+             nom_source = COALESCE(VALUES(nom_source), nom_source),
+             adresse_mac = VALUES(adresse_mac),
+             fabricant = VALUES(fabricant), fabricant_source = VALUES(fabricant_source),
+             sys_descr = VALUES(sys_descr), os_detecte = VALUES(os_detecte),
+             /* ON NE REMONTE JAMAIS UN STATUT SANS PREUVE, ET ON N'EN
+                DÉGRADE JAMAIS UN QUI EN AVAIT UNE.
+
+                Un statut forcé à 'up' sans condition remettait « en ligne »
+                un équipement retrouvé dans la seule table ARP — y compris un
+                équipement que la supervision venait de constater absent. Le
+                scan effaçait donc l'observation par une supposition.
+
+                Le sens inverse est tout aussi faux : un appareil déjà connu
+                et vivant, revu sans preuve lors d'un scan, ne doit pas
+                retomber en « inconnu ». Sans preuve, on ne touche à rien et
+                on laisse la supervision décider — c'est elle qui observe en
+                continu. */
+             statut = CASE WHEN ? = 'up' THEN 'up' ELSE statut END,
+             derniere_decouverte = NOW(),
+             /* La preuve n'est REMPLACÉE que par une nouvelle preuve. Un
+                scan qui ne prouve rien ne doit pas effacer celle du scan
+                précédent : on perdrait la seule trace expliquant pourquoi
+                cette machine est à l'inventaire. */
+             preuve_existence = COALESCE(VALUES(preuve_existence), preuve_existence),
+             preuve_detail    = COALESCE(VALUES(preuve_detail), preuve_detail),
+             date_preuve      = CASE WHEN VALUES(preuve_existence) IS NOT NULL
+                                     THEN NOW() ELSE date_preuve END`;
+}
 // Même règle que celle qui calcule le total : voir le détail par port.
 const { estIgnoree } = require("../services/traficService");
 
@@ -358,6 +438,21 @@ async function scannerUnePlage(req, id_site, cidr, snmp_community) {
   try {
     const { options, plage } = await resoudreParametresScan(id_site, cidr, snmp_community);
 
+    /* ── D'OU VIENT LE POURCENTAGE AFFICHE PENDANT LE SCAN ──
+
+       `scanRange` savait deja rendre compte de son avancement : le
+       parametre `onProgress` existe depuis l'agent, qui s'en sert pour
+       ecrire dans sa console. Personne ne le branchait cote serveur, si
+       bien que l'interface n'avait qu'un compteur de secondes -- lequel
+       prouve que le temps passe, sans jamais dire ou on en est.
+
+       On le branche ici, au seul endroit qui connait a la fois le site
+       et la plage. Le registre est en memoire, et l'ecran le lit par
+       GET /scan/progression. */
+    progressionScan.plage(id_site, cidr);
+    options.onProgress = (etape, courant, total) =>
+      progressionScan.etape(id_site, etape, courant, total);
+
     // ── CE QU'ON SAIT DÉJÀ ──
     //
     // Transmis au moteur pour qu'il ne redemande pas à nmap un système
@@ -384,6 +479,12 @@ async function scannerUnePlage(req, id_site, cidr, snmp_community) {
     // pour que l'interface affiche « scan en cours de traitement » pendant
     // l'insertion, qui dure sur un grand parc.
     diffuser(id_site, "scan", { plage: cidr, equipements: equipements.length });
+
+    /* L'enregistrement n'est pas instantane : chaque equipement est
+       compare a l'existant, enrichi, puis insere ou mis a jour. Sur un
+       parc de plusieurs centaines de lignes, la barre resterait figee a
+       la fin de l'identification sans que rien n'explique l'attente. */
+    progressionScan.etape(id_site, "enregistrement", 0, equipements.length);
 
     if (plage) {
       // Colonne optionnelle selon l'ancienneté du schéma : on n'échoue pas dessus.
@@ -455,70 +556,40 @@ async function scannerUnePlage(req, id_site, cidr, snmp_community) {
 
         const idType = await getIdType(eq.type_detecte);
 
-        await db.query(
-          // `type_source` est enregistré au même titre que le type :
-          // savoir QUELLE règle a décidé est ce qui permet de défendre
-          // une classification devant un client, ou de corriger la bonne
-          // règle quand elle se trompe.
-          // `type_source` et `nom_source` sont enregistrés au même titre
-          // que la valeur qu'ils expliquent : savoir QUELLE règle a
-          // décidé est ce qui permet de défendre une classification
-          // devant un client, ou de corriger la bonne règle quand elle
-          // se trompe.
-          //
-          // `nom = COALESCE(VALUES(nom), nom)` et non `VALUES(nom)` :
-          // la résolution de nom passe par le réseau et échoue par
-          // intermittence — poste éteint, pare-feu momentané, perte d'un
-          // paquet UDP. Écraser franchement effacerait un nom correct au
-          // premier scan malchanceux. On ne remplace donc que par mieux,
-          // jamais par du vide.
-          `INSERT INTO EQUIPEMENT (id_site, id_type, type_source, nom, nom_source,
-                                   adresse_ip, adresse_mac,
-                                   fabricant, fabricant_source, sys_descr, os_detecte,
-                                   statut, derniere_decouverte,
-                                   preuve_existence, preuve_detail, date_preuve)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, NOW())
-           ON DUPLICATE KEY UPDATE
-             id_type = VALUES(id_type), type_source = VALUES(type_source),
-             nom = COALESCE(VALUES(nom), nom),
-             nom_source = COALESCE(VALUES(nom_source), nom_source),
-             adresse_mac = VALUES(adresse_mac),
-             fabricant = VALUES(fabricant), fabricant_source = VALUES(fabricant_source),
-             sys_descr = VALUES(sys_descr), os_detecte = VALUES(os_detecte),
-             /* ON NE REMONTE JAMAIS UN STATUT SANS PREUVE, ET ON N'EN
-                DÉGRADE JAMAIS UN QUI EN AVAIT UNE.
+        /* L'INSERTION, ET SON REPLI SI LA MIGRATION N'EST PAS PASSÉE.
 
-                Un statut forcé à 'up' sans condition remettait « en ligne » un
-                équipement retrouvé dans la seule table ARP — y compris un
-                équipement que la supervision venait de constater absent.
-                Le scan effaçait donc l'observation par une supposition.
+           `premiere_detection` vient de la migration du 16/09. Sur une
+           base qui ne l'a pas encore, l'insertion échouerait — et comme
+           elle a lieu pour CHAQUE équipement, le scan n'enregistrerait
+           plus rien du tout. Une colonne manquante doit retirer une
+           information, jamais vider un inventaire. On retombe donc une
+           fois sur la requête sans elle, et on le dit une seule fois. */
+        const parametres = [
+          id_site, idType, eq.type_source ?? null, eq.nom, eq.nom_source ?? null,
+          eq.adresse_ip, eq.adresse_mac,
+          eq.fabricant, eq.fabricant_source ?? null, eq.sys_descr, eq.os_detecte,
+          eq.statut ?? "inconnu",
+          eq.preuve_existence ?? null,
+          eq.preuve_detail ?? null,
+          // `eq.statut` apparaît DEUX fois : une pour l'insertion, une
+          // pour le CASE de la mise à jour. MySQL lie les marqueurs dans
+          // l'ordre du texte, VALUES d'abord.
+          eq.statut ?? "inconnu",
+        ];
 
-                Le sens inverse est tout aussi faux : un appareil déjà connu
-                et vivant, revu sans preuve lors d'un scan, ne doit pas
-                retomber en « inconnu ». Sans preuve, on ne touche à rien et
-                on laisse la supervision décider — c'est elle qui observe
-                en continu. */
-             statut = CASE WHEN ? = 'up' THEN 'up' ELSE statut END,
-             derniere_decouverte = NOW(),
-             /* La preuve n'est REMPLACÉE que par une nouvelle preuve.
-                Un scan qui ne prouve rien ne doit pas effacer celle du
-                scan précédent : on perdrait la seule trace expliquant
-                pourquoi cette machine est à l'inventaire. */
-             preuve_existence = COALESCE(VALUES(preuve_existence), preuve_existence),
-             preuve_detail    = COALESCE(VALUES(preuve_detail), preuve_detail),
-             date_preuve      = CASE WHEN VALUES(preuve_existence) IS NOT NULL
-                                     THEN NOW() ELSE date_preuve END`,
-          // `eq.statut` apparaît DEUX fois : une pour l'insertion, une pour
-          // le CASE de la mise à jour. MySQL lie les marqueurs dans l'ordre
-          // du texte, VALUES d'abord.
-          [id_site, idType, eq.type_source ?? null, eq.nom, eq.nom_source ?? null,
-           eq.adresse_ip, eq.adresse_mac,
-           eq.fabricant, eq.fabricant_source ?? null, eq.sys_descr, eq.os_detecte,
-           eq.statut ?? "inconnu",
-           eq.preuve_existence ?? null,
-           eq.preuve_detail ?? null,
-           eq.statut ?? "inconnu"]
-        );
+        try {
+          await db.query(sqlInsertionEquipement(!premiereDetectionAbsente), parametres);
+        } catch (err) {
+          if (premiereDetectionAbsente || !colonneManquante(err)) throw err;
+          premiereDetectionAbsente = true;
+          console.warn(
+            "\n⚠  Colonne premiere_detection absente : la date de première\n" +
+              "   apparition ne sera pas enregistrée, et l'écran ne pourra pas\n" +
+              "   distinguer un nouvel équipement d'un ancien.\n" +
+              "   Pour l'activer :  node tools\\appliquer-migrations.js\n"
+          );
+          await db.query(sqlInsertionEquipement(false), parametres);
+        }
 
         const [rows] = await db.query(
           "SELECT id_equipement FROM EQUIPEMENT WHERE id_site = ? AND adresse_ip = ?",
@@ -986,6 +1057,45 @@ router.get("/reseaux-detectes", requireRole("admin", "operateur"), (req, res) =>
   }
 });
 
+/**
+ * GET /api/scan/progression?id_site=1
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * OÙ EN EST LE SCAN — INTERROGÉ, PAS POUSSÉ
+ *
+ * La plateforme sait diffuser en temps réel (socket.io), et c'était la
+ * voie la plus élégante. Elle a été écartée pour une raison pratique :
+ * le temps réel ne s'installe QUE si WEBSOCKET_ORIGINE est renseigné
+ * dans le fichier .env du serveur. Une barre de progression qui ne
+ * s'affiche pas selon la configuration serait signalée comme une panne
+ * de l'écran, jamais comme un réglage manquant.
+ *
+ * Une interrogation toutes les deux secondes coûte ici une lecture dans
+ * une Map — pas de requête SQL, pas d'accès réseau — et fonctionne
+ * partout, y compris derrière un mandataire qui ne laisse pas passer les
+ * WebSocket.
+ *
+ * ── POURQUOI CETTE ROUTE RÉPOND À TOUS LES RÔLES ──
+ *
+ * Lancer un scan demande d'être administrateur ou opérateur. SAVOIR
+ * qu'un scan est en cours ne révèle rien du réseau : ni adresse, ni nom,
+ * ni port. Un lecteur qui voit la liste des équipements bouger sous ses
+ * yeux a le droit de savoir pourquoi. Le cloisonnement par site,
+ * lui, s'applique comme partout ailleurs.
+ * ═══════════════════════════════════════════════════════════════════════
+ */
+router.get("/scan/progression", (req, res) => {
+  const idSite = Number(req.query.id_site);
+  if (!Number.isInteger(idSite)) {
+    return res.status(400).json({ error: "id_site est requis" });
+  }
+  if (!siteAutorise(req, idSite)) {
+    return res.status(403).json({ error: "Site hors de votre périmètre" });
+  }
+
+  res.json(progressionScan.etat(idSite));
+});
+
 router.post("/scan", requireRole("admin", "operateur"), async (req, res) => {
   const { id_site, cidr, snmp_community } = req.body;
   if (!id_site || !cidr) {
@@ -994,6 +1104,8 @@ router.post("/scan", requireRole("admin", "operateur"), async (req, res) => {
   if (!siteAutorise(req, id_site)) {
     return res.status(403).json({ error: "Vous n'êtes pas autorisé à scanner ce site" });
   }
+
+  progressionScan.demarrer(id_site, 1);
 
   try {
     const {
@@ -1028,6 +1140,11 @@ router.post("/scan", requireRole("admin", "operateur"), async (req, res) => {
     }
     console.error(err);
     res.status(500).json({ error: "Erreur pendant le scan", details: err.message });
+  } finally {
+    /* Dans un `finally`, donc AUSSI quand le scan echoue. Un registre
+       laisse en « actif » apres une erreur afficherait une barre
+       eternelle a l'ecran, sur un travail qui ne tourne plus. */
+    progressionScan.terminer(id_site);
   }
 });
 
@@ -1077,6 +1194,11 @@ router.post("/scan/site", requireRole("admin", "operateur"), async (req, res) =>
         aide: "Déclarez au moins une plage (page Plages) avant de lancer un scan de site.",
       });
     }
+
+    /* Le denominateur du pourcentage global. Chaque plage terminee vaut
+       1/n du travail ; la plage en cours contribue a hauteur de son
+       propre avancement. */
+    progressionScan.demarrer(id_site, plages.length);
 
     const resultats = [];
     let total = 0;
@@ -1154,6 +1276,8 @@ router.post("/scan/site", requireRole("admin", "operateur"), async (req, res) =>
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Erreur pendant le scan du site", details: err.message });
+  } finally {
+    progressionScan.terminer(id_site);
   }
 });
 
@@ -1463,6 +1587,103 @@ router.get("/bande-passante/classement", async (req, res) => {
     porteeTotal.params
   );
 
+  /* ═══════════════════════════════════════════════════════════════════
+     LA COUVERTURE, DÉTAILLÉE : QUI EST MESURÉ, ET POURQUOI PAS LES AUTRES
+
+     LE DÉFAUT QUE CE BLOC CORRIGE. L'écran n'affichait que les
+     équipements porteurs d'une mesure. Sur ce parc, 12 sur 182 — les
+     170 autres disparaissaient sans un mot. Un client qui connaît son
+     réseau voit d'abord ce qui MANQUE, et conclut que le produit ne
+     sait pas les voir.
+
+     LES OMETTRE EN SILENCE ET AFFICHER UN ZÉRO SONT DEUX FAUTES
+     SYMÉTRIQUES. Un zéro se lit « cette machine ne consomme rien » ;
+     la vérité est « rien n'a pu être mesuré ». On renvoie donc la
+     LISTE de ces machines, chacune avec la RAISON pour laquelle elle
+     n'est pas mesurable, et jamais une valeur.
+
+     LES QUATRE ÉTATS, ET CE QUI LES SÉPARE :
+
+       direct        l'appareil expose ses propres compteurs SNMP ;
+       par_port      il est SEUL sur un port d'un commutateur
+                     administrable : le compteur du port lui appartient
+                     entièrement ;
+       port_partage  plusieurs adresses MAC sur le même port — un
+                     commutateur non administrable, un répéteur ou une
+                     borne WiFi s'interpose. Le compteur existe mais
+                     mélange plusieurs machines ; l'attribuer à l'une
+                     d'elles serait inventer un chiffre ;
+       aucune_source ni compteur propre, ni port connu. WiFi, ou
+                     branché derrière du matériel qui ne déclare rien.
+
+     Le WiFi n'est pas distingué du filaire non supervisé, et ce n'est
+     pas un manque de soin : vus d'ici, un téléphone sur une borne et un
+     PC derrière un switch de bureau sont identiques. Nommer l'un ou
+     l'autre serait une supposition. */
+  const porteeDetail = clauseSite(req, "e.id_site");
+  let categories = null;
+  let nonMesurables = [];
+
+  try {
+    const [etats] = await db.query(
+      `SELECT e.id_equipement,
+              COALESCE(e.nom_personnalise, e.nom) AS nom,
+              e.adresse_ip,
+              t.libelle AS type_equipement,
+              EXISTS (
+                SELECT 1 FROM RELEVE r
+                 WHERE r.id_equipement = e.id_equipement
+                   AND r.trafic_entrant_kbps IS NOT NULL
+                   AND r.date_releve >= NOW() - INTERVAL ${heures} HOUR
+              ) AS mesure_direct,
+              (SELECT MAX(i.nb_mac_vues) FROM INTERFACE_RESEAU i
+                WHERE i.id_equipement_connecte = e.id_equipement) AS mac_sur_le_port
+         FROM EQUIPEMENT e
+         LEFT JOIN TYPE_EQUIPEMENT t ON t.id_type = e.id_type
+        WHERE ${porteeDetail.clause}`,
+      porteeDetail.params
+    );
+
+    categories = { direct: 0, par_port: 0, port_partage: 0, aucune_source: 0 };
+
+    for (const eq of etats) {
+      const surLePort = eq.mac_sur_le_port === null ? null : Number(eq.mac_sur_le_port);
+
+      if (Number(eq.mesure_direct) === 1) {
+        categories.direct++;
+        continue;
+      }
+      if (surLePort === 1) {
+        categories.par_port++;
+        continue;
+      }
+
+      const raison = surLePort > 1 ? "port_partage" : "aucune_source";
+      categories[raison]++;
+
+      /* Bornée : sur un parc de plusieurs milliers de machines, la liste
+         complète alourdirait chaque rafraîchissement d'un écran qui se
+         recharge tout seul. Le COMPTE, lui, reste exact. */
+      if (nonMesurables.length < 300) {
+        nonMesurables.push({
+          id_equipement: eq.id_equipement,
+          nom: eq.nom,
+          adresse_ip: eq.adresse_ip,
+          type_equipement: eq.type_equipement,
+          raison,
+        });
+      }
+    }
+  } catch (err) {
+    /* Colonnes d'attribution absentes (migration 2026-08-21) : on ne
+       sait pas distinguer un port partagé d'une absence de source. On
+       renvoie alors `categories: null`, et l'interface s'abstient de
+       présenter une répartition qu'elle ne connaît pas. */
+    if (!colonneManquante(err)) throw err;
+    categories = null;
+    nonMesurables = [];
+  }
+
   // ── TOTAL GLOBAL ──
   //
   // Calculé sur TOUT le parc mesuré, et non sur le classement ci-dessus
@@ -1550,6 +1771,13 @@ router.get("/bande-passante/classement", async (req, res) => {
     couverture: {
       equipements: Number(couverture.total || 0),
       avec_mesure: Number(couverture.avec_mesure || 0),
+      // `null` quand la base ne permet pas de distinguer un port partagé
+      // d'une absence de source : l'interface n'affiche alors aucune
+      // répartition plutôt qu'une répartition approximative.
+      categories,
+      // Les machines sans mesure, NOMMÉES et avec leur raison. Jamais de
+      // valeur pour elles : un zéro se lirait « aucun trafic ».
+      non_mesurables: nonMesurables,
     },
     total: {
       // Somme des moyennes PAR ÉQUIPEMENT : « le parc consomme en moyenne
@@ -1677,6 +1905,173 @@ router.get("/bande-passante/historique", async (req, res) => {
       sortant: p.sortant === null ? null : Number(p.sortant),
       equipements: Number(p.equipements || 0),
     })),
+  });
+});
+
+/**
+ * GET /api/reseau/qualite?heures=24
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * LA SEULE MESURE DE CETTE PLATEFORME QUI SOIT PRESQUE COMPLÈTE
+ *
+ * Le débit demande du SNMP, et sur ce parc douze machines y répondent —
+ * toutes des imprimantes. La courbe de bande passante est donc vraie mais
+ * étroite, et la page le dit honnêtement dans son bloc de couverture.
+ *
+ * La LATENCE, elle, est écrite dans RELEVE à chaque cycle de supervision
+ * pour chaque machine qui répond au ping. Aucun protocole à négocier,
+ * aucune communauté à obtenir, aucun commutateur administrable requis :
+ * la mesure existe déjà, produite en continu, et elle n'était affichée
+ * nulle part sous forme d'historique.
+ *
+ * ── CE QU'ELLE VAUT, ET CE QU'ELLE NE VAUT PAS ──
+ *
+ * Un temps de réponse ne dit pas combien de données circulent. Il dit si
+ * le réseau RÉPOND BIEN — et c'est la première question qu'on se pose en
+ * ouvrant une supervision. Une latence qui double sur tout un site à
+ * 14 h, c'est un lien saturé, une boucle, un point d'accès en difficulté ;
+ * sur une seule machine, c'est du Wi-Fi lointain ou une machine en peine.
+ *
+ * ── LE PIÈGE ÉVITÉ ICI ──
+ *
+ * Un relevé n'est écrit QUE lorsque le ping aboutit (voir
+ * monitoringService). Les machines qui bloquent l'ICMP — un poste Windows
+ * le fait par défaut — n'apparaissent donc jamais dans cette courbe, même
+ * quand elles sont parfaitement en ligne et prouvées présentes par TCP ou
+ * par la table ARP.
+ *
+ * Présenter cette moyenne comme « la latence du parc » serait donc faux.
+ * La route renvoie pour cette raison le nombre de machines réellement
+ * mesurées, à chaque point ET sur l'ensemble de la période, et l'écran a
+ * l'obligation de l'afficher. Une moyenne sans son effectif est un chiffre
+ * sans échelle.
+ * ═══════════════════════════════════════════════════════════════════════
+ */
+router.get("/reseau/qualite", async (req, res) => {
+  let heures = Number(req.query.heures);
+  if (!Number.isFinite(heures) || heures <= 0) heures = 24;
+  heures = Math.min(Math.floor(heures), 24 * 30);
+
+  // Même largeur de tranche que la courbe de débit : les deux graphiques
+  // se lisent l'un au-dessus de l'autre, un décalage de pas rendrait la
+  // comparaison trompeuse.
+  const pas = Math.max(1, Math.round((heures * 60) / 200));
+  const portee = clauseSite(req, "e.id_site");
+
+  const [points] = await db.query(
+    `SELECT FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(r.date_releve) / ?) * ?) AS instant,
+            AVG(r.latence_ms) AS moyenne,
+            MAX(r.latence_ms) AS pic,
+            COUNT(*) AS mesures,
+            COUNT(DISTINCT r.id_equipement) AS equipements
+     FROM RELEVE r
+     JOIN EQUIPEMENT e ON e.id_equipement = r.id_equipement
+     WHERE r.date_releve >= NOW() - INTERVAL ${heures} HOUR
+       AND r.latence_ms IS NOT NULL
+       AND ${portee.clause}
+     GROUP BY instant
+     ORDER BY instant`,
+    [pas * 60, pas * 60, ...portee.params]
+  );
+
+  /* ── LES PLUS LENTES ──
+     Trois mesures minimum : une machine vue une seule fois, au moment
+     précis où elle démarrait, arriverait en tête d'un classement de
+     lenteur sans rien signifier. Le seuil est bas — il écarte l'accident,
+     pas le cas réel. */
+  const [pires] = await db.query(
+    `SELECT e.id_equipement, e.nom, e.nom_personnalise, e.adresse_ip,
+            AVG(r.latence_ms) AS moyenne,
+            MAX(r.latence_ms) AS pic,
+            COUNT(*) AS mesures
+     FROM RELEVE r
+     JOIN EQUIPEMENT e ON e.id_equipement = r.id_equipement
+     WHERE r.date_releve >= NOW() - INTERVAL ${heures} HOUR
+       AND r.latence_ms IS NOT NULL
+       AND ${portee.clause}
+     GROUP BY e.id_equipement, e.nom, e.nom_personnalise, e.adresse_ip
+     HAVING mesures >= 3
+     ORDER BY moyenne DESC
+     LIMIT 8`,
+    [...portee.params]
+  );
+
+  /* ── COMBIEN DE MACHINES CETTE COURBE REPRÉSENTE-T-ELLE VRAIMENT ──
+     Le dénominateur est le parc entier tel que l'utilisateur le voit dans
+     la liste des équipements. Sans lui, « 12 ms de moyenne » ne se
+     rapporte à rien. */
+  const [[couverture]] = await db.query(
+    `SELECT COUNT(*) AS equipements,
+            SUM(
+              EXISTS (
+                SELECT 1 FROM RELEVE r
+                 WHERE r.id_equipement = e.id_equipement
+                   AND r.latence_ms IS NOT NULL
+                   AND r.date_releve >= NOW() - INTERVAL ${heures} HOUR
+              )
+            ) AS mesures
+     FROM EQUIPEMENT e
+     WHERE ${portee.clause}`,
+    [...portee.params]
+  );
+
+  /* La moyenne de la période est pondérée par le NOMBRE DE MESURES de
+     chaque tranche, pas par le nombre de tranches. Une tranche de nuit à
+     deux relevés ne doit pas peser autant qu'une tranche de journée à
+     trois cents — c'est la différence entre une moyenne juste et une
+     moyenne qui flatte les heures creuses. */
+  let sommeMesures = 0;
+  let sommePonderee = 0;
+  let pic = null;
+  let instantPic = null;
+  let equipementsMax = 0;
+
+  const pointsPropres = points.map((p) => {
+    const moyenne = p.moyenne === null ? null : Number(p.moyenne);
+    const picTranche = p.pic === null ? null : Number(p.pic);
+    const mesures = Number(p.mesures || 0);
+    const equipements = Number(p.equipements || 0);
+
+    if (moyenne !== null && mesures > 0) {
+      sommeMesures += mesures;
+      sommePonderee += moyenne * mesures;
+    }
+    if (picTranche !== null && (pic === null || picTranche > pic)) {
+      pic = picTranche;
+      instantPic = p.instant;
+    }
+    if (equipements > equipementsMax) equipementsMax = equipements;
+
+    return { instant: p.instant, moyenne, pic: picTranche, mesures, equipements };
+  });
+
+  res.json({
+    periode_heures: heures,
+    pas_minutes: pas,
+    points: pointsPropres,
+    pires: pires.map((p) => ({
+      id_equipement: p.id_equipement,
+      nom: p.nom,
+      nom_personnalise: p.nom_personnalise,
+      adresse_ip: p.adresse_ip,
+      moyenne: Number(p.moyenne),
+      pic: Number(p.pic),
+      mesures: Number(p.mesures),
+    })),
+    couverture: {
+      equipements: Number(couverture?.equipements || 0),
+      avec_latence: Number(couverture?.mesures || 0),
+      // Le maximum atteint sur une tranche : utile pour distinguer « peu
+      // de machines répondent » de « elles ne répondent pas toutes en
+      // même temps ».
+      simultanees_max: equipementsMax,
+    },
+    resume: {
+      moyenne: sommeMesures > 0 ? sommePonderee / sommeMesures : null,
+      pic,
+      instant_pic: instantPic,
+      mesures: sommeMesures,
+    },
   });
 });
 
@@ -1869,7 +2264,18 @@ router.get("/equipements", async (req, res) => {
   const { id_site } = req.query;
   const portee = clauseSite(req, "e.id_site");
 
-  const colonnes = `e.id_equipement, e.id_site, e.nom, e.nom_personnalise, e.nom_source,
+  /* ── DEUX ENRICHISSEMENTS, DEUX MIGRATIONS, QUATRE REPLIS ──
+
+     Cette route s'enrichit à chaque évolution, et toutes les bases ne
+     sont pas au même niveau : celle d'un client installé il y a six mois
+     n'a ni les ports (migration du 21/08) ni le statut d'autorisation
+     (migration du 16/09). Une seule requête ambitieuse ferait alors
+     échouer l'écran PRINCIPAL de la plateforme — la liste des
+     équipements — pour une colonne d'agrément.
+
+     On tente donc le plus complet, puis on retire par étapes. Ce qui
+     manque retire une information ; ça ne vide jamais la liste. */
+  const COLONNES_SOCLE = `e.id_equipement, e.id_site, e.nom, e.nom_personnalise, e.nom_source,
             e.adresse_ip, e.adresse_mac, e.statut,
             e.fabricant, e.fabricant_source, e.type_source,
             e.os_detecte, e.derniere_decouverte,
@@ -1877,28 +2283,171 @@ router.get("/equipements", async (req, res) => {
             e.preuve_existence, e.preuve_detail, e.date_preuve,
             t.libelle AS type_libelle`;
 
-  const requete = (avecPorts) => `
-    SELECT ${colonnes}${avecPorts ? `,${SOUS_REQUETE_PORTS}` : ""}
+  const COLONNES_AUTORISATION = `e.premiere_detection,
+            e.statut_autorisation, e.note_autorisation, e.date_autorisation`;
+
+  const requete = (avecAutorisation, avecPorts) => `
+    SELECT ${COLONNES_SOCLE}${
+    avecAutorisation ? `,\n            ${COLONNES_AUTORISATION}` : ""
+  }${avecPorts ? `,${SOUS_REQUETE_PORTS}` : ""}
      FROM EQUIPEMENT e
      LEFT JOIN TYPE_EQUIPEMENT t ON t.id_type = e.id_type
      WHERE (? IS NULL OR e.id_site = ?) AND ${portee.clause}`;
 
   const params = [id_site || null, id_site || null, ...portee.params];
 
-  let rows;
-  try {
-    [rows] = await db.query(requete(true), params);
-  } catch (err) {
-    // Base antérieure à SERVICE_DETECTE : la liste s'affiche sans les
-    // ports plutôt que de renvoyer une erreur. Même principe que
-    // partout ailleurs — une colonne absente retire une information,
-    // elle ne casse pas l'écran.
-    if (!colonneManquante(err)) throw err;
-    [rows] = await db.query(requete(false), params);
+  const essais = [
+    [true, true], // base à jour
+    [false, true], // migration d'autorisation non passée
+    [true, false], // SERVICE_DETECTE absente
+    [false, false], // ni l'une ni l'autre
+  ];
+
+  let rows = null;
+  let derniereErreur = null;
+
+  for (const [autorisation, ports] of essais) {
+    try {
+      [rows] = await db.query(requete(autorisation, ports), params);
+      break;
+    } catch (err) {
+      if (!colonneManquante(err)) throw err;
+      derniereErreur = err;
+    }
   }
+
+  if (!rows) throw derniereErreur;
 
   res.json(rows);
 });
+
+/**
+ * PATCH /api/equipements/:id/autorisation
+ * body : { statut: "autorise" | "a_verifier" | "invite" | "personnel" |
+ *                  "iot" | "bloque" | "nouveau",
+ *          note: "PC de la comptabilité, vu avec M. Ndongo" }
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * LA SEULE INFORMATION DE CETTE PLATEFORME QUI NE VIENT PAS DU RÉSEAU
+ *
+ * Tout le reste est mesuré : une preuve d'existence, un nom annoncé par
+ * la machine, un port constaté ouvert. Ce statut-là, aucun protocole ne
+ * le porte. Aucun scan ne peut dire qu'un appareil a le DROIT d'être là :
+ * c'est un jugement, et il est humain.
+ *
+ * Il est donc SAISI, DATÉ, ATTRIBUÉ à quelqu'un, et tracé au journal.
+ * Trois propriétés qu'une donnée mesurée n'a pas besoin d'avoir, et
+ * qu'un jugement doit toutes avoir — parce qu'un audit demandera un jour
+ * « qui a autorisé cette machine, et quand ? ».
+ *
+ * ── « BLOQUÉ » NE BLOQUE RIEN, ET L'ÉCRAN DOIT LE DIRE ──
+ *
+ * La plateforme n'a aucun moyen de couper l'accès réseau d'un appareil :
+ * il faudrait un commutateur administrable et des droits de
+ * configuration dessus. Ce statut consigne une décision à appliquer
+ * ailleurs. Laisser croire à une mise en quarantaine qui n'a pas eu lieu
+ * serait la pire chose que cette fonction puisse faire.
+ *
+ * ── LE CLOISONNEMENT EST DANS LA REQUÊTE, PAS AVANT ──
+ *
+ * Même règle que le renommage : un opérateur ne peut pas statuer sur
+ * l'équipement d'un site auquel il n'a pas accès, même en forgeant
+ * l'identifiant. Et la réponse est la même — 404 — qu'il n'existe pas ou
+ * qu'il soit hors de portée : distinguer les deux révélerait l'existence
+ * d'équipements qu'on n'a pas le droit de voir.
+ */
+const STATUTS_AUTORISATION = [
+  "nouveau",
+  "autorise",
+  "a_verifier",
+  "invite",
+  "personnel",
+  "iot",
+  "bloque",
+];
+
+router.patch(
+  "/equipements/:id/autorisation",
+  requireRole("admin", "operateur"),
+  async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ error: "Identifiant d'équipement invalide" });
+    }
+
+    const statut = String(req.body?.statut ?? "").trim();
+    if (!STATUTS_AUTORISATION.includes(statut)) {
+      return res.status(400).json({
+        error: "Statut d'autorisation inconnu",
+        aide: `Valeurs acceptées : ${STATUTS_AUTORISATION.join(", ")}`,
+      });
+    }
+
+    /* La note est facultative et bornée. Elle est le seul champ libre de
+       cette route : on la coupe à la taille de la colonne plutôt que de
+       laisser MySQL tronquer en silence — ou refuser, selon son mode
+       strict. */
+    const noteBrute = req.body?.note;
+    const note =
+      noteBrute === null || noteBrute === undefined || String(noteBrute).trim() === ""
+        ? null
+        : String(noteBrute).trim().slice(0, 200);
+
+    const portee = clauseSite(req, "id_site");
+
+    /* On relit l'ancien statut AVANT d'écrire : le journal doit pouvoir
+       dire de quoi vers quoi. « Statut modifié » sans l'ancienne valeur
+       ne permet pas de reconstituer une décision six mois plus tard. */
+    let ancien = null;
+    try {
+      const [avant] = await db.query(
+        `SELECT statut_autorisation, adresse_ip, nom
+           FROM EQUIPEMENT
+          WHERE id_equipement = ? AND ${portee.clause}`,
+        [id, ...portee.params]
+      );
+      ancien = avant[0] ?? null;
+    } catch (err) {
+      if (!colonneManquante(err)) throw err;
+      return res.status(503).json({
+        error: "Le statut d'autorisation n'est pas installé sur cette base",
+        aide: "node tools\\appliquer-migrations.js",
+      });
+    }
+
+    if (!ancien) return res.status(404).json({ error: "Équipement introuvable" });
+
+    const [resultat] = await db.query(
+      `UPDATE EQUIPEMENT
+          SET statut_autorisation = ?,
+              note_autorisation = ?,
+              date_autorisation = NOW(),
+              id_utilisateur_autorisation = ?
+        WHERE id_equipement = ? AND ${portee.clause}`,
+      [statut, note, req.user?.id ?? null, id, ...portee.params]
+    );
+
+    if (resultat.affectedRows === 0) {
+      return res.status(404).json({ error: "Équipement introuvable" });
+    }
+
+    const designation = ancien.nom || ancien.adresse_ip || `#${id}`;
+    await logActivite(
+      req,
+      "equipement_autorisation",
+      `Équipement ${designation} (${ancien.adresse_ip}) : statut d'autorisation ` +
+        `« ${ancien.statut_autorisation || "nouveau"} » → « ${statut} »` +
+        (note ? ` — ${note}` : "")
+    );
+
+    res.json({
+      id_equipement: id,
+      statut_autorisation: statut,
+      note_autorisation: note,
+      ancien_statut: ancien.statut_autorisation || "nouveau",
+    });
+  }
+);
 
 /**
  * PATCH /api/equipements/:id/nom

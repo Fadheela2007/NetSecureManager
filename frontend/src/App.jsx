@@ -36,9 +36,7 @@ const UtilisateursPage = lazy(() => import("./Components/UtilisateursPage"));
 const AlertesPage = lazy(() => import("./Components/AlertesPage"));
 const IncidentsPage = lazy(() => import("./Components/IncidentsPage"));
 const SitesPage = lazy(() => import("./Components/SitesPage"));
-const TopologyPage = lazy(() => import("./Components/TopologyPage"));
 const BandePassantePage = lazy(() => import("./Components/BandePassantePage"));
-const AccesWebPage = lazy(() => import("./Components/AccesWebPage"));
 const ConfigurationPage = lazy(() => import("./Components/ConfigurationPage"));
 const JournalPage = lazy(() => import("./Components/JournalPage"));
 const EquipementDetail = lazy(() => import("./Components/EquipementDetail"));
@@ -228,9 +226,7 @@ function App() {
             {page === "alertes" && <AlertesPage />}
             {page === "incidents" && <IncidentsPage />}
             {page === "sites" && <SitesPage />}
-            {page === "topologie" && <TopologyPage idSite={idSite} />}
             {page === "bande-passante" && <BandePassantePage idSite={idSite} />}
-            {page === "acces-web" && <AccesWebPage idSite={idSite} />}
             {page === "utilisateurs" && <UtilisateursPage />}
             {page === "configuration" && <ConfigurationPage />}
             {page === "journal" && <JournalPage />}

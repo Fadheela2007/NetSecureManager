@@ -6,20 +6,25 @@
  * source, la colonne « nom » reste vide sur la majeure partie du parc, et
  * une liste d'adresses IP ne dit à personne de quelle machine il s'agit.
  *
- * Quatre sources, par ordre de confiance :
+ * Cinq sources, par ordre de confiance :
  *
  *   1. sysName SNMP — le nom que la machine se donne. Le plus fiable,
  *      rarement disponible hors équipements réseau.
  *   2. DNS inverse — suppose que le DHCP enregistre ses baux auprès du
  *      DNS : la norme sur un domaine Active Directory, l'exception
  *      derrière une box d'opérateur.
- *   3. NetBIOS — un poste Windows répond sur le port 137 même sans
+ *   3. SMB — le nom annoncé par le partage de fichiers Windows pendant
+ *      la négociation, avant toute authentification. Ajoutée en dernier,
+ *      et seule source qui atteigne un poste où NetBIOS est désactivé.
+ *      Voir le grand commentaire plus bas : elle n'est sollicitée que si
+ *      le port 445 a déjà été trouvé ouvert.
+ *   4. NetBIOS — un poste Windows répond sur le port 137 même sans
  *      domaine, sans DNS interne et sans SNMP.
- *   4. mDNS — seule source pour ce qui n'est ni poste Windows ni
+ *   5. mDNS — seule source pour ce qui n'est ni poste Windows ni
  *      équipement SNMP : caméras, imprimantes, appareils Apple et
  *      Android.
  *
- * Aucune source n'invente : si les quatre échouent, le nom reste vide.
+ * Aucune source n'invente : si les cinq échouent, le nom reste vide.
  * Une case vide est honnête, un nom faux ne l'est pas.
  */
 const dgram = require("dgram");
@@ -423,6 +428,256 @@ function nomMdns(ip) {
   });
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+   CINQUIÈME SOURCE : LE PARTAGE DE FICHIERS WINDOWS (SMB, PORT 445)
+
+   POURQUOI ELLE A ÉTÉ AJOUTÉE. Mesuré sur le parc : 92 équipements, 67
+   sans nom. Le DNS inverse ne donne RIEN — la box n'enregistre pas ses
+   baux — NetBIOS nomme 20 machines, mDNS 3, SNMP 2. Les quatre sources
+   existantes ont donné tout ce qu'elles pouvaient.
+
+   Or ces mêmes postes muets ont massivement le port 445 ouvert — c'est
+   d'ailleurs à cela qu'on les repère. Et pendant la négociation d'une
+   connexion SMB, AVANT toute authentification, le serveur annonce
+   lui-même son nom d'ordinateur et son domaine. C'est ce que lit
+   `nmap --script smb-os-discovery`.
+
+   COMMENT ÇA MARCHE, EN TROIS TEMPS.
+
+     1. on ouvre une connexion et on propose les dialectes SMB2 ;
+     2. on demande l'ouverture de session en présentant un jeton NTLM de
+        type 1 — une simple annonce « voici ce que je sais faire », sans
+        nom d'utilisateur ni mot de passe ;
+     3. le serveur répond « il m'en faut plus » et joint un jeton NTLM de
+        type 2. C'est ce jeton qui contient, en clair, le nom NetBIOS et
+        le nom DNS de la machine.
+
+   ON S'ARRÊTE LÀ. Aucune identification n'est tentée, aucun partage
+   n'est ouvert, la connexion est refermée aussitôt. Ce qu'on lit est ce
+   que la machine annonce à quiconque frappe à sa porte.
+
+   CE QUE ÇA COÛTE, ET POURQUOI C'EST BORNÉ. Une connexion TCP laisse une
+   trace dans les journaux du poste, là où NetBIOS et mDNS sont de
+   simples questions en UDP. La sonde n'est donc lancée QUE sur les
+   machines dont le port 445 a déjà été trouvé ouvert — voir le paramètre
+   `smb` de resoudreNom, renseigné par le balayage. Sur tout le reste,
+   rien n'est envoyé.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+const net = require("net");
+const PORT_SMB = 445;
+const DELAI_SMB = 1500;
+
+/** En-tête de session NetBIOS : un zéro, puis la longueur sur 3 octets. */
+function enteteSession(longueur) {
+  const b = Buffer.alloc(4);
+  b[0] = 0x00;
+  b.writeUIntBE(longueur, 1, 3);
+  return b;
+}
+
+/** En-tête SMB2, 64 octets, tel que l'attend un serveur Windows. */
+function enteteSmb2(commande, messageId) {
+  const h = Buffer.alloc(64);
+  h[0] = 0xfe;
+  h.write("SMB", 1, "ascii");
+  h.writeUInt16LE(64, 4); // StructureSize
+  h.writeUInt16LE(0, 6); // CreditCharge
+  h.writeUInt32LE(0, 8); // Status / ChannelSequence
+  h.writeUInt16LE(commande, 12);
+  h.writeUInt16LE(31, 14); // CreditRequest
+  h.writeUInt32LE(0, 16); // Flags — c'est une requête, pas une réponse
+  h.writeUInt32LE(0, 20); // NextCommand
+  h.writeUInt32LE(messageId, 24); // MessageId : 64 bits, le poids faible suffit
+  return h;
+}
+
+/** NEGOTIATE : « voici les dialectes que je parle ». */
+function requeteNegociation() {
+  const corps = Buffer.alloc(36 + 8);
+  corps.writeUInt16LE(36, 0); // StructureSize
+  corps.writeUInt16LE(4, 2); // DialectCount
+  corps.writeUInt16LE(1, 4); // SecurityMode : signature activée
+  corps.writeUInt32LE(0, 8); // Capabilities
+  // ClientGuid (16 octets) laissé à zéro : il identifie un logiciel
+  // client, pas une personne, et aucun serveur n'en exige un précis.
+  corps.writeUInt16LE(0x0202, 36);
+  corps.writeUInt16LE(0x0210, 38);
+  corps.writeUInt16LE(0x0300, 40);
+  // 3.1.1 (0x0311) est délibérément ABSENT : ce dialecte impose des
+  // « contextes de négociation » supplémentaires, donc tout un préambule
+  // à implémenter, pour exactement la même information au bout.
+  corps.writeUInt16LE(0x0302, 42);
+
+  const paquet = Buffer.concat([enteteSmb2(0x0000, 1), corps]);
+  return Buffer.concat([enteteSession(paquet.length), paquet]);
+}
+
+/** Encodage DER : une étiquette, une longueur courte, un contenu. */
+function der(etiquette, contenu) {
+  return Buffer.concat([Buffer.from([etiquette, contenu.length]), contenu]);
+}
+
+/**
+ * Jeton NTLM de type 1 — une annonce de capacités, rien d'autre.
+ * Le drapeau REQUEST_TARGET (0x4) est celui qui compte : c'est lui qui
+ * demande au serveur de joindre ses noms à sa réponse.
+ */
+function jetonNtlmType1() {
+  const t = Buffer.alloc(32);
+  t.write("NTLMSSP\0", 0, "binary");
+  t.writeUInt32LE(1, 8); // type 1 : NEGOTIATE
+  t.writeUInt32LE(0xa0088207, 12); // UNICODE|OEM|REQUEST_TARGET|NTLM|SIGN|ESS|128|56
+  return t;
+}
+
+/** Le jeton NTLM, emballé dans un GSS-API/SPNEGO NegTokenInit. */
+function jetonSpnego() {
+  const OID_NTLM = Buffer.from([
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a,
+  ]);
+  const OID_SPNEGO = Buffer.from([0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02]);
+
+  const mechTypes = der(0xa0, der(0x30, OID_NTLM));
+  const mechToken = der(0xa2, der(0x04, jetonNtlmType1()));
+  const negTokenInit = der(0xa0, der(0x30, Buffer.concat([mechTypes, mechToken])));
+
+  return der(0x60, Buffer.concat([OID_SPNEGO, negTokenInit]));
+}
+
+/** SESSION_SETUP : « ouvrons une session », avec le jeton ci-dessus. */
+function requeteOuvertureSession() {
+  const jeton = jetonSpnego();
+  const corps = Buffer.alloc(24);
+  corps.writeUInt16LE(25, 0); // StructureSize
+  corps.writeUInt8(0, 2); // Flags
+  corps.writeUInt8(1, 3); // SecurityMode
+  corps.writeUInt32LE(0, 4); // Capabilities
+  corps.writeUInt32LE(0, 8); // Channel
+  corps.writeUInt16LE(64 + 24, 12); // SecurityBufferOffset, depuis l'en-tête
+  corps.writeUInt16LE(jeton.length, 14); // SecurityBufferLength
+
+  const paquet = Buffer.concat([enteteSmb2(0x0001, 2), corps, jeton]);
+  return Buffer.concat([enteteSession(paquet.length), paquet]);
+}
+
+/**
+ * Extrait le nom de machine d'un jeton NTLM de type 2.
+ *
+ * Le jeton porte une liste de paires « identifiant / valeur » où chaque
+ * nom est écrit en UTF-16. On retient le nom DNS s'il existe — c'est le
+ * nom complet — et à défaut le nom NetBIOS, que le protocole limite à
+ * 15 caractères.
+ *
+ * Fonction PURE : elle se vérifie sur un jeton fabriqué, sans réseau.
+ */
+function extraireNomSmb(tampon) {
+  const debut = tampon.indexOf("NTLMSSP\0", 0, "binary");
+  if (debut < 0 || debut + 48 > tampon.length) return null;
+  if (tampon.readUInt32LE(debut + 8) !== 2) return null; // pas un type 2
+
+  const longueurInfos = tampon.readUInt16LE(debut + 40);
+  const decalageInfos = tampon.readUInt32LE(debut + 44);
+  const depart = debut + decalageInfos;
+  if (longueurInfos <= 0 || depart + longueurInfos > tampon.length) return null;
+
+  let parNetbios = null;
+  let parDns = null;
+  let p = depart;
+  const fin = depart + longueurInfos;
+
+  while (p + 4 <= fin) {
+    const identifiant = tampon.readUInt16LE(p);
+    const longueur = tampon.readUInt16LE(p + 2);
+    p += 4;
+    if (identifiant === 0 || p + longueur > fin) break; // 0 = fin de liste
+
+    if (identifiant === 1 || identifiant === 3) {
+      const valeur = tampon.toString("utf16le", p, p + longueur).trim();
+      if (valeur) {
+        if (identifiant === 1) parNetbios = valeur;
+        else parDns = valeur;
+      }
+    }
+    p += longueur;
+  }
+
+  /* Le nom DNS est complet, le NetBIOS est tronqué : on préfère le
+     premier. On ne garde que sa première étiquette, pour rester cohérent
+     avec les autres sources — « PC-COMPTA », pas
+     « PC-COMPTA.societe.local ». */
+  const retenu = parDns || parNetbios;
+  return retenu ? retenu.split(".")[0] : null;
+}
+
+/**
+ * Demande son nom à une machine par SMB. Ne lève jamais, ne tente aucune
+ * authentification, referme la connexion dès la réponse obtenue.
+ */
+function nomSmb(ip) {
+  return new Promise((resoudre) => {
+    let termine = false;
+    let recu = Buffer.alloc(0);
+    let negocie = false;
+
+    const socket = new net.Socket();
+
+    const finir = (valeur) => {
+      if (termine) return;
+      termine = true;
+      clearTimeout(minuterie);
+      try {
+        socket.destroy();
+      } catch {
+        /* déjà fermée */
+      }
+      resoudre(valeur);
+    };
+
+    const minuterie = setTimeout(() => finir(null), DELAI_SMB);
+
+    socket.on("error", () => finir(null));
+    socket.on("close", () => finir(null));
+    socket.setTimeout(DELAI_SMB);
+    socket.on("timeout", () => finir(null));
+
+    socket.on("data", (morceau) => {
+      recu = Buffer.concat([recu, morceau]);
+
+      /* Les messages SMB sont préfixés de leur longueur : on n'agit
+         qu'une fois le message COMPLET arrivé. Réagir au premier paquet
+         TCP marcherait neuf fois sur dix et échouerait la dixième, sur un
+         réseau chargé — le genre de défaut qu'on ne reproduit jamais. */
+      while (recu.length >= 4) {
+        const longueur = recu.readUIntBE(1, 3);
+        if (recu.length < 4 + longueur) return;
+
+        const message = recu.subarray(4, 4 + longueur);
+        recu = recu.subarray(4 + longueur);
+
+        if (!negocie) {
+          negocie = true;
+          try {
+            socket.write(requeteOuvertureSession());
+          } catch {
+            return finir(null);
+          }
+        } else {
+          return finir(extraireNomSmb(message));
+        }
+      }
+    });
+
+    socket.connect(PORT_SMB, ip, () => {
+      try {
+        socket.write(requeteNegociation());
+      } catch {
+        finir(null);
+      }
+    });
+  });
+}
+
 /**
  * Nom par résolution DNS inverse.
  * Le suffixe de domaine est retiré : dans une liste où toutes les
@@ -456,17 +711,21 @@ async function nomDns(ip) {
  * interroge tout le monde en même temps, puis on retient la meilleure
  * réponse obtenue.
  */
-async function resoudreNom(ip, sysName) {
+async function resoudreNom(ip, sysName, options = {}) {
   const snmp = sysName ? String(sysName).trim() : null;
   if (snmp) return { nom: snmp, source: "snmp" };
 
-  const [dns, netbios, mdns] = await Promise.all([
+  /* La sonde SMB n'est lancée que si l'appelant a constaté le port 445
+     ouvert. Par défaut elle ne l'est PAS : une fonction de nommage ne
+     doit pas ouvrir de connexion TCP à l'insu de qui l'appelle. */
+  const [dns, netbios, mdns, smb] = await Promise.all([
     nomDns(ip),
     nomNetbios(ip),
     nomMdns(ip),
+    options.smb ? nomSmb(ip) : Promise.resolve(null),
   ]);
 
-  return choisirNom({ snmp, dns, netbios, mdns });
+  return choisirNom({ snmp, dns, netbios, mdns, smb });
 }
 
 /**
@@ -478,7 +737,13 @@ async function resoudreNom(ip, sysName) {
  * c'est précisément celle qu'on ne peut pas tester tant qu'elle est
  * mêlée à des appels réseau.
  */
-function choisirNom({ snmp = null, dns = null, netbios = null, mdns = null } = {}) {
+function choisirNom({
+  snmp = null,
+  dns = null,
+  netbios = null,
+  mdns = null,
+  smb = null,
+} = {}) {
   const propre = (v) => {
     const t = v ? String(v).trim() : "";
     return t || null;
@@ -487,12 +752,19 @@ function choisirNom({ snmp = null, dns = null, netbios = null, mdns = null } = {
   const parDns = propre(dns);
   const parNetbios = propre(netbios);
   const parMdns = propre(mdns);
+  const parSmb = propre(smb);
 
   if (parSnmp) return { nom: parSnmp, source: "snmp" };
 
   // Un nom enregistré au DNS a été posé par l'administrateur du réseau :
   // il porte une intention, là où les autres sont auto-générés.
   if (parDns) return { nom: parDns, source: "dns" };
+
+  /* SMB AVANT NETBIOS, et la raison tient en une phrase : les deux
+     rapportent le nom que la machine se donne, mais SMB peut rendre le
+     nom DNS complet là où NetBIOS est coupé à 15 caractères. Quand les
+     deux répondent ils disent la même chose — SMB la dit mieux. */
+  if (parSmb) return { nom: parSmb, source: "smb" };
 
   // NetBIOS plafonne à 15 caractères — c'est une limite du protocole,
   // pas de l'appareil. Quand le mDNS renvoie un nom PLUS LONG dont le
@@ -522,6 +794,11 @@ module.exports = {
   nomDns,
   nomNetbios,
   nomMdns,
+  nomSmb,
+  extraireNomSmb,
+  requeteNegociation,
+  requeteOuvertureSession,
+  jetonSpnego,
   // Exportés pour les tests : ces encodages binaires sont le genre de
   // code qu'on ne peut pas vérifier à l'œil.
   encoderNomNetbios,
