@@ -140,3 +140,51 @@
   font-size: 11.5px;
   color: var(--text-faint);
 }
+
+/* ─────────────────────────────────────────────────────────────────────
+   LIEN DANS UNE NOTE DE BAS DE CARTE
+
+   C'est un <button> et non un <a> : il ne navigue nulle part, il change
+   l'état de l'écran. Un <a href="#"> aurait la bonne apparence et le
+   mauvais comportement — il serait annoncé comme un lien par un lecteur
+   d'écran, et un clic du milieu ouvrirait un onglet vide.
+
+   Tout est donc remis à zéro (fond, bordure, remplissage), puisqu'un
+   bouton arrive avec l'apparence d'un bouton.
+   ───────────────────────────────────────────────────────────────────── */
+.login-lien {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--brass);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.login-lien:hover {
+  opacity: 0.8;
+}
+
+/* Le contour de focus est conservé : c'est le seul repère de la
+   personne qui navigue au clavier. */
+.login-lien:focus-visible {
+  outline: 2px solid var(--brass);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Même forme que .login-error, l'autre couleur : une réussite et un
+   échec doivent se ressembler assez pour se lire au même endroit, et
+   assez peu pour ne pas se confondre. */
+.login-succes {
+  margin: 0;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--color-ok) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-ok) 35%, transparent);
+  border-radius: 6px;
+  color: var(--color-ok);
+  font-size: 13px;
+  line-height: 1.5;
+}

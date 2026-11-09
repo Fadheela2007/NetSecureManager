@@ -54,6 +54,9 @@ const {
   collecterLogiciels,
   identite,
   systeme,
+  chargeProcesseur,
+  memoire,
+  compteursReseau,
 } = require("./collecteurs");
 
 const VERSION_AGENT = "1.0.0";
@@ -113,6 +116,19 @@ async function collecterEtEnvoyer() {
     }),
   ]);
 
+  /* ── LA MESURE, À CÔTÉ DE L'INVENTAIRE ──
+
+     Le processeur, la mémoire et les compteurs réseau arrivent dans le
+     même envoi que les logiciels et les processus. Un deuxième envoi
+     doublerait les connexions et les jetons pour la même machine.
+
+     Chacun est attrapé séparément : une charge processeur illisible ne
+     doit pas faire perdre les compteurs réseau, ni l'inverse. */
+  const [processeur, reseau] = await Promise.all([
+    chargeProcesseur().catch(() => null),
+    compteursReseau().catch(() => null),
+  ]);
+
   const moi = identite();
   if (!moi.adresse_ip) {
     console.error(
@@ -134,6 +150,13 @@ async function collecterEtEnvoyer() {
     ...systeme(),
     processus: processus ? processus.slice(0, MAX_PROCESSUS) : null,
     logiciels: logiciels ? logiciels.slice(0, MAX_LOGICIELS) : null,
+
+    /* `null` partout où la collecte a échoué — jamais 0. « 0 % de
+       processeur » se lit « machine au repos », « 0 kbit/s » se lit
+       « ne consomme rien » : deux affirmations qu'on n'a pas. */
+    processeur_pourcent: processeur,
+    reseau,
+    sante: memoire(),
   };
 
   try {
@@ -144,6 +167,15 @@ async function collecterEtEnvoyer() {
     console.log(
       `[Agent de poste] ${corps.nom_machine} (${corps.adresse_ip}) — ` +
         `${data.logiciels ?? 0} logiciel(s), ${data.processus ?? 0} processus, ` +
+        /* Ce que la mesure a donné, DIT À L'ÉCRAN de celui qui installe.
+           Sans ça, « pas de courbe » ne se distingue pas de « agent qui
+           ne parle pas » — et on cherche la panne du mauvais côté. */
+        (corps.processeur_pourcent === null
+          ? "processeur non lu, "
+          : `processeur ${corps.processeur_pourcent} %, `) +
+        (corps.reseau === null
+          ? "compteurs réseau non lus, "
+          : `${corps.reseau.length} carte(s) réseau, `) +
         `en ${Math.round((Date.now() - debut) / 1000)} s.`
     );
   } catch (err) {

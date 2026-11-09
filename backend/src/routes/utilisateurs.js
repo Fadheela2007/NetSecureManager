@@ -179,13 +179,7 @@ router.post("/utilisateurs", requireRole("admin"), async (req, res) => {
       // SECOND compte avant le test de cloisonnement par site.
       `INSERT INTO UTILISATEUR (nom, email, mot_de_passe_hash, role, id_site)
        VALUES (?, ?, ?, ?, ?)`,
-      [
-        String(nom).trim(),
-        String(email).trim(),
-        hash,
-        role,
-        idSite,
-      ]
+      [String(nom).trim(), String(email).trim(), hash, role, idSite]
     );
 
     // Relecture par projection explicite : le hash ne peut pas fuiter.
@@ -410,6 +404,180 @@ router.delete("/utilisateurs/:id", requireRole("admin"), async (req, res) => {
     res.status(500).json({ error: "Erreur lors de la suppression du compte" });
   } finally {
     cx.release();
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════════════════
+   LES DEMANDES D'ACCÈS
+
+   Une demande n'est pas un compte. Elle ne devient un compte que si un
+   administrateur lui donne un RÔLE et un SITE — les deux décisions que le
+   demandeur n'a pas le droit de prendre pour lui-même.
+
+   Voir backend/migrations/2026-09-28-demandes-acces.sql.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+function schemaDemandesAbsent(err) {
+  return err && (err.code === "ER_NO_SUCH_TABLE" || err.errno === 1146);
+}
+
+const AIDE_MIGRATION = {
+  error: "Les demandes d'accès ne sont pas installées",
+  aide: "Appliquez backend/migrations/2026-09-28-demandes-acces.sql, puis redémarrez le serveur.",
+};
+
+/**
+ * GET /api/utilisateurs/demandes
+ *
+ * Les demandes en attente. `mot_de_passe_hash` n'est PAS projeté — même
+ * règle que pour les comptes : une empreinte n'a aucune raison de
+ * traverser le réseau, et l'administrateur n'en a pas l'usage.
+ */
+router.get("/utilisateurs/demandes", requireRole("admin"), async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT id_demande, nom, email, motif, adresse_ip, date_demande
+         FROM DEMANDE_ACCES
+        WHERE statut = 'en_attente'
+        ORDER BY date_demande`
+    );
+    res.json(rows);
+  } catch (err) {
+    if (schemaDemandesAbsent(err)) return res.status(503).json(AIDE_MIGRATION);
+    throw err;
+  }
+});
+
+/**
+ * POST /api/utilisateurs/demandes/:id/accepter
+ *
+ * Crée le compte à partir de la demande. Corps : { role, id_site }.
+ *
+ * ── LE MOT DE PASSE N'EST NI CHOISI NI VU PAR L'ADMINISTRATEUR ──
+ *
+ * L'empreinte calculée au moment de la demande est recopiée telle quelle.
+ * C'est tout l'intérêt du dispositif : il n'existe aucun moment où le
+ * secret du nouvel utilisateur transite par quelqu'un d'autre que lui.
+ *
+ * ── LES MÊMES RÈGLES DE CLOISONNEMENT QUE LA CRÉATION DIRECTE ──
+ *
+ * Un administrateur rattaché à un site ne peut accepter une demande que
+ * dans SON site. Sans cette règle, la demande d'accès serait le chemin
+ * détourné par lequel il créerait des comptes ailleurs — et il serait
+ * absurde d'interdire par une porte ce qu'on autorise par l'autre.
+ */
+router.post("/utilisateurs/demandes/:id/accepter", requireRole("admin"), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: "Demande invalide" });
+
+  const { role } = req.body || {};
+  if (!ROLES.includes(role)) {
+    return res.status(400).json({ error: `Rôle invalide (attendu : ${ROLES.join(", ")})` });
+  }
+
+  const idSite = normaliserIdSite(req.body.id_site);
+  if (Number.isNaN(idSite)) return res.status(400).json({ error: "id_site invalide" });
+
+  const portee = porteeDe(req);
+  if (portee !== null) {
+    if (idSite === null) {
+      return res.status(403).json({
+        error: "Seul un administrateur global peut créer un compte global (sans site)",
+      });
+    }
+    if (idSite !== portee) {
+      return res.status(403).json({ error: "Vous ne pouvez créer un compte que dans votre site" });
+    }
+  }
+
+  try {
+    const [[demande]] = await db.query(
+      "SELECT id_demande, nom, email, mot_de_passe_hash FROM DEMANDE_ACCES WHERE id_demande = ? AND statut = 'en_attente'",
+      [id]
+    );
+    if (!demande) return res.status(404).json({ error: "Demande introuvable ou déjà traitée" });
+
+    /* L'adresse a pu recevoir un compte entre la demande et son
+       acceptation — par l'écran de création directe, par exemple. La
+       contrainte d'unicité le dirait, mais avec un message de base de
+       données que personne ne comprend. */
+    const [[existant]] = await db.query(
+      "SELECT 1 AS n FROM UTILISATEUR WHERE email = ? LIMIT 1",
+      [demande.email]
+    );
+    if (existant) {
+      return res.status(409).json({
+        error: "Cette adresse a déjà un compte",
+        aide: "La demande peut être refusée : le compte existe déjà.",
+      });
+    }
+
+    const [resultat] = await db.query(
+      `INSERT INTO UTILISATEUR (nom, email, mot_de_passe_hash, role, id_site)
+       VALUES (?, ?, ?, ?, ?)`,
+      [demande.nom, demande.email, demande.mot_de_passe_hash, role, idSite]
+    );
+
+    /* L'empreinte est effacée de la demande dès que le compte existe :
+       elle n'a plus de raison d'être, et deux copies d'un secret valent
+       toujours moins qu'une. La ligne, elle, reste — c'est la trace de
+       qui a accordé l'accès, et à quelle date. */
+    await db.query(
+      `UPDATE DEMANDE_ACCES
+          SET statut = 'acceptee', date_traitement = NOW(), traitee_par = ?,
+              mot_de_passe_hash = ''
+        WHERE id_demande = ?`,
+      [req.user?.id || null, id]
+    );
+
+    await tracer(
+      req,
+      "demande_acces_acceptee",
+      `Accès accordé à ${demande.email} — rôle ${role}${idSite ? `, site ${idSite}` : ", global"}`
+    );
+
+    res.status(201).json({
+      id_utilisateur: resultat.insertId,
+      nom: demande.nom,
+      email: demande.email,
+      role,
+      id_site: idSite,
+    });
+  } catch (err) {
+    if (schemaDemandesAbsent(err)) return res.status(503).json(AIDE_MIGRATION);
+    throw err;
+  }
+});
+
+/**
+ * POST /api/utilisateurs/demandes/:id/refuser
+ *
+ * La ligne est SUPPRIMÉE, pas marquée refusée.
+ *
+ * Elle porte une empreinte de mot de passe et le motif écrit par une
+ * personne. Conserver indéfiniment le secret de quelqu'un à qui on a dit
+ * non n'a aucune justification — et une table de demandes refusées est
+ * précisément le genre de recoin qu'on oublie de purger. Le refus est
+ * tracé au journal, ce qui suffit à savoir qu'il a eu lieu.
+ */
+router.post("/utilisateurs/demandes/:id/refuser", requireRole("admin"), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: "Demande invalide" });
+
+  try {
+    const [[demande]] = await db.query(
+      "SELECT email FROM DEMANDE_ACCES WHERE id_demande = ? AND statut = 'en_attente'",
+      [id]
+    );
+    if (!demande) return res.status(404).json({ error: "Demande introuvable ou déjà traitée" });
+
+    await db.query("DELETE FROM DEMANDE_ACCES WHERE id_demande = ?", [id]);
+    await tracer(req, "demande_acces_refusee", `Demande refusée pour ${demande.email}`);
+
+    res.json({ refusee: true });
+  } catch (err) {
+    if (schemaDemandesAbsent(err)) return res.status(503).json(AIDE_MIGRATION);
+    throw err;
   }
 });
 

@@ -22,17 +22,21 @@ const tempsReel = require("./services/tempsReelService");
 
 const scanRoutes = require("./routes/scan");
 const authRoutes = require("./routes/auth");
+const permissionsRoutes = require("./routes/permissions");
 const { requireAuth } = require("./middleware/authMiddleware");
+const { plancherEcran } = require("./middleware/requireRole");
 const monitoringService = require("./services/monitoringService");
 const netflowService = require("./services/netflowService");
 const { evaluerChargeDepuisPush } = require("./services/monitoringService");
 const { recevoirInventaire } = require("./services/inventairePosteService");
+const rattachement = require("./services/rattachementService");
 const { recevoirReleves } = require("./services/observationDnsDepot");
 const db = require("./db");
 const sitesRoutes = require("./routes/sites");
 const rapportsRoutes = require("./routes/rapports");
 const configurationRoutes = require("./routes/configuration");
 const plagesRoutes = require("./routes/plages");
+const traficRoutes = require("./routes/trafic");
 const utilisateursRoutes = require("./routes/utilisateurs");
 const reinitialisationRoutes = require("./routes/reinitialisation");
 const {
@@ -147,6 +151,7 @@ app.use(
    --------------------------------------------------------------------- */
 app.use(express.json({ limit: "5mb" }));
 app.use("/api/auth", authRoutes);
+
 
 // ⚠ NE RIEN MONTER SUR "/api" AVEC requireAuth ICI.
 //
@@ -835,6 +840,63 @@ app.post("/api/agent/observations-dns", async (req, res) => {
   }
 });
 
+/* ═══════════════════════════════════════════════════════════════════════
+   RATTACHER UN POSTE : LE CODE CONTRE UN JETON.
+
+   Seule route d'agent SANS jeton, et il faut dire pourquoi c'est sûr :
+   elle n'accepte qu'un code fabriqué par un administrateur pour un poste
+   précis, valable 30 minutes, à usage unique, et les essais au hasard
+   sont freinés par adresse. Ce qu'elle rend n'ouvre rien d'autre que le
+   droit d'écrire l'inventaire de CE poste.
+
+   C'EST LE REMPLAÇANT DU JETON DE SITE RECOPIÉ À LA MAIN. Ce jeton-là
+   valait pour tout le site ; il finissait sur chaque machine, dans
+   chaque presse-papier, et parfois sur une capture d'écran.
+   ═══════════════════════════════════════════════════════════════════════ */
+app.post("/api/agent/rattacher", async (req, res) => {
+  const { code, nom_machine } = req.body || {};
+  if (!code) return res.status(400).json({ error: "Le code de rattachement est requis" });
+
+  try {
+    const resultat = await rattachement.echangerCode(code, {
+      nomDeclare: nom_machine,
+      adresseVue: req.ip,
+    });
+
+    if (!resultat.ok) {
+      if (resultat.raison === "trop_d_essais") {
+        return res.status(429).json({
+          error: "Trop d'essais depuis cette machine. Réessayez dans quelques minutes.",
+        });
+      }
+      // Un seul message pour « inexistant » et « expiré » : distinguer
+      // les deux renseignerait celui qui essaie au hasard.
+      return res.status(403).json({ error: "Code de rattachement invalide ou expiré" });
+    }
+
+    console.log(
+      `Rattachement : ${resultat.adresse_ip} (${nom_machine || "sans nom déclaré"}) ` +
+        "a présenté un code valide et reçu son jeton de poste."
+    );
+
+    res.json({
+      jeton: resultat.jeton,
+      id_site: resultat.id_site,
+      id_equipement: resultat.id_equipement,
+      adresse_ip: resultat.adresse_ip,
+    });
+  } catch (err) {
+    if (/doesn't exist|Unknown column/i.test(err.message)) {
+      return res.status(503).json({
+        error: "Le rattachement de poste n'est pas installé sur cette base",
+        aide: "node tools\\appliquer-migrations.js",
+      });
+    }
+    console.error("Erreur de rattachement:", err);
+    res.status(500).json({ error: "Erreur serveur pendant le rattachement" });
+  }
+});
+
 app.post("/api/agent/inventaire-poste", async (req, res) => {
   const { id_site, adresse_ip } = req.body || {};
 
@@ -848,8 +910,27 @@ app.post("/api/agent/inventaire-poste", async (req, res) => {
   }
 
   try {
-    const [siteRows] = await db.query("SELECT agent_token FROM SITE WHERE id_site = ?", [id_site]);
-    if (!siteRows[0] || siteRows[0].agent_token !== header.slice(7)) {
+    /* DEUX JETONS SONT ACCEPTÉS ICI, ET L'ORDRE COMPTE.
+
+       Le jeton DE POSTE d'abord : c'est le nouveau chemin, celui qui ne
+       vaut que pour une machine. Le jeton DE SITE ensuite, parce que les
+       agents installés avant ce changement continuent de s'en servir, et
+       qu'une mise à jour qui fait taire les agents déjà en place serait
+       une panne, pas une amélioration. */
+    const presente = header.slice(7);
+    let autorise = false;
+
+    const poste = await rattachement.posteDuJeton(presente).catch(() => null);
+    if (poste && Number(poste.id_site) === Number(id_site)) {
+      autorise = true;
+    }
+
+    if (!autorise) {
+      const [siteRows] = await db.query("SELECT agent_token FROM SITE WHERE id_site = ?", [id_site]);
+      autorise = Boolean(siteRows[0]) && siteRows[0].agent_token === presente;
+    }
+
+    if (!autorise) {
       return res.status(403).json({ error: "Token d'agent invalide pour ce site" });
     }
 
@@ -870,8 +951,25 @@ app.post("/api/agent/inventaire-poste", async (req, res) => {
   }
 });
 
+/* ─────────────────────────────────────────────────────────────────────
+   LE PLANCHER DES PERMISSIONS — « voir » sur l'écran demandé.
+
+   Ici et pas ailleurs : après requireAuth (il lui faut req.user), et
+   avant tous les routeurs protégés, pour couvrir aussi les routes de
+   consultation, qui n'ont aucun requireRole.
+
+   Sans lui, retirer un écran à un rôle ne ferait disparaître qu'une
+   entrée de menu : les routes répondraient encore à qui les appelle à la
+   main. Un cloisonnement que seule l'interface applique n'en est pas un.
+   ───────────────────────────────────────────────────────────────────── */
+app.use("/api", requireAuth, plancherEcran);
+
+/* Monté AVANT scanRoutes : les deux exposent des chemins sous
+   /equipements/:id, et le premier routeur qui répond gagne. */
+app.use("/api", requireAuth, traficRoutes);
 app.use("/api", requireAuth, plagesRoutes);
 app.use("/api", requireAuth, utilisateursRoutes);
+app.use("/api", requireAuth, permissionsRoutes);
 app.use("/api", requireAuth, scanRoutes);
 app.use("/api", requireAuth, sitesRoutes);
 app.use("/api", requireAuth, rapportsRoutes);
@@ -1001,4 +1099,10 @@ server.listen(PORT, () => {
      qu'il reste à configurer sur le routeur. Son échec éventuel ne
      concerne que lui — voir netflowService.js. */
   netflowService.demarrer();
+
+  /* L'ÉDITION EST ANNONCÉE AU DÉMARRAGE, et surtout quand une licence est
+     REFUSÉE. Sans ce message, un exploitant qui a collé une clé expirée
+     découvrirait le problème des semaines plus tard, en cherchant pourquoi
+     une fonction a disparu. Le dire ici coûte trois lignes de console et
+     épargne une enquête. */
 });

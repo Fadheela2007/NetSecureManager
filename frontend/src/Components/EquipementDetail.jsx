@@ -50,6 +50,152 @@ function tauxLien(i) {
   return Math.min(100, (max / (i.vitesse_mbps * 1000)) * 100);
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+   LA SANTÉ D'UN POSTE, EN QUATRE LIGNES
+
+   Mémoire, disques, ancienneté du démarrage, services de protection.
+   Ces quatre-là suffisent à dire si une machine va bien ; le reste de
+   l'inventaire dit ce qu'elle contient, ce qui est une autre question.
+
+   RÈGLE DE COULEUR, ET ELLE EST STRICTE. Le rouge et l'orange ne sortent
+   que sur un SEUIL FRANCHI, jamais sur une valeur simplement basse :
+   un disque à 12 % libre est normal sur un poste de travail, à 4 % il ne
+   l'est plus. Un écran qui alarme en permanence n'alarme plus.
+
+   CE QU'ON N'AFFIRME PAS : « ce poste est protégé ». On affiche le nom de
+   l'antivirus déclaré et l'état des services, et le lecteur conclut. La
+   plateforme ne dit que ce qu'elle a observé.
+   ══════════════════════════════════════════════════════════════════════ */
+function SantePoste({ sante }) {
+  const go = (v) => (v === null || v === undefined ? null : Number(v));
+  const mo = (v) => (v === null || v === undefined ? null : Number(v));
+
+  const memTotale = mo(sante.memoire_totale_mo);
+  const memLibre = mo(sante.memoire_libre_mo);
+  const memPct =
+    memTotale && memLibre !== null ? Math.round((memLibre / memTotale) * 100) : null;
+
+  /* Jours écoulés depuis le dernier démarrage. Au-delà de trente jours,
+     un poste Windows n'a pas appliqué ses mises à jour — c'est la raison
+     pour laquelle ce chiffre est affiché, et le seuil vient de là. */
+  const jours =
+    sante.dernier_demarrage
+      ? Math.floor((Date.now() - new Date(sante.dernier_demarrage).getTime()) / 86400000)
+      : null;
+
+  const disques = Array.isArray(sante.disques) ? sante.disques : [];
+  const services = Array.isArray(sante.services) ? sante.services : [];
+  const antivirus = Array.isArray(sante.antivirus) ? sante.antivirus : [];
+
+  const ton = (mauvais, moyen) =>
+    mauvais ? "var(--color-crit)" : moyen ? "var(--color-warn)" : "var(--color-ink)";
+
+  const Case = ({ titre, valeur, note, couleur }) => (
+    <div className="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2">
+      <p className="text-[10px] uppercase tracking-wide text-[var(--color-mute)]">{titre}</p>
+      <p className="text-sm font-semibold mt-0.5" style={{ color: couleur }}>
+        {valeur}
+      </p>
+      {note && <p className="text-[10px] text-[var(--color-mute)] mt-0.5">{note}</p>}
+    </div>
+  );
+
+  const arretes = services.filter((s) => s.etat && s.etat !== "Running");
+
+  return (
+    <div className="mb-4">
+      <p className="text-[11px] uppercase tracking-wide text-[var(--color-mute)] mb-1.5">
+        Santé du poste
+        {sante.date_releve && (
+          <span className="normal-case tracking-normal">
+            {" "}
+            — relevé le {new Date(sante.date_releve).toLocaleString("fr-FR")}
+          </span>
+        )}
+      </p>
+
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        {memPct !== null && (
+          <Case
+            titre="Mémoire libre"
+            valeur={`${memPct} %`}
+            note={`${Math.round(memLibre / 1024)} Go libres sur ${Math.round(memTotale / 1024)}`}
+            couleur={ton(memPct < 10, memPct < 20)}
+          />
+        )}
+
+        {disques.map((d) => {
+          const total = go(d.total_go);
+          const libre = go(d.libre_go);
+          const pct = total ? Math.round((libre / total) * 100) : null;
+          return (
+            <Case
+              key={d.lettre}
+              titre={`Disque ${d.lettre}`}
+              valeur={pct === null ? "—" : `${pct} % libre`}
+              note={total ? `${libre} Go sur ${total}` : null}
+              couleur={ton(pct !== null && pct < 5, pct !== null && pct < 15)}
+            />
+          );
+        })}
+
+        {jours !== null && (
+          <Case
+            titre="Dernier démarrage"
+            valeur={jours === 0 ? "aujourd'hui" : `il y a ${jours} j`}
+            note={new Date(sante.dernier_demarrage).toLocaleString("fr-FR")}
+            couleur={ton(jours > 60, jours > 30)}
+          />
+        )}
+      </div>
+
+      {/* ── LES SERVICES DE PROTECTION ──
+          C'est la ligne que personne d'autre n'affiche, et c'est celle qui
+          compte : un pare-feu arrêté ou des mises à jour désactivées sont
+          l'état dans lequel un poste se fait prendre. */}
+      {services.length > 0 && (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          {services.map((s) => {
+            const actif = s.etat === "Running";
+            return (
+              <span
+                key={s.nom}
+                title={`${s.nom} — démarrage ${s.demarrage || "inconnu"}`}
+                className="text-[11px] px-2 py-0.5 rounded-full border"
+                style={{
+                  borderColor: actif
+                    ? "var(--color-line)"
+                    : "color-mix(in srgb, var(--color-crit) 45%, transparent)",
+                  color: actif ? "var(--color-mute)" : "var(--color-crit)",
+                }}
+              >
+                {s.libelle || s.nom} : {actif ? "actif" : "arrêté"}
+              </span>
+            );
+          })}
+          {antivirus.map((a) => (
+            <span
+              key={a}
+              className="text-[11px] px-2 py-0.5 rounded-full border border-[var(--color-line)] text-[var(--color-mute)]"
+            >
+              antivirus déclaré : {a}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {arretes.length > 0 && (
+        <p className="text-[11px] mt-1.5" style={{ color: "var(--color-crit)" }}>
+          {arretes.length === 1
+            ? `${arretes[0].libelle || arretes[0].nom} est arrêté sur ce poste.`
+            : `${arretes.length} services de protection sont arrêtés sur ce poste.`}{" "}
+          Constaté au dernier relevé, pas déduit.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export default function EquipementDetail({ equipement, onClose, onRenomme }) {
   const [releves, setReleves] = useState([]);
   // État de la supervision, renseigné seulement quand il n'y a aucun
@@ -65,6 +211,13 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
   const [failles, setFailles] = useState(null);
   const [certificats, setCertificats] = useState([]);
   const [domainesDns, setDomainesDns] = useState(null);
+
+  /* L'intérieur de la machine — remis le 17/09, après avoir été retiré le
+     16/09. La collecte n'avait jamais cessé de fonctionner : seule la
+     fenêtre avait disparu. */
+  const [interieur, setInterieur] = useState(null);
+  const [tousLesLogiciels, setTousLesLogiciels] = useState(false);
+  const [tousLesProcessus, setTousLesProcessus] = useState(false);
   const [dispo, setDispo] = useState(null);
   const [periodeDispo, setPeriodeDispo] = useState(30);
 
@@ -198,10 +351,28 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
     }
   }
 
+  /* ── POURQUOI CETTE ANNULATION ──
+
+     Cette fiche n'est PAS démontée quand on passe d'une machine à l'autre :
+     le composant reste monté et seul `selection` change. Les neuf requêtes
+     de la machine précédente sont donc toujours en vol.
+
+     Sans garde, la réponse lente de la machine A arrivait APRÈS celles de
+     la machine B et écrasait l'état : la fiche affichait le nom de B avec
+     les certificats, les services ou les FAILLES de A. Sur un produit de
+     sécurité, attribuer une faille à la mauvaise machine est le pire
+     résultat possible — et rien à l'écran ne l'aurait signalé.
+
+     `annule` empêche l'écriture ; `abort()` coupe la requête devenue
+     inutile, ce qui évite neuf requêtes par clic quand on parcourt une
+     liste. */
   useEffect(() => {
+    const controleur = new AbortController();
+    let annule = false;
     setLoading(true);
-    axios.get(`${API_URL}/equipements/${equipement.id_equipement}/releves`, { params: { heures: 24 } })
+    axios.get(`${API_URL}/equipements/${equipement.id_equipement}/releves`, { params: { heures: 24 }, signal: controleur.signal })
       .then(({ data }) => {
+        if (annule) return;
         // La route renvoyait un tableau nu ; elle renvoie désormais
         // { releves, supervision }. On accepte les deux formes : un
         // frontend à jour ne doit pas casser face à un serveur qui ne
@@ -214,8 +385,9 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
           setSupervision(data?.supervision ?? null);
         }
       })
-      .catch(() => { setReleves([]); setSupervision(null); })
-      .finally(() => setLoading(false));
+      .catch(() => { if (!annule) { setReleves([]); setSupervision(null); } })
+      .finally(() => { if (!annule) setLoading(false); });
+    return () => { annule = true; controleur.abort(); };
   }, [equipement.id_equipement]);
 
   // Vulnérabilités connues.
@@ -226,19 +398,26 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
   // lieu. Silence et absence de risque ne sont pas la même chose, et
   // c'est le genre de confusion qui se paie devant un client.
   useEffect(() => {
+    const controleur = new AbortController();
+    let annule = false;
     setVulnErreur(false);
-    axios.get(`${API_URL}/equipements/${equipement.id_equipement}/vulnerabilites`)
-      .then(({ data }) => setVulnerabilites(data))
+    axios.get(`${API_URL}/equipements/${equipement.id_equipement}/vulnerabilites`, { signal: controleur.signal })
+      .then(({ data }) => { if (!annule) setVulnerabilites(data); })
       .catch(() => {
+        if (annule) return;
         setVulnerabilites([]);
         setVulnErreur(true);
       });
+    return () => { annule = true; controleur.abort(); };
   }, [equipement.id_equipement]);
 
   useEffect(() => {
-    axios.get(`${API_URL}/equipements/${equipement.id_equipement}/interfaces`)
-      .then(({ data }) => setInterfaces(data))
-      .catch(() => setInterfaces([]));
+    const controleur = new AbortController();
+    let annule = false;
+    axios.get(`${API_URL}/equipements/${equipement.id_equipement}/interfaces`, { signal: controleur.signal })
+      .then(({ data }) => { if (!annule) setInterfaces(data); })
+      .catch(() => { if (!annule) setInterfaces([]); });
+    return () => { annule = true; controleur.abort(); };
   }, [equipement.id_equipement]);
 
   // Ports ouverts. La route existait déjà côté serveur mais n'était
@@ -247,9 +426,12 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
   // fiche sur un produit de supervision — un port 23 ou 3389 ouvert se
   // commente tout seul devant un client.
   useEffect(() => {
-    axios.get(`${API_URL}/equipements/${equipement.id_equipement}/services`)
-      .then(({ data }) => setServices(data))
-      .catch(() => setServices([]));
+    const controleur = new AbortController();
+    let annule = false;
+    axios.get(`${API_URL}/equipements/${equipement.id_equipement}/services`, { signal: controleur.signal })
+      .then(({ data }) => { if (!annule) setServices(data); })
+      .catch(() => { if (!annule) setServices([]); });
+    return () => { annule = true; controleur.abort(); };
   }, [equipement.id_equipement]);
 
   /* Failles publiées pour les versions annoncées.
@@ -257,15 +439,40 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
      pas installé : trois états distincts, parce qu'une liste vide et une
      absence d'information ne doivent jamais s'afficher pareil. */
   useEffect(() => {
+    const controleur = new AbortController();
+    let annule = false;
     setFailles(null);
-    axios.get(`${API_URL}/equipements/${equipement.id_equipement}/failles`)
-      .then(({ data }) => setFailles(data))
-      .catch(() => setFailles(false));
+    axios.get(`${API_URL}/equipements/${equipement.id_equipement}/failles`, { signal: controleur.signal })
+      .then(({ data }) => { if (!annule) setFailles(data); })
+      .catch(() => { if (!annule) setFailles(false); });
+    return () => { annule = true; controleur.abort(); };
   }, [equipement.id_equipement]);
 
   /* L'intérieur de la machine : logiciels installés et programmes qui
      tournent. Seul un agent installé dessus peut le savoir — aucun scan
-     réseau, d'aucune plateforme, ne voit à travers un poste. */
+     réseau, d'aucune plateforme, ne voit à travers un poste.
+
+     La route répond TOUJOURS, même sans agent : elle rend alors
+     `agent_installe: false` avec l'explication. C'est ce qui permet à
+     l'écran de dire « cette machine n'a pas d'agent » au lieu d'afficher
+     une liste vide, qui se lirait « cette machine ne fait tourner aucun
+     logiciel ». */
+  useEffect(() => {
+    const controleur = new AbortController();
+    let annule = false;
+    setInterieur(null);
+    setTousLesLogiciels(false);
+    setTousLesProcessus(false);
+    axios
+      .get(`${API_URL}/equipements/${equipement.id_equipement}/inventaire-poste`, { signal: controleur.signal })
+      .then(({ data }) => { if (!annule) setInterieur(data); })
+      // 503 si la migration du 10/09 n'est pas passée, 403 pour un
+      // lecteur : dans les deux cas la section ne s'affiche pas, et le
+      // reste de la fiche fonctionne.
+      .catch(() => { if (!annule) setInterieur(null); });
+    return () => { annule = true; controleur.abort(); };
+  }, [equipement.id_equipement]);
+
   /* Certificats des services chiffrés. Le nombre de jours restants est
      calculé par le serveur à chaque lecture, jamais stocké : figé, il
      serait faux dès le lendemain. */
@@ -273,26 +480,36 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
      `active`, et l'écran doit dire « personne n'écoute » plutôt que de
      laisser croire que la machine ne contacte rien. */
   useEffect(() => {
+    const controleur = new AbortController();
+    let annule = false;
     setDomainesDns(null);
-    axios.get(`${API_URL}/equipements/${equipement.id_equipement}/observations-dns`)
-      .then(({ data }) => setDomainesDns(data))
-      .catch(() => setDomainesDns(null));
+    axios.get(`${API_URL}/equipements/${equipement.id_equipement}/observations-dns`, { signal: controleur.signal })
+      .then(({ data }) => { if (!annule) setDomainesDns(data); })
+      .catch(() => { if (!annule) setDomainesDns(null); });
+    return () => { annule = true; controleur.abort(); };
   }, [equipement.id_equipement]);
 
   useEffect(() => {
+    const controleur = new AbortController();
+    let annule = false;
     setCertificats([]);
-    axios.get(`${API_URL}/equipements/${equipement.id_equipement}/certificats`)
-      .then(({ data }) => setCertificats(Array.isArray(data) ? data : []))
-      .catch(() => setCertificats([]));
+    axios.get(`${API_URL}/equipements/${equipement.id_equipement}/certificats`, { signal: controleur.signal })
+      .then(({ data }) => { if (!annule) setCertificats(Array.isArray(data) ? data : []); })
+      .catch(() => { if (!annule) setCertificats([]); });
+    return () => { annule = true; controleur.abort(); };
   }, [equipement.id_equipement]);
 
   useEffect(() => {
+    const controleur = new AbortController();
+    let annule = false;
     setDispo(null);
     axios.get(`${API_URL}/equipements/${equipement.id_equipement}/disponibilite`, {
       params: { jours: periodeDispo },
+      signal: controleur.signal,
     })
-      .then(({ data }) => setDispo(data))
-      .catch(() => setDispo(null));
+      .then(({ data }) => { if (!annule) setDispo(data); })
+      .catch(() => { if (!annule) setDispo(null); });
+    return () => { annule = true; controleur.abort(); };
   }, [equipement.id_equipement, periodeDispo]);
 
   async function reveiller() {
@@ -589,7 +806,7 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
           <div className="mb-5 bg-[var(--color-surface-2)] border border-[var(--color-line)] rounded-lg p-4">
             <div className="flex items-start justify-between gap-4 mb-2">
               <h3 className="text-xs uppercase tracking-wide text-[var(--color-mute)]">
-                Taux de disponibilité
+                {dispo.nature === "presence" ? "Taux de présence" : "Taux de disponibilité"}
               </h3>
               <select
                 value={periodeDispo}
@@ -608,13 +825,20 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
               <span
                 className="font-[var(--font-display)] text-2xl font-semibold"
                 style={{
-                  color: !dispo.fiable
-                    ? "var(--color-mute)"
-                    : dispo.taux_disponibilite >= 99
-                    ? "var(--color-ok)"
-                    : dispo.taux_disponibilite >= 95
-                    ? "var(--color-warn)"
-                    : "var(--color-crit)",
+                  /* Un taux de PRÉSENCE ne se juge pas : 40 % sur un poste
+                     de travail décrit quelqu'un qui éteint son ordinateur
+                     le soir. Le colorer en rouge ferait chercher une panne
+                     qui n'existe pas. Il s'affiche donc en encre neutre,
+                     sans verdict. */
+                  color:
+                    !dispo.fiable || dispo.nature === "presence"
+                      ? "var(--color-ink)"
+                      : dispo.taux_disponibilite >= 99
+                      ? "var(--color-ok)"
+                      : dispo.taux_disponibilite >= 95
+                      ? "var(--color-warn)"
+                      : "var(--color-crit)",
+                  opacity: dispo.fiable ? 1 : 0.55,
                 }}
               >
                 {dispo.taux_indicatif !== null ? `${dispo.taux_indicatif.toFixed(2)} %` : "—"}
@@ -623,8 +847,25 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
                 <span className="text-xs text-[var(--color-warn)]">indicatif</span>
               )}
               <span className="text-xs text-[var(--color-mute)]">
-                {dispo.nb_pannes} panne(s) — {dispo.minutes_indisponible} min d'indisponibilité sur{" "}
-                {Math.round(dispo.heures_observables)} h observées
+                {/* « 25 200 min d'indisponibilité » sur un poste éteint le
+                    soir est exact et absurde : on dit « hors tension », qui
+                    décrit la même mesure sans l'accuser. */}
+                {dispo.nature === "presence" ? (
+                  <>
+                    {Math.round(dispo.minutes_indisponible / 60)} h hors tension sur{" "}
+                    {Math.round(dispo.heures_observables)} h observées
+                  </>
+                ) : (
+                  <>
+                    {dispo.nb_pannes} panne(s) — {dispo.minutes_indisponible} min
+                    d'indisponibilité sur {Math.round(dispo.heures_observables)} h observées
+                  </>
+                )}
+                {dispo.cycles_observes > 0 && (
+                  <span className="ml-1">
+                    ({dispo.cycles_repondus} cycles sur {dispo.cycles_observes})
+                  </span>
+                )}
               </span>
             </div>
 
@@ -1129,6 +1370,198 @@ export default function EquipementDetail({ equipement, onClose, onRenomme }) {
                 ))}
               </tbody>
             </table></div>
+          </div>
+        )}
+
+        {/* ══════════════════════════════════════════════════════════
+            L'INTÉRIEUR DE LA MACHINE
+
+            Tout le reste de cette fiche vient du RÉSEAU : des ports qui
+            répondent, des noms annoncés, des relevés SNMP. Cette
+            section-ci vient d'ailleurs — d'un script exécuté SUR le
+            poste, qui a envoyé ce qu'il y a vu.
+
+            La distinction n'est pas un détail de vocabulaire : aucun
+            scan, d'aucune plateforme au monde, ne voit à travers une
+            machine. Ce qui est écrit ici n'a pas été deviné, il a été
+            DÉCLARÉ par la machine elle-même — et la section le dit, avec
+            la date et la version de l'agent.
+
+            CE QUI N'EST PAS AFFICHÉ, ET C'EST VOULU : ni le nom de
+            l'utilisateur, ni les lignes de commande. Le script ne les
+            collecte pas — les lignes de commande contiennent
+            régulièrement des mots de passe et des chemins personnels.
+            Un inventaire de parc n'a pas besoin de savoir QUI est
+            devant la machine.
+            ══════════════════════════════════════════════════════════ */}
+        {interieur && (
+          <div className="mb-5">
+            <h3 className="text-xs uppercase tracking-wide text-[var(--color-mute)] mb-2">
+              Intérieur de la machine
+            </h3>
+
+            {/* LE TEST PORTAIT SUR `agent_installe`, ET C'ÉTAIT UN DÉFAUT.
+
+                Depuis que le scan lit l'intérieur des machines par SNMP
+                et par WMI — sans rien installer — un relevé parfaitement
+                valide arrive avec `agent_installe: false`. Cette section
+                affichait alors un paragraphe VIDE à la place des
+                logiciels et des programmes qu'elle venait de recevoir :
+                le serveur savait, l'interface se taisait.
+
+                Le bon test est `observe` : « ai-je quelque chose à
+                montrer ? ». D'où ça vient est dit juste en dessous. */}
+            {!interieur.observe ? (
+              /* Dire pourquoi c'est vide. Une liste vide sans un mot se
+                 lirait « cette machine ne fait tourner aucun logiciel »,
+                 ce qui est absurde — et c'est pourtant ce qu'affichent
+                 la plupart des inventaires. */
+              <p className="text-xs text-[var(--color-mute)]">
+                {interieur.explication}
+              </p>
+            ) : (
+              <>
+                {/* TROIS VOIES, TROIS PHRASES DIFFÉRENTES. Dire « déclaré
+                    par la machine elle-même » d'un relevé WMI serait faux :
+                    c'est le serveur qui a demandé, et la machine a répondu
+                    sans que rien n'y soit installé. C'est précisément
+                    l'argument du produit — il doit être exact. */}
+                <p className="text-[11px] text-[var(--color-mute)] mb-3">
+                  {interieur.source === "agent"
+                    ? "Déclaré par la machine elle-même"
+                    : interieur.source === "wmi"
+                    ? "Lu à distance par WMI, sans rien installer sur le poste"
+                    : "Lu à distance par SNMP, sans rien installer sur le poste"}
+                  {interieur.agent_version && ` (agent ${interieur.agent_version})`}
+                  {interieur.dernier_inventaire &&
+                    ` le ${new Date(interieur.dernier_inventaire).toLocaleString("fr-FR")}`}
+                  . Ni nom d'utilisateur, ni ligne de commande : ils ne sont pas
+                  collectés.
+                </p>
+
+                {/* ══════════════════════════════════════════════════════
+                    LA SANTÉ DU POSTE
+
+                    Un inventaire dit ce qui est installé. Il ne dit pas si
+                    la machine va bien. Ces quatre chiffres-là, oui — et ce
+                    sont ceux qu'un responsable informatique regarde en
+                    premier.
+
+                    Chaque valeur absente reste absente : une machine lue
+                    par DCOM donne sa mémoire sans ses disques. On n'écrit
+                    pas « 0 » à la place, ce serait une alerte, et fausse.
+                    ══════════════════════════════════════════════════════ */}
+                {interieur.sante && <SantePoste sante={interieur.sante} />}
+
+                <div className="grid gap-5 md:grid-cols-2">
+                  {/* ── LOGICIELS INSTALLÉS ── */}
+                  <div>
+                    <p className="text-[11px] uppercase tracking-wide text-[var(--color-mute)] mb-1.5">
+                      Logiciels installés ({interieur.logiciels.length})
+                    </p>
+                    {interieur.logiciels.length === 0 ? (
+                      <p className="text-xs text-[var(--color-mute)]">
+                        Aucun logiciel remonté.
+                      </p>
+                    ) : (
+                      <>
+                        <ul className="space-y-1">
+                          {(tousLesLogiciels
+                            ? interieur.logiciels
+                            : interieur.logiciels.slice(0, 12)
+                          ).map((l, i) => (
+                            <li
+                              key={`${l.nom}-${l.version || i}`}
+                              className="text-xs flex items-baseline justify-between gap-2"
+                            >
+                              <span className="truncate" title={l.editeur || undefined}>
+                                {l.nom}
+                              </span>
+                              <span className="text-[var(--color-mute)] font-[var(--font-mono)] text-[11px] whitespace-nowrap">
+                                {l.version || "—"}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                        {interieur.logiciels.length > 12 && (
+                          <button
+                            onClick={() => setTousLesLogiciels((v) => !v)}
+                            className="text-[11px] text-[var(--color-signal)] hover:underline mt-1.5 cible-tactile"
+                          >
+                            {tousLesLogiciels
+                              ? "Réduire"
+                              : `Afficher les ${interieur.logiciels.length - 12} autres`}
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+
+                  {/* ── PROGRAMMES EN COURS ──
+                      Triés par mémoire décroissante côté serveur : ce qui
+                      pèse se lit en premier. Le nombre d'occurrences est
+                      montré parce qu'un navigateur ouvre trente processus
+                      du même nom — les compter séparément donnerait une
+                      liste illisible. */}
+                  <div>
+                    <p className="text-[11px] uppercase tracking-wide text-[var(--color-mute)] mb-1.5">
+                      Programmes en cours ({interieur.processus.length})
+                    </p>
+                    {interieur.processus.length === 0 ? (
+                      <p className="text-xs text-[var(--color-mute)]">
+                        Aucun programme remonté.
+                      </p>
+                    ) : (
+                      <>
+                        <ul className="space-y-1">
+                          {(tousLesProcessus
+                            ? interieur.processus
+                            : interieur.processus.slice(0, 12)
+                          ).map((pr, i) => (
+                            <li
+                              key={`${pr.nom}-${i}`}
+                              className="text-xs flex items-baseline justify-between gap-2"
+                            >
+                              <span className="truncate">
+                                {pr.nom}
+                                {pr.occurrences > 1 && (
+                                  <span className="text-[var(--color-mute)] ml-1">
+                                    ×{pr.occurrences}
+                                  </span>
+                                )}
+                              </span>
+                              <span className="text-[var(--color-mute)] font-[var(--font-mono)] text-[11px] whitespace-nowrap">
+                                {pr.memoire_ko
+                                  ? `${Math.round(pr.memoire_ko / 1024)} Mo`
+                                  : "—"}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                        {interieur.processus.length > 12 && (
+                          <button
+                            onClick={() => setTousLesProcessus((v) => !v)}
+                            className="text-[11px] text-[var(--color-signal)] hover:underline mt-1.5 cible-tactile"
+                          >
+                            {tousLesProcessus
+                              ? "Réduire"
+                              : `Afficher les ${interieur.processus.length - 12} autres`}
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                {/* L'instantané est daté, et il ne se met pas à jour tout
+                    seul : le script s'exécute à l'ouverture de session ou
+                    par tâche planifiée. Écrire « programmes en cours »
+                    sans dire de QUAND laisserait croire à du temps réel. */}
+                <p className="text-[11px] text-[var(--color-mute)] mt-3">
+                  Instantané du dernier envoi, pas une vue en temps réel.
+                </p>
+              </>
+            )}
           </div>
         )}
 

@@ -77,13 +77,120 @@ if (-not $session) {
     Rendre @{ ok = $false; raison = $raison; detail = $dernierEchec }
 }
 
-$resultat = @{ ok = $true; voie = $voie; systeme = $null; processus = $null; logiciels = $null }
+$resultat = @{ ok = $true; voie = $voie; systeme = $null; processus = $null; logiciels = $null; sante = $null }
 
-# ── Le systeme ──
+# ── Le systeme, la memoire et le dernier demarrage ──
+#
+# POURQUOI CES TROIS-LA ENSEMBLE. Win32_OperatingSystem les porte toutes
+# dans UN SEUL aller-retour : le systeme, la memoire physique totale et
+# libre, et l'heure du dernier demarrage. Les demander separement
+# couterait trois interrogations pour la meme reponse.
+#
+# Les memoires sont rendues en kilo-octets par WMI : on les ramene en
+# mega-octets, l'unite que l'interface affiche.
 try {
     $os = Get-CimInstance -CimSession $session -ClassName Win32_OperatingSystem -ErrorAction Stop
     $resultat.systeme = $os.Caption
+
+    $sante = @{
+        memoire_totale_mo = $null
+        memoire_libre_mo  = $null
+        dernier_demarrage = $null
+        disques           = $null
+        services          = $null
+        antivirus         = $null
+    }
+
+    if ($os.TotalVisibleMemorySize) {
+        $sante.memoire_totale_mo = [int]([math]::Round($os.TotalVisibleMemorySize / 1024))
+    }
+    if ($os.FreePhysicalMemory) {
+        $sante.memoire_libre_mo = [int]([math]::Round($os.FreePhysicalMemory / 1024))
+    }
+    if ($os.LastBootUpTime) {
+        # Format ISO : Node le relit sans dependre de la langue du poste.
+        $sante.dernier_demarrage = $os.LastBootUpTime.ToString("yyyy-MM-dd HH:mm:ss")
+    }
+
+    $resultat.sante = $sante
 } catch { }
+
+# ── Les disques fixes ──
+#
+# DriveType = 3 : disques fixes uniquement. Les cles USB et les lecteurs
+# reseau vont et viennent ; les compter ferait clignoter l'espace libre
+# du poste sans que rien n'ait change sur la machine.
+if ($resultat.sante) {
+    try {
+        $volumes = Get-CimInstance -CimSession $session -ClassName Win32_LogicalDisk `
+                                   -Filter "DriveType = 3" -ErrorAction Stop
+        if ($volumes) {
+            $resultat.sante.disques = @(
+                $volumes | ForEach-Object {
+                    [pscustomobject]@{
+                        lettre   = $_.DeviceID
+                        total_go = [math]::Round($_.Size / 1GB, 1)
+                        libre_go = [math]::Round($_.FreeSpace / 1GB, 1)
+                    }
+                }
+            )
+        }
+    } catch { }
+}
+
+# ── Les trois services qui protegent le poste ──
+#
+# Pare-feu, antivirus, mises a jour. Ce sont les trois qu'un logiciel
+# malveillant arrete en premier, et les trois qu'un utilisateur presse
+# desactive « juste pour installer un truc ». Un inventaire ordinaire ne
+# les regarde pas ; leur etat vaut pourtant plus que la liste complete
+# des logiciels.
+#
+# On ne lit QUE l'etat de ces trois services nommes : la liste entiere
+# des services d'un poste n'apprendrait rien et pese plusieurs centaines
+# de lignes.
+if ($resultat.sante) {
+    try {
+        $attendus = @{
+            "MpsSvc"    = "Pare-feu Windows"
+            "WinDefend" = "Antivirus Microsoft Defender"
+            "wuauserv"  = "Mises a jour Windows"
+        }
+        $filtre = ($attendus.Keys | ForEach-Object { "Name = '$_'" }) -join " OR "
+        $svc = Get-CimInstance -CimSession $session -ClassName Win32_Service `
+                               -Filter $filtre -ErrorAction Stop
+        if ($svc) {
+            $resultat.sante.services = @(
+                $svc | ForEach-Object {
+                    [pscustomobject]@{
+                        nom     = $_.Name
+                        libelle = $attendus[$_.Name]
+                        etat    = $_.State
+                        demarrage = $_.StartMode
+                    }
+                }
+            )
+        }
+    } catch { }
+}
+
+# ── L'antivirus declare a Windows ──
+#
+# root\SecurityCenter2 est l'endroit ou TOUT antivirus installe se
+# declare, y compris les produits tiers. On ne lit que le NOM : l'etat
+# est encode dans un entier dont la signification n'est documentee nulle
+# part officiellement, et une plateforme qui annonce « protege » ou « non
+# protege » doit pouvoir le prouver.
+if ($resultat.sante) {
+    try {
+        $av = Get-CimInstance -CimSession $session -Namespace "root\SecurityCenter2" `
+                              -ClassName AntiVirusProduct -ErrorAction Stop
+        if ($av) {
+            $resultat.sante.antivirus = @($av | ForEach-Object { $_.displayName })
+        }
+    } catch { }
+}
+
 
 # ── Les programmes en cours ──
 #

@@ -100,8 +100,17 @@ function RapportsPlanifies() {
 
       {bilan && (
         <p className="text-sm mt-3" style={{ color: "var(--color-ok)" }}>
-          {bilan.envoyes ?? 0} envoi(s) effectué(s)
-          {bilan.ignores ? `, ${bilan.ignores} périmètre(s) ignoré(s) faute d'équipements` : ""}.
+          {/* `total_envoyes` et non `envoyes` ; la raison d'un périmètre
+              ignoré vit dans `perimetres[].ignore`. Les deux anciens noms
+              n'existaient pas dans la réponse : l'écran annonçait donc
+              « 0 envoi(s) effectué(s) » EN VERT après cinq rapports
+              réellement partis. Le tableau de bord, qui appelle la même
+              route, lisait déjà les bons champs. */}
+          {Number(bilan.total_envoyes || 0)} envoi(s) effectué(s)
+          {(() => {
+            const raison = bilan.perimetres?.find((p) => p.ignore)?.ignore;
+            return raison ? ` — ${raison}` : "";
+          })()}.
         </p>
       )}
     </div>

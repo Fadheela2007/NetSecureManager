@@ -1,4 +1,4 @@
-<#
+﻿<#
     installer.ps1 — met en service l'agent NetSecureManager sur un site distant.
 
     Usage (PowerShell en administrateur) :

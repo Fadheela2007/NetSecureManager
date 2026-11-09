@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
+import MatricePermissions from "./MatricePermissions";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
@@ -45,6 +46,15 @@ export default function UtilisateursPage() {
 
   const [moi, setMoi] = useState({ id: null, role: null, id_site: null });
 
+  /* ── DEMANDES D'ACCÈS EN ATTENTE ──
+     `null` = pas encore lues ou fonction absente ; un tableau vide = lues,
+     et il n'y en a aucune. La distinction évite d'afficher un bloc vide
+     pendant le chargement, et de laisser croire qu'il n'y a pas de
+     demande alors qu'on n'a pas encore demandé. */
+  const [demandes, setDemandes] = useState(null);
+  const [traitement, setTraitement] = useState(null);
+  const [attribution, setAttribution] = useState({});
+
   useEffect(() => {
     try {
       const brut = localStorage.getItem("utilisateur");
@@ -77,9 +87,54 @@ export default function UtilisateursPage() {
     }
   }
 
+  /* Lecture à part, et facultative : sur une installation dont la
+     migration des demandes n'est pas appliquée, la route répond 503 et la
+     section se retire simplement de l'écran. Le reste de la page — la
+     gestion des comptes, qui est l'essentiel — ne doit pas en dépendre. */
+  async function chargerDemandes() {
+    if (moi.role !== "admin") return;
+    try {
+      const { data } = await axios.get(`${API_URL}/utilisateurs/demandes`);
+      setDemandes(Array.isArray(data) ? data : []);
+    } catch {
+      setDemandes(null);
+    }
+  }
+
+  async function traiterDemande(demande, action) {
+    setTraitement(demande.id_demande);
+    setMessage(null);
+    setErreur(null);
+    try {
+      if (action === "accepter") {
+        const choix = attribution[demande.id_demande] || {};
+        await axios.post(`${API_URL}/utilisateurs/demandes/${demande.id_demande}/accepter`, {
+          role: choix.role || "lecteur",
+          id_site: choix.id_site === "" ? null : choix.id_site ?? moi.id_site ?? null,
+        });
+        setMessage(`Accès accordé à ${demande.email}.`);
+      } else {
+        await axios.post(`${API_URL}/utilisateurs/demandes/${demande.id_demande}/refuser`);
+        setMessage(`Demande de ${demande.email} refusée.`);
+      }
+      await Promise.all([charger(), chargerDemandes()]);
+    } catch (err) {
+      setErreur(
+        err.response?.data?.aide || err.response?.data?.error || "Traitement impossible"
+      );
+    } finally {
+      setTraitement(null);
+    }
+  }
+
   useEffect(() => {
     charger();
   }, []);
+
+  useEffect(() => {
+    chargerDemandes();
+    // Relue quand le rôle est connu : au premier rendu, `moi` est encore vide.
+  }, [moi.role]);
 
   function majChamp(cle, valeur) {
     setFormulaire((f) => ({ ...f, [cle]: valeur }));
@@ -165,6 +220,107 @@ export default function UtilisateursPage() {
           Comptes autorisés à accéder à la plateforme
         </p>
       </div>
+
+      {/* ══ DEMANDES D'ACCÈS ══
+
+          Placées AVANT le formulaire de création : ce sont des gens qui
+          attendent une réponse. Les mettre en bas de page, sous la liste
+          des comptes, reviendrait à les faire attendre plus longtemps.
+
+          La section n'existe pas quand il n'y a rien à traiter — un
+          encadré « aucune demande » occuperait la place sans rien dire. */}
+      {estAdmin && demandes && demandes.length > 0 && (
+        <section className="bg-[var(--color-surface)] border rounded-xl p-5"
+                 style={{ borderColor: "var(--color-warn)" }}>
+          <h2 className="font-[var(--font-display)] text-sm font-semibold">
+            {demandes.length} demande{demandes.length > 1 ? "s" : ""} d'accès en attente
+          </h2>
+          <p className="text-xs text-[var(--color-mute)] mt-0.5 mb-3">
+            Ces personnes ont choisi leur mot de passe : vous ne le verrez pas et
+            n'avez rien à leur transmettre. Il vous reste à décider du rôle et du site.
+          </p>
+
+          <div className="space-y-3">
+            {demandes.map((d) => {
+              const choix = attribution[d.id_demande] || {};
+              const majChoix = (cle, valeur) =>
+                setAttribution((a) => ({
+                  ...a,
+                  [d.id_demande]: { ...a[d.id_demande], [cle]: valeur },
+                }));
+              return (
+                <div
+                  key={d.id_demande}
+                  className="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 py-2.5"
+                >
+                  <div className="flex flex-wrap items-baseline gap-x-2">
+                    <span className="text-sm text-[var(--color-ink)]">{d.nom}</span>
+                    <span className="text-xs text-[var(--color-mute)]">{d.email}</span>
+                    <span className="text-[11px] text-[var(--color-mute)] ml-auto">
+                      {new Date(d.date_demande).toLocaleString("fr-FR")}
+                      {d.adresse_ip && ` · depuis ${d.adresse_ip}`}
+                    </span>
+                  </div>
+
+                  {/* Le motif est écrit par une personne : c'est la seule
+                      chose qui permette de rattacher une adresse à
+                      quelqu'un de réel. Il se lit en entier. */}
+                  <p className="text-xs text-[var(--color-ink)] mt-1 italic">« {d.motif} »</p>
+
+                  <div className="flex flex-wrap items-end gap-2 mt-2.5">
+                    <div>
+                      <label className={labelClasse}>Rôle</label>
+                      <select
+                        value={choix.role || "lecteur"}
+                        onChange={(e) => majChoix("role", e.target.value)}
+                        className={champClasse}
+                      >
+                        <option value="lecteur">Lecteur</option>
+                        <option value="operateur">Opérateur</option>
+                        <option value="admin">Administrateur</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className={labelClasse}>Site</label>
+                      <select
+                        value={choix.id_site ?? (moi.id_site ?? "")}
+                        onChange={(e) => majChoix("id_site", e.target.value)}
+                        className={champClasse}
+                        disabled={!estAdminGlobal}
+                      >
+                        {estAdminGlobal && <option value="">Global — tous les sites</option>}
+                        {sites.map((s) => (
+                          <option key={s.id_site} value={s.id_site}>
+                            {s.nom}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <button
+                      onClick={() => traiterDemande(d, "accepter")}
+                      disabled={traitement === d.id_demande}
+                      className="text-xs px-3 py-1.5 rounded-lg border transition cible-tactile disabled:opacity-60"
+                      style={{ borderColor: "var(--color-ok)", color: "var(--color-ok)" }}
+                    >
+                      {traitement === d.id_demande ? "…" : "Accorder l'accès"}
+                    </button>
+
+                    <button
+                      onClick={() => traiterDemande(d, "refuser")}
+                      disabled={traitement === d.id_demande}
+                      className="text-xs px-3 py-1.5 rounded-lg text-[var(--color-mute)] hover:text-[var(--color-crit)] transition cible-tactile disabled:opacity-60"
+                    >
+                      Refuser
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       {estAdmin && (
         <form
@@ -345,6 +501,12 @@ export default function UtilisateursPage() {
           </table></div>
         )}
       </div>
+
+      {/* ══ PERMISSIONS ══
+          Après la liste des comptes, et pas avant : on crée d'abord les
+          gens, on règle ensuite ce qu'ils ont le droit de faire.
+          Réservée aux administrateurs — le serveur refuse aussi. */}
+      {estAdmin && <MatricePermissions />}
     </div>
   );
 }

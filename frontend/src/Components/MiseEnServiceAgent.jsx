@@ -114,7 +114,16 @@ export default function MiseEnServiceAgent({ idSite, onFermer }) {
         { active: actif }
       );
       setObservation(data.active);
-      setMessage(data.message);
+      /* Il y avait ici un `setMessage(data.message)` — un état qui
+         n'existe pas dans ce composant. Le PATCH réussissait, le serveur
+         écrivait bien `observation_dns = 1` et le traçait au journal,
+         puis le ReferenceError tombait dans le `catch` ci-dessous et
+         affichait « Modification impossible ». Pire : `if (erreur)
+         return` remplace TOUT le composant, donc le jeton, les commandes
+         et le script disparaissaient de l'écran.
+
+         Un échec annoncé après un succès est le pire des messages : il
+         pousse à refaire le geste, ou à croire la fonction cassée. */
     } catch (err) {
       setErreur(err.response?.data?.error || "Modification impossible");
     } finally {

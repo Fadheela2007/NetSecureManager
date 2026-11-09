@@ -11,6 +11,8 @@ const { requireRole } = require("../middleware/requireRole");
 const { diffuser } = require("../services/tempsReelService");
 const {
   clauseSite,
+  filtreSite,
+  porteeDe,
   siteAutorise,
   verifierAccesEquipement,
   verifierAccesAlerte,
@@ -35,6 +37,7 @@ const {
 const { detecterConflits, decrireConflit } = require("../services/conflitIpService");
 const { creerAlerte } = require("../services/monitoringService");
 const { purgerAdressesSansPreuve } = require("../services/inventaireService");
+const { lireTopologie } = require("../services/topologieService");
 const { faillesDeLEquipement } = require("../services/faillesService");
 const progressionScan = require("../services/progressionScan");
 const {
@@ -44,6 +47,8 @@ const {
 } = require("../services/inventairePosteService");
 // La porte des postes Windows : ni agent, ni SNMP. Voir le service.
 const inventaireWindows = require("../services/inventaireWindowsService");
+const rattachement = require("../services/rattachementService");
+const reglesAlerte = require("../services/reglesAlerteService");
 const { parLots } = require("../services/parLots");
 const { observationsDeLEquipement } = require("../services/observationDnsDepot");
 
@@ -470,6 +475,32 @@ async function scannerUnePlage(req, id_site, cidr, snmp_community) {
       [id_site]
     );
     options.connus = new Map(dejaConnus.map((e) => [e.adresse_ip, e]));
+
+    /* ── LES ZONES QU'ON A DEMANDÉ DE NE PAS SONDER ──
+
+       Déclarées dans le plan d'adressage, case « ne pas scanner ». Il
+       existe des machines qu'on n'interroge pas : un automate, un
+       équipement médical, un pare-feu qui journalise chaque connexion.
+       Le balayage les écarte AVANT d'envoyer quoi que ce soit — nmap
+       reçoit `--exclude`, et notre propre balayage ne les énumère pas.
+
+       Une base sans la table du 28/09 rend simplement un tableau vide :
+       le scan se comporte alors comme avant. */
+    try {
+      const [zones] = await db.query(
+        `SELECT debut_num, fin_num FROM RESERVATION_ADRESSE
+          WHERE id_site = ? AND exclure_du_scan = 1`,
+        [id_site]
+      );
+      if (zones.length > 0) {
+        options.exclues = zones.map((z) => ({
+          debut: Number(z.debut_num),
+          fin: Number(z.fin_num),
+        }));
+      }
+    } catch (err) {
+      if (!/doesn't exist|Unknown column/i.test(err.message)) throw err;
+    }
 
     const equipements = await scanRange(options);
     await logActivite(req, "scan_lance", `Scan de ${cidr} sur le site ${id_site}`);
@@ -1509,7 +1540,7 @@ router.get("/bande-passante/classement", async (req, res) => {
   if (!Number.isFinite(limite) || limite <= 0) limite = 20;
   limite = Math.min(Math.floor(limite), 100);
 
-  const portee = clauseSite(req, "e.id_site");
+  const portee = filtreSite(req, "e.id_site");
 
   const [rows] = await db.query(
     `SELECT e.id_equipement, COALESCE(e.nom_personnalise, e.nom) AS nom, e.adresse_ip, e.statut, e.fabricant,
@@ -1574,7 +1605,7 @@ router.get("/bande-passante/classement", async (req, res) => {
   // Combien d'équipements pourraient figurer au classement mais n'ont
   // aucune mesure ? Sans ce chiffre, un classement vide ressemble à une
   // panne alors qu'il traduit simplement l'absence de SNMP sur le parc.
-  const porteeTotal = clauseSite(req, "id_site");
+  const porteeTotal = filtreSite(req, "id_site");
   const [[couverture]] = await db.query(
     `SELECT COUNT(*) AS total,
             SUM(EXISTS (
@@ -1620,7 +1651,7 @@ router.get("/bande-passante/classement", async (req, res) => {
      pas un manque de soin : vus d'ici, un téléphone sur une borne et un
      PC derrière un switch de bureau sont identiques. Nommer l'un ou
      l'autre serait une supposition. */
-  const porteeDetail = clauseSite(req, "e.id_site");
+  const porteeDetail = filtreSite(req, "e.id_site");
   let categories = null;
   let nonMesurables = [];
 
@@ -1858,6 +1889,35 @@ router.get("/bande-passante/classement", async (req, res) => {
  * navigateur n'ont de raison de transporter — et qu'aucun œil ne lit. On
  * vise environ 200 points quelle que soit la période demandée : assez pour
  * voir une bosse, assez peu pour rester léger.
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * DÉFAUT CORRIGÉ LE 28/09 — LA COURBE GONFLAIT AVEC LA DURÉE
+ *
+ * Cette requête faisait `SUM(trafic) GROUP BY tranche`. Tant qu'une
+ * tranche valait une minute, c'était exact : le cycle de supervision
+ * produit au plus un relevé par machine et par minute, donc la somme
+ * additionnait bien une machine une fois.
+ *
+ * Mais la tranche s'élargit avec la période — 7 minutes sur 24 h, 50 sur
+ * 7 jours. Chaque machine y déposait alors 7 relevés, puis 50, et la
+ * somme les additionnait tous. La courbe affichait SEPT FOIS le débit
+ * réel sur la vue 24 h, et cinquante fois sur la vue 7 jours.
+ *
+ * CE QUI RENDAIT LE DÉFAUT INVISIBLE : la vue 1 h, celle qu'on regarde en
+ * développant, tombe sur une tranche d'une minute et reste donc juste. Et
+ * comme le facteur suit la durée, la courbe gardait une forme plausible —
+ * seules les valeurs de l'axe étaient fausses. Rien ne clochait à l'œil ;
+ * il fallait comparer le pic affiché à la capacité du lien pour voir que
+ * le parc « saturait » un gigabit avec douze imprimantes.
+ *
+ * LA CORRECTION, en deux temps. D'abord la MOYENNE de chaque machine dans
+ * sa tranche — une machine ne compte qu'une fois, quel que soit le nombre
+ * de fois où on l'a interrogée. Ensuite seulement la SOMME sur les
+ * machines, qui est le débit du parc à cet instant.
+ *
+ * L'ordre n'est pas interchangeable : sommer puis moyenner donnerait le
+ * débit moyen d'UNE machine, pas celui du parc.
+ * ═══════════════════════════════════════════════════════════════════════
  */
 router.get("/bande-passante/historique", async (req, res) => {
   let heures = Number(req.query.heures);
@@ -1869,26 +1929,39 @@ router.get("/bande-passante/historique", async (req, res) => {
   // intervalles plus courts ne feraient qu'ajouter des trous.
   const pas = Math.max(1, Math.round((heures * 60) / 200));
 
-  const portee = clauseSite(req, "e.id_site");
+  const portee = filtreSite(req, "e.id_site");
 
   /* GROUPEMENT PAR TRANCHE DE `pas` MINUTES.
      FLOOR(UNIX_TIMESTAMP(...) / N) * N ramène chaque horodatage au début
      de sa tranche. On repasse en DATETIME pour que l'interface reçoive une
      date lisible plutôt qu'un entier qu'elle devrait reconvertir. */
   const [points] = await db.query(
-    `SELECT FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(r.date_releve) / ?) * ?) AS instant,
-            SUM(r.trafic_entrant_kbps) AS entrant,
-            SUM(r.trafic_sortant_kbps) AS sortant,
-            COUNT(DISTINCT r.id_equipement) AS equipements
-     FROM RELEVE r
-     JOIN EQUIPEMENT e ON e.id_equipement = r.id_equipement
-     LEFT JOIN TYPE_EQUIPEMENT t ON t.id_type = e.id_type
-     WHERE r.date_releve >= NOW() - INTERVAL ${heures} HOUR
-       AND (r.trafic_entrant_kbps IS NOT NULL OR r.trafic_sortant_kbps IS NOT NULL)
-       AND COALESCE(t.libelle, '') NOT IN ('routeur', 'routeur/switch', 'pare-feu')
-       AND ${portee.clause}
-     GROUP BY instant
-     ORDER BY instant`,
+    `SELECT par_machine.instant,
+            SUM(par_machine.moy_entrant) AS entrant,
+            SUM(par_machine.moy_sortant) AS sortant,
+            COUNT(*) AS equipements
+     FROM (
+       /* Premier temps : une ligne par machine et par tranche. AVG ignore
+          les NULL colonne par colonne — une machine dont seul l'entrant
+          est mesuré pèse sur l'entrant et sur rien d'autre. */
+       SELECT FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(r.date_releve) / ?) * ?) AS instant,
+              r.id_equipement,
+              AVG(r.trafic_entrant_kbps) AS moy_entrant,
+              AVG(r.trafic_sortant_kbps) AS moy_sortant
+       FROM RELEVE r
+       JOIN EQUIPEMENT e ON e.id_equipement = r.id_equipement
+       LEFT JOIN TYPE_EQUIPEMENT t ON t.id_type = e.id_type
+       WHERE r.date_releve >= NOW() - INTERVAL ${heures} HOUR
+         AND (r.trafic_entrant_kbps IS NOT NULL OR r.trafic_sortant_kbps IS NOT NULL)
+         AND COALESCE(t.libelle, '') NOT IN ('routeur', 'routeur/switch', 'pare-feu')
+         AND ${portee.clause}
+       GROUP BY instant, r.id_equipement
+     ) AS par_machine
+     /* Second temps : le débit du parc à cet instant. COUNT(*) compte des
+        lignes déjà uniques par machine — c'est le COUNT(DISTINCT) d'avant,
+        sans le coût du DISTINCT. */
+     GROUP BY par_machine.instant
+     ORDER BY par_machine.instant`,
     [pas * 60, pas * 60, ...portee.params]
   );
 
@@ -1956,7 +2029,7 @@ router.get("/reseau/qualite", async (req, res) => {
   // se lisent l'un au-dessus de l'autre, un décalage de pas rendrait la
   // comparaison trompeuse.
   const pas = Math.max(1, Math.round((heures * 60) / 200));
-  const portee = clauseSite(req, "e.id_site");
+  const portee = filtreSite(req, "e.id_site");
 
   const [points] = await db.query(
     `SELECT FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(r.date_releve) / ?) * ?) AS instant,
@@ -2087,11 +2160,31 @@ router.get("/equipements/:id/bande-passante", async (req, res) => {
   if (!Number.isFinite(heures) || heures <= 0) heures = 24;
   heures = Math.min(Math.floor(heures), 24 * 30);
 
+  /* ── CINQ MESURES, ET NON PLUS DEUX ──
+
+     Le processeur, la mémoire et la latence sont dans la même ligne de
+     RELEVE que le débit, écrits par le même cycle. Les demander ici ne
+     coûte rien de plus qu'une lecture déjà faite, et évite un deuxième
+     aller-retour depuis l'écran.
+
+     LE FILTRE S'ÉLARGIT EN MÊME TEMPS. Il ne gardait que les lignes
+     porteuses d'un débit : une machine dont on mesure la charge sans
+     pouvoir mesurer le trafic — un poste sous agent au tout premier
+     envoi, par exemple — n'avait aucun historique du tout.
+
+     Chaque courbe filtre ensuite SES propres points côté écran : le
+     cycle central écrit une latence chaque minute alors que le débit
+     n'arrive qu'à chaque envoi de l'agent, et mélanger les deux
+     cadences dans un même tracé ferait apparaître des trous là où il
+     n'y a eu aucune panne. */
   const [historique] = await db.query(
-    `SELECT date_releve, trafic_entrant_kbps, trafic_sortant_kbps
+    `SELECT date_releve, trafic_entrant_kbps, trafic_sortant_kbps,
+            cpu_pourcent, ram_pourcent, latence_ms
      FROM RELEVE
      WHERE id_equipement = ? AND date_releve >= NOW() - INTERVAL ${heures} HOUR
-       AND (trafic_entrant_kbps IS NOT NULL OR trafic_sortant_kbps IS NOT NULL)
+       AND (trafic_entrant_kbps IS NOT NULL OR trafic_sortant_kbps IS NOT NULL
+            OR cpu_pourcent IS NOT NULL OR ram_pourcent IS NOT NULL
+            OR latence_ms IS NOT NULL)
      ORDER BY date_releve ASC`,
     [req.params.id]
   );
@@ -2504,6 +2597,262 @@ router.patch("/equipements/:id/nom", requireRole("admin", "operateur"), async (r
   res.json({ id_equipement: id, nom_personnalise: nom });
 });
 
+/* ═══════════════════════════════════════════════════════════════════════
+   PATCH /api/equipements/:id/surveillance
+
+   « Cette machine doit-elle rester allumée ? »
+
+   Par défaut, le TYPE répond : un serveur ou une imprimante qui
+   disparaît crée une alerte, un poste de travail non — il s'éteint le
+   soir, et alerter là-dessus apprend à ignorer les alertes.
+
+   Cette route porte l'exception, dans les deux sens : le poste du
+   directeur qu'on veut suivre, le vieux serveur d'essai qu'on ne veut
+   plus voir. body : { surveillance: true | false | null }, où `null`
+   rend la décision au type.
+   ═══════════════════════════════════════════════════════════════════════ */
+/* L'état du réglage, lu par la fiche. Route à part plutôt qu'une colonne
+   de plus dans la liste des équipements : cette liste a déjà quatre
+   variantes de repli selon les migrations passées, et y ajouter une
+   cinquième dimension la rendrait illisible pour un réglage qu'on ne
+   consulte qu'en ouvrant une fiche. */
+router.get("/equipements/:id/surveillance", requireRole("admin", "operateur"), async (req, res) => {
+  const acces = await verifierAccesEquipement(req, req.params.id);
+  if (!acces.ok) return res.status(acces.statut).json({ error: acces.erreur });
+
+  const TYPES_TOUJOURS_ALLUMES = [
+    "serveur", "imprimante", "routeur", "routeur/switch", "pare-feu", "camera", "telephonie",
+  ];
+
+  try {
+    const [[ligne]] = await db.query(
+      `SELECT e.surveillance_permanente AS choix,
+              COALESCE(t.libelle, 'inconnu') AS type_libelle
+         FROM EQUIPEMENT e
+         LEFT JOIN TYPE_EQUIPEMENT t ON t.id_type = e.id_type
+        WHERE e.id_equipement = ?`,
+      [req.params.id]
+    );
+    if (!ligne) return res.status(404).json({ error: "Équipement introuvable" });
+
+    const parDefaut = TYPES_TOUJOURS_ALLUMES.includes(String(ligne.type_libelle).toLowerCase());
+    const choix = ligne.choix === null || ligne.choix === undefined ? null : Number(ligne.choix) === 1;
+
+    res.json({
+      type_libelle: ligne.type_libelle,
+      // Ce que le TYPE déciderait, si personne ne disait rien.
+      alerte_par_defaut: parDefaut,
+      // Ce que quelqu'un a décidé, ou null si personne n'a rien dit.
+      choix,
+      // Ce qui s'applique réellement, pour que l'écran n'ait pas à le
+      // recalculer — et ne puisse donc pas le recalculer autrement.
+      alerte_effective: choix === null ? parDefaut : choix,
+    });
+  } catch (err) {
+    if (/Unknown column|doesn't exist/i.test(err.message)) {
+      return res.status(503).json({
+        error: "Le réglage de surveillance n'est pas installé sur cette base",
+        aide: "node tools\\appliquer-migrations.js",
+      });
+    }
+    console.error("Lecture du réglage de surveillance impossible:", err.message);
+    res.status(500).json({ error: "Impossible de lire ce réglage" });
+  }
+});
+
+router.patch("/equipements/:id/surveillance", requireRole("admin", "operateur"), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) {
+    return res.status(400).json({ error: "Identifiant d'équipement invalide" });
+  }
+
+  const brut = req.body?.surveillance;
+  if (brut !== true && brut !== false && brut !== null) {
+    return res.status(400).json({ error: "surveillance doit valoir true, false ou null" });
+  }
+  const valeur = brut === null ? null : brut ? 1 : 0;
+
+  // Cloisonnement appliqué DANS la requête, comme pour le renommage.
+  const portee = clauseSite(req, "id_site");
+  try {
+    const [resultat] = await db.query(
+      `UPDATE EQUIPEMENT SET surveillance_permanente = ?
+        WHERE id_equipement = ? AND ${portee.clause}`,
+      [valeur, id, ...portee.params]
+    );
+
+    if (resultat.affectedRows === 0) {
+      return res.status(404).json({ error: "Équipement introuvable" });
+    }
+
+    /* DÉCOCHER DOIT REFERMER LES ALERTES EN COURS. Sinon l'exploitant
+       dit « ne me préviens plus pour cette machine » et garde sous les
+       yeux l'alerte qu'il vient de faire taire. */
+    if (valeur === 0) {
+      await db.query(
+        `UPDATE ALERTE SET statut = 'resolue', date_resolution = NOW()
+          WHERE id_equipement = ? AND type_alerte = 'equipement_down'
+            AND statut IN ('active', 'traitee')`,
+        [id]
+      );
+    }
+
+    await logActivite(
+      req,
+      "surveillance_modifiee",
+      valeur === null
+        ? `Équipement ${id} : surveillance rendue au type`
+        : `Équipement ${id} : surveillance permanente ${valeur === 1 ? "activée" : "désactivée"}`
+    );
+
+    res.json({ id_equipement: id, surveillance_permanente: valeur });
+  } catch (err) {
+    if (/Unknown column|doesn't exist/i.test(err.message)) {
+      return res.status(503).json({
+        error: "Le réglage de surveillance n'est pas installé sur cette base",
+        aide: "node tools\\appliquer-migrations.js",
+      });
+    }
+    console.error("Réglage de surveillance impossible:", err.message);
+    res.status(500).json({ error: "Impossible d'enregistrer ce réglage" });
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════════════════
+   LES RÈGLES D'ALERTE — CE QUI DÉCLENCHE, ET AVEC QUELLE GRAVITÉ.
+
+   Ces décisions étaient dans le code. Elles sont désormais dans une
+   table, lue par le cycle de supervision ET affichée par l'écran
+   Alertes : ce qui est montré est donc exactement ce qui est appliqué.
+
+   LECTURE OUVERTE À TOUS LES CONNECTÉS, ÉCRITURE AUX ADMINISTRATEURS.
+   Comprendre pourquoi une alerte est partie aide tout le monde ; décider
+   de ce qui réveille l'équipe la nuit est une responsabilité.
+   ═══════════════════════════════════════════════════════════════════════ */
+router.get("/regles-alerte", async (req, res) => {
+  try {
+    const [lignes] = await db.query(
+      `SELECT id_regle, code, cible, active, niveau, seuil, releves_requis,
+              libelle, aide, date_maj
+         FROM REGLE_ALERTE
+        ORDER BY FIELD(code, 'equipement_down', 'cpu', 'memoire',
+                       'plage_presque_pleine', 'adresse_sur_zone_reservee', 'agent_muet'), cible`
+    );
+    res.json(lignes.map((l) => ({ ...l, active: Number(l.active) === 1 })));
+  } catch (err) {
+    if (/doesn't exist|Unknown column/i.test(err.message)) {
+      return res.status(503).json({
+        error: "Les règles d'alerte ne sont pas installées sur cette base",
+        aide: "node tools\\appliquer-migrations.js",
+      });
+    }
+    console.error("Lecture des règles d'alerte impossible:", err.message);
+    res.status(500).json({ error: "Impossible de lire les règles d'alerte" });
+  }
+});
+
+router.patch("/regles-alerte/:id", requireRole("admin"), async (req, res) => {
+  /* ── UNE ÉCRITURE GLOBALE EXIGE UN ADMINISTRATEUR GLOBAL ──
+
+     `requireRole("admin")` ne suffit pas ici, et c'est le piège : rôle et
+     périmètre sont deux axes indépendants. Un administrateur rattaché au
+     site 2 est administrateur DU SITE 2 — il ne doit pas pouvoir toucher
+     un réglage qui n'a pas de site, donc qui s'applique à tout le monde.
+
+     Le cloisonnement était appliqué partout où le paramètre s'appelait
+     `id_site`, et nulle part ailleurs. Ici le paramètre s'appelle
+     autrement, et la table n'a pas de colonne de site : rien n'accrochait.
+     Le refus doit donc être explicite. */
+  if (porteeDe(req) !== null) {
+    return res.status(403).json({
+      error: "Réglage global",
+      aide: "Ce paramètre s'applique à tous les sites. Seul un administrateur de la plateforme peut le modifier.",
+    });
+  }
+
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: "Règle invalide" });
+
+  const { active, niveau, seuil, releves_requis } = req.body || {};
+
+  if (niveau !== undefined && !["critical", "warning", "info"].includes(niveau)) {
+    return res.status(400).json({ error: "Gravité inconnue" });
+  }
+  /* UN SEUIL ABSURDE EST REFUSÉ ICI, pas découvert trois jours plus tard
+     dans une alerte qui ne part jamais : 0 % de processeur alerterait en
+     permanence, 500 % jamais. */
+  if (seuil !== undefined && seuil !== null) {
+    const v = Number(seuil);
+    if (!Number.isFinite(v) || v < 0 || v > 100000) {
+      return res.status(400).json({ error: "Seuil hors limites" });
+    }
+  }
+  if (releves_requis !== undefined && releves_requis !== null) {
+    const v = Number(releves_requis);
+    if (!Number.isInteger(v) || v < 1 || v > 60) {
+      return res.status(400).json({ error: "Le nombre de relevés doit être compris entre 1 et 60" });
+    }
+  }
+
+  const champs = [];
+  const valeurs = [];
+  if (active !== undefined) {
+    champs.push("active = ?");
+    valeurs.push(active ? 1 : 0);
+  }
+  if (niveau !== undefined) {
+    champs.push("niveau = ?");
+    valeurs.push(niveau);
+  }
+  if (seuil !== undefined) {
+    champs.push("seuil = ?");
+    valeurs.push(seuil === null ? null : Number(seuil));
+  }
+  if (releves_requis !== undefined) {
+    champs.push("releves_requis = ?");
+    valeurs.push(releves_requis === null ? null : Number(releves_requis));
+  }
+  if (champs.length === 0) return res.status(400).json({ error: "Rien à modifier" });
+
+  try {
+    const [resultat] = await db.query(
+      `UPDATE REGLE_ALERTE SET ${champs.join(", ")} WHERE id_regle = ?`,
+      [...valeurs, id]
+    );
+    if (resultat.affectedRows === 0) {
+      return res.status(404).json({ error: "Règle introuvable" });
+    }
+
+    // Le moteur garde les règles une minute en mémoire : on le prévient,
+    // sinon le changement semblerait ignoré pendant soixante secondes.
+    reglesAlerte.invalider();
+
+    const [[ligne]] = await db.query(
+      `SELECT id_regle, code, cible, active, niveau, seuil, releves_requis,
+              libelle, aide, date_maj
+         FROM REGLE_ALERTE WHERE id_regle = ?`,
+      [id]
+    );
+    await logActivite(
+      req,
+      "regle_alerte_modifiee",
+      `Règle ${ligne.code}/${ligne.cible} : ${ligne.active ? "active" : "inactive"}, ` +
+        `gravité ${ligne.niveau}${ligne.seuil !== null ? `, seuil ${ligne.seuil}` : ""}`
+    );
+
+    res.json({ ...ligne, active: Number(ligne.active) === 1 });
+  } catch (err) {
+    if (/doesn't exist|Unknown column/i.test(err.message)) {
+      return res.status(503).json({
+        error: "Les règles d'alerte ne sont pas installées sur cette base",
+        aide: "node tools\\appliquer-migrations.js",
+      });
+    }
+    console.error("Modification d'une règle impossible:", err.message);
+    res.status(500).json({ error: "Impossible d'enregistrer cette règle" });
+  }
+});
+
 /**
  * PATCH /api/alertes/acquitter
  *
@@ -2571,14 +2920,22 @@ router.get("/alertes", async (req, res) => {
   // de lignes à chaque rafraîchissement, et le temps réel en déclenche un
   // par événement.
   //
-  // Par défaut illimité : la page Alertes a besoin de la liste entière pour
-  // trier et filtrer. Seuls les appelants qui savent ce qu'ils veulent
-  // demandent une limite.
+  /* ── UNE LIMITE PAR DÉFAUT, ET NON PLUS AUCUNE ──
+
+     « Illimité » supposait que la table reste petite. Sans purge des
+     alertes résolues, elle ne le restait pas : la page Alertes
+     téléchargeait l'intégralité de la table — colonne `message` comprise —
+     à chaque ouverture, et le tri se faisait en table temporaire sur la
+     totalité des lignes. Deux secondes au premier mois, dix au troisième.
+
+     500 lignes couvrent largement ce qu'un écran affiche et ce sur quoi
+     on filtre. Un appelant qui veut moins le demande ; le plafond dur
+     reste le même qu'avant. */
   let limite = Number(req.query.limite);
-  limite = Number.isFinite(limite) && limite > 0 ? Math.min(Math.floor(limite), 500) : null;
+  limite = Number.isFinite(limite) && limite > 0 ? Math.min(Math.floor(limite), 500) : 500;
   // LEFT JOIN : les alertes d'agent muet ne sont rattachées à aucun
   // équipement (id_equipement NULL). Un INNER JOIN les ferait disparaître.
-  const portee = clauseSite(req, "COALESCE(a.id_site, e.id_site)");
+  const portee = filtreSite(req, "COALESCE(a.id_site, e.id_site)");
   const [rows] = await db.query(
     `SELECT a.*, COALESCE(e.nom_personnalise, e.nom) AS nom, e.adresse_ip, e.statut AS statut_equipement,
             COALESCE(a.id_site, e.id_site) AS id_site,
@@ -2630,7 +2987,7 @@ router.get("/alertes", async (req, res) => {
  * qu'il faudrait charger entièrement.
  */
 router.get("/alertes/resume", async (req, res) => {
-  const portee = clauseSite(req, "COALESCE(a.id_site, e.id_site)");
+  const portee = filtreSite(req, "COALESCE(a.id_site, e.id_site)");
   const [rows] = await db.query(
     `SELECT a.statut, a.niveau, COUNT(*) AS nb, SUM(a.occurrences) AS occurrences
      FROM ALERTE a
@@ -2665,6 +3022,313 @@ router.get("/alertes/resume", async (req, res) => {
     bloc.occurrences += Number(r.occurrences || 0);
   }
   res.json(resume);
+});
+
+/* ═══════════════════════════════════════════════════════════════════════
+   COMBIEN DE MACHINES RÉPONDAIENT, HEURE PAR HEURE.
+
+   POURQUOI CETTE COURBE MANQUAIT. Le tableau de bord disait « 89 en
+   ligne, 2 hors ligne » — un état, à l'instant où on regarde. Il ne
+   disait pas si les deux sont tombées il y a cinq minutes ou depuis
+   avant-hier, ni si le parc entier a vacillé pendant la nuit. Une
+   plateforme de supervision doit montrer LA JOURNÉE, pas l'instant.
+
+   CE QUI EST COMPTÉ, ET POURQUOI C'EST HONNÊTE. Un relevé n'est écrit
+   que lorsque le ping aboutit. Compter les équipements DISTINCTS ayant
+   produit un relevé dans la tranche, c'est donc compter ceux qui ont
+   réellement répondu — pas une estimation, pas une déduction.
+
+   COUNT(DISTINCT ...) ET NON COUNT(*). Une machine peut avoir plusieurs
+   relevés dans la même tranche : les additionner gonflerait la courbe
+   au-dessus de la taille du parc. C'est exactement le défaut connu de la
+   courbe de débit, et il ne sera pas reproduit ici.
+
+   CE QUE LA COURBE NE DIT PAS : une machine qui bloque le ping mais
+   répond sur un port TCP n'y figure pas. Le champ `total` rappelle la
+   taille du parc pour que l'écart se lise, au lieu de passer pour une
+   panne générale.
+   ═══════════════════════════════════════════════════════════════════════ */
+/**
+ * GET /api/supervision/charge
+ *
+ * La charge moyenne du parc sur la dernière heure, pour les jauges du
+ * tableau de bord.
+ *
+ * ── MOYENNÉE SUR CE QUI A RÉPONDU, PAS SUR LE PARC ──
+ *
+ * Diviser par le nombre total de machines ferait baisser le chiffre à
+ * proportion des muettes : un parc dont trois serveurs saturent
+ * paraîtrait tranquille parce que quatre-vingt-dix-huit machines ne
+ * disent rien. On rend donc AUSSI le nombre de machines mesurées —
+ * sans lui, le pourcentage ne veut rien dire.
+ */
+router.get("/supervision/charge", async (req, res) => {
+  const portee = filtreSite(req, "e.id_site");
+
+  try {
+    const [[ligne]] = await db.query(
+      `SELECT AVG(r.cpu_pourcent) AS cpu,
+              AVG(r.ram_pourcent) AS ram,
+              COUNT(DISTINCT CASE WHEN r.cpu_pourcent IS NOT NULL
+                                  THEN r.id_equipement END) AS machines
+         FROM RELEVE r
+         JOIN EQUIPEMENT e ON e.id_equipement = r.id_equipement
+        WHERE r.date_releve >= NOW() - INTERVAL 1 HOUR
+          AND ${portee.clause}`,
+      portee.params
+    );
+
+    /* `null` et non 0 : « 0 % » se lirait « machines au repos », ce qui
+       est une affirmation qu'on n'a pas quand personne n'a répondu. */
+    res.json({
+      cpu: ligne?.cpu === null || ligne?.cpu === undefined ? null : Math.round(Number(ligne.cpu)),
+      ram: ligne?.ram === null || ligne?.ram === undefined ? null : Math.round(Number(ligne.ram)),
+      machines: Number(ligne?.machines || 0),
+    });
+  } catch (err) {
+    console.error("Lecture de la charge impossible:", err.message);
+    res.json({ cpu: null, ram: null, machines: 0 });
+  }
+});
+/**
+ * GET /api/topologie
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * LA CARTE DU RÉSEAU, SANS QUE PERSONNE NE LA DESSINE
+ *
+ * ── POURQUOI « /topologie » ET NON « /supervision/... » ──
+ *
+ * Le plancher des permissions décide à partir du PREMIER segment du
+ * chemin. Sous « supervision », cette route aurait hérité des droits de
+ * l'écran Équipements : retirer la carte à un rôle n'aurait rien retiré.
+ * L'écran « Topologie » existe déjà dans la matrice — il y était resté
+ * après le retrait de septembre — et son préfixe est « topologie ».
+ * La route s'y range, et le réglage par rôle fonctionne sans migration.
+ *
+ * Dans les outils du marché, une carte réseau est un dessin : on place
+ * les icônes, on tire les traits, et les positions sont des coordonnées
+ * enregistrées en base. Rien n'y est découvert.
+ *
+ * Ici le graphe est reconstruit à chaque appel à partir des relevés des
+ * agents de poste. Aucune position n'est stockée, parce qu'aucune n'a été
+ * choisie par personne.
+ *
+ * ── CE QUE LA RÉPONSE CONTIENT, ET POURQUOI « couverture » EN FAIT PARTIE ──
+ *
+ * Chaque lien porte son niveau de preuve — « certain » quand il a été
+ * mesuré, « deduit » quand il a été inféré. Et `couverture` dit ce que la
+ * carte N'A PAS su rattacher : les interfaces écartées, les adresses vues
+ * sur le fil mais absentes de l'inventaire, le nombre de postes qui ont
+ * répondu.
+ *
+ * Ce chiffre n'est pas une statistique d'appoint. Une carte muette sur
+ * ses manques laisse croire que le réseau est ce qu'elle montre : sur un
+ * parc sans commutateur administrable, ce serait faux de beaucoup.
+ */
+router.get("/topologie", async (req, res) => {
+  const portee = filtreSite(req, "e.id_site");
+
+  try {
+    const graphe = await lireTopologie(portee);
+    res.json(graphe);
+  } catch (err) {
+    /* Les tables du 2 octobre 2026 peuvent manquer sur une base en
+       retard. On rend un graphe VIDE avec sa couverture à zéro plutôt
+       qu'une erreur : l'écran affichera « aucun relevé », ce qui est
+       exact, au lieu d'un message technique que personne ne peut lire. */
+    console.error("Lecture de la topologie impossible:", err.message);
+    res.json({
+      noeuds: [],
+      liens: [],
+      couverture: {
+        postes_ayant_repondu: 0,
+        interfaces_retenues: 0,
+        interfaces_ecartees: 0,
+        segments: 0,
+        equipements_rattaches: 0,
+        adresses_inconnues: 0,
+        bornes: 0,
+      },
+    });
+  }
+});
+
+/**
+ * GET /api/supervision/preuves
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * SUR QUOI LA PLATEFORME SE FONDE POUR DIRE QU'UNE MACHINE EXISTE
+ *
+ * Tous les outils de supervision affichent un état : en ligne, hors
+ * ligne. Aucun ne dit D'OÙ il le tient. Et la différence est énorme :
+ *
+ *   • une réponse au ping, c'est une machine qui a parlé il y a une
+ *     minute ;
+ *   • un voisinage ARP, c'est un switch qui se souvient d'une adresse —
+ *     la machine peut être éteinte depuis une heure ;
+ *   • un port ouvert sur une machine muette au ping, c'est un pare-feu
+ *     qui filtre l'ICMP, pas une panne.
+ *
+ * Ces trois lignes se présentent de la même façon sur un écran ordinaire.
+ * Ici, chaque machine porte déjà sa preuve et sa date, visibles sur sa
+ * fiche. Cette route les additionne pour le parc : c'est le même
+ * principe, vu de haut.
+ *
+ * ── LA DATE COMPTE AUTANT QUE LA PREUVE ──
+ *
+ * Une preuve ne vaut que par sa fraîcheur. « 12 machines vues par ARP »
+ * ne dit rien ; « 12 machines vues par ARP, la plus ancienne il y a
+ * trois semaines » dit qu'un tiers de l'inventaire est peut-être
+ * fantôme. On rend donc la plus ancienne et la plus récente.
+ *
+ * Ouverte à tout compte authentifié : elle ne révèle aucune adresse, ni
+ * aucun nom — seulement des comptes et des dates.
+ */
+router.get("/supervision/preuves", async (req, res) => {
+  const portee = filtreSite(req, "e.id_site");
+
+  try {
+    const [lignes] = await db.query(
+      `SELECT COALESCE(e.preuve_existence, 'inconnue') AS preuve,
+              COUNT(*) AS n,
+              MIN(e.date_preuve) AS plus_ancienne,
+              MAX(e.date_preuve) AS plus_recente
+         FROM EQUIPEMENT e
+        WHERE ${portee.clause}
+        GROUP BY COALESCE(e.preuve_existence, 'inconnue')
+        ORDER BY n DESC`,
+      portee.params
+    );
+
+    const total = lignes.reduce((somme, l) => somme + Number(l.n), 0);
+
+    res.json({
+      total,
+      preuves: lignes.map((l) => ({
+        preuve: l.preuve,
+        nombre: Number(l.n),
+        plus_ancienne: l.plus_ancienne,
+        plus_recente: l.plus_recente,
+      })),
+    });
+  } catch (err) {
+    /* Migration du 9 septembre non passée : la colonne n'existe pas. On
+       rend un corps VIDE plutôt qu'une erreur — l'écran saura ne rien
+       afficher, et le reste du tableau de bord n'est pas concerné. */
+    if (/Unknown column|doesn't exist/i.test(err.message)) {
+      return res.json({ total: 0, preuves: [], indisponible: true });
+    }
+    console.error("Lecture des preuves impossible:", err.message);
+    res.status(500).json({ error: "Lecture des preuves impossible" });
+  }
+});
+
+router.get("/supervision/historique", async (req, res) => {
+  let heures = Number(req.query.heures);
+  if (!Number.isFinite(heures) || heures <= 0) heures = 24;
+  heures = Math.min(Math.floor(heures), 24 * 7);
+
+  // Même règle que la bande passante : environ 200 points, jamais plus
+  // fin que la minute — le cycle de supervision n'en produit pas plus.
+  const pas = Math.max(1, Math.round((heures * 60) / 200));
+  const portee = filtreSite(req, "e.id_site");
+
+  try {
+    const [points] = await db.query(
+      `SELECT FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(r.date_releve) / ?) * ?) AS instant,
+              COUNT(DISTINCT r.id_equipement) AS repondants
+         FROM RELEVE r
+         JOIN EQUIPEMENT e ON e.id_equipement = r.id_equipement
+        WHERE r.date_releve >= NOW() - INTERVAL ${heures} HOUR
+          AND ${portee.clause}
+        GROUP BY instant
+        ORDER BY instant`,
+      [pas * 60, pas * 60, ...portee.params]
+    );
+
+    const porteeParc = filtreSite(req, "e.id_site");
+    const [[parc]] = await db.query(
+      `SELECT COUNT(*) AS total FROM EQUIPEMENT e WHERE ${porteeParc.clause}`,
+      porteeParc.params
+    );
+
+    res.json({
+      periode_heures: heures,
+      pas_minutes: pas,
+      total_parc: Number(parc?.total || 0),
+      points: points.map((p) => ({
+        instant: p.instant,
+        repondants: Number(p.repondants),
+      })),
+    });
+  } catch (err) {
+    console.error("Historique de supervision impossible:", err.message);
+    res.status(500).json({ error: "Impossible de lire l'historique de supervision" });
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════════════════
+   LES ALERTES, JOUR PAR JOUR.
+
+   Répond à la seule question que pose une direction : est-ce que ça
+   s'améliore ou est-ce que ça se dégrade ? Un total d'alertes actives ne
+   le dit pas — il peut être bas parce que tout va bien, ou parce que
+   personne ne traite plus rien.
+
+   DEUX SÉRIES, PAS QUATRE. « Critiques » et « autres ». Trois niveaux
+   empilés dans des teintes voisines se distinguent mal, et la nuance
+   entre un avertissement et une information ne change aucune décision à
+   l'échelle d'une semaine.
+
+   LES JOURS SANS ALERTE DOIVENT APPARAÎTRE, à zéro. Un graphe qui saute
+   du lundi au jeudi laisse croire à trois jours manquants — alors que ce
+   sont trois jours calmes, c'est-à-dire la bonne nouvelle.
+   ═══════════════════════════════════════════════════════════════════════ */
+router.get("/alertes/par-jour", async (req, res) => {
+  let jours = Number(req.query.jours);
+  if (!Number.isFinite(jours) || jours <= 0) jours = 7;
+  jours = Math.min(Math.floor(jours), 90);
+
+  const portee = filtreSite(req, "COALESCE(a.id_site, e.id_site)");
+
+  try {
+    const [rows] = await db.query(
+      `SELECT DATE(a.date_creation) AS jour,
+              SUM(a.niveau = 'critical') AS critiques,
+              SUM(a.niveau <> 'critical') AS autres
+         FROM ALERTE a
+         LEFT JOIN EQUIPEMENT e ON e.id_equipement = a.id_equipement
+        WHERE a.date_creation >= DATE_SUB(CURDATE(), INTERVAL ${jours - 1} DAY)
+          AND ${portee.clause}
+        GROUP BY jour
+        ORDER BY jour`,
+      portee.params
+    );
+
+    const parJour = new Map(
+      rows.map((r) => [
+        new Date(r.jour).toISOString().slice(0, 10),
+        { critiques: Number(r.critiques || 0), autres: Number(r.autres || 0) },
+      ])
+    );
+
+    const points = [];
+    for (let i = jours - 1; i >= 0; i -= 1) {
+      const d = new Date();
+      d.setHours(0, 0, 0, 0);
+      d.setDate(d.getDate() - i);
+      const cle = new Date(d.getTime() - d.getTimezoneOffset() * 60000)
+        .toISOString()
+        .slice(0, 10);
+      const valeurs = parJour.get(cle) || { critiques: 0, autres: 0 };
+      points.push({ jour: cle, ...valeurs });
+    }
+
+    res.json({ jours, points });
+  } catch (err) {
+    console.error("Alertes par jour impossibles:", err.message);
+    res.status(500).json({ error: "Impossible de lire les alertes par jour" });
+  }
 });
 
 // Appelée par AlertesPage.jsx ("Marquer résolue"). Cette route était absente
@@ -3057,6 +3721,85 @@ router.get("/equipements/:id/inventaire-poste", requireRole("admin", "operateur"
     }
     console.error("Lecture de l'inventaire de poste impossible:", err.message);
     res.status(500).json({ error: "Impossible de lire l'inventaire de cette machine" });
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════════════════
+   RATTACHER UN POSTE — TROIS ROUTES, UN SEUL PRINCIPE.
+
+   La plateforme ne s'installe pas sur une machine sans que quelqu'un,
+   devant cette machine, l'ait accepté. L'administrateur demande un code,
+   la personne au poste lance la commande, et la plateforme enregistre QUI
+   a demandé, QUAND, et ce que la machine a déclaré en arrivant.
+
+   LE CODE N'EST PAS UN SECRET DURABLE et n'a pas à l'être : 30 minutes,
+   un seul usage, un seul poste. Le secret durable, c'est le jeton rendu
+   à la machine — et il ne passe jamais par cet écran.
+   ═══════════════════════════════════════════════════════════════════════ */
+function aideRattachement(err, res) {
+  if (/doesn't exist|Unknown column/i.test(err.message)) {
+    res.status(503).json({
+      error: "Le rattachement de poste n'est pas installé sur cette base",
+      aide: "node tools\\appliquer-migrations.js",
+    });
+    return true;
+  }
+  return false;
+}
+
+router.get("/equipements/:id/rattachement", requireRole("admin", "operateur"), async (req, res) => {
+  const acces = await verifierAccesEquipement(req, req.params.id);
+  if (!acces.ok) return res.status(acces.statut).json({ error: acces.erreur });
+
+  try {
+    res.json(await rattachement.etat(req.params.id));
+  } catch (err) {
+    if (aideRattachement(err, res)) return;
+    console.error("Lecture du rattachement impossible:", err.message);
+    res.status(500).json({ error: "Impossible de lire l'état de rattachement" });
+  }
+});
+
+router.post("/equipements/:id/rattachement", requireRole("admin"), async (req, res) => {
+  const acces = await verifierAccesEquipement(req, req.params.id);
+  if (!acces.ok) return res.status(acces.statut).json({ error: acces.erreur });
+
+  try {
+    const { code, duree_minutes } = await rattachement.demanderCode(
+      req.params.id,
+      req.user?.id || null
+    );
+
+    await logActivite(req, "rattachement_demande", `Code de rattachement émis pour l'équipement ${req.params.id}`);
+
+    res.json({ code, duree_minutes, ...(await rattachement.etat(req.params.id)) });
+  } catch (err) {
+    if (aideRattachement(err, res)) return;
+    console.error("Création du code de rattachement impossible:", err.message);
+    res.status(500).json({ error: "Impossible de créer le code de rattachement" });
+  }
+});
+
+/* Un seul verbe pour deux gestes proches, et la différence est dite par
+   `detacher` : annuler un code qui n'a pas servi, ou retirer son droit
+   d'écrire à un poste déjà rattaché. Ce qu'il a remonté reste en base :
+   on retire un droit, on n'efface pas une observation. */
+router.delete("/equipements/:id/rattachement", requireRole("admin"), async (req, res) => {
+  const acces = await verifierAccesEquipement(req, req.params.id);
+  if (!acces.ok) return res.status(acces.statut).json({ error: acces.erreur });
+
+  try {
+    if (req.query.detacher === "1") {
+      await rattachement.detacher(req.params.id);
+      await logActivite(req, "rattachement_retire", `Poste ${req.params.id} détaché`);
+    } else {
+      await rattachement.annulerCode(req.params.id);
+    }
+    res.json(await rattachement.etat(req.params.id));
+  } catch (err) {
+    if (aideRattachement(err, res)) return;
+    console.error("Annulation du rattachement impossible:", err.message);
+    res.status(500).json({ error: "Impossible d'annuler le rattachement" });
   }
 });
 

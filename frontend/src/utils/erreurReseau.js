@@ -18,10 +18,25 @@
 export function decrireErreur(err, contexte = "Les données") {
   const statut = err?.response?.status;
 
-  if (statut === 401 || statut === 403) {
+  /* 401 et 403 disaient la même chose, et l'une des deux phrases était
+     un mauvais conseil. Un 401 veut dire « le serveur ne sait plus qui
+     vous êtes » : se reconnecter règle le problème. Un 403 veut dire
+     « il le sait très bien, et ce n'est pas pour vous » : se reconnecter
+     n'y changera rien, et l'utilisateur recommence en boucle.
+
+     Le cas se produit vraiment : le menu propose « Journal » à tous les
+     rôles, la route est réservée aux administrateurs. */
+  if (statut === 401) {
     return {
       titre: "Session expirée",
       detail: "Reconnectez-vous pour retrouver l'accès aux données.",
+    };
+  }
+
+  if (statut === 403) {
+    return {
+      titre: "Accès non autorisé",
+      detail: "Votre rôle ne donne pas accès à cette information. Demandez-la à un administrateur.",
     };
   }
 

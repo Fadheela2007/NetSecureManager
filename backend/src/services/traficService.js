@@ -26,6 +26,77 @@
 const compteurs = new Map();
 
 /**
+ * ═══════════════════════════════════════════════════════════════════════
+ * MÉMOIRE DES INTERFACES À ÉCARTER — corrigé le 28/09
+ *
+ * LE DÉFAUT. `estIgnoree()` décide à partir du NOM de l'interface. Or le
+ * cycle de supervision appelle `snmpMetrics()` sans inventaire, et sans
+ * inventaire les objets d'interface n'ont pas de nom. `estIgnoree(undefined)`
+ * rendait donc `false` : la boucle locale entrait dans le total.
+ *
+ * Mesuré sur la forme exacte des objets de production, avec le cas décrit
+ * par les tests eux-mêmes — une imprimante dont la boucle locale bouge cent
+ * fois plus vite que son lien : 13 157 kbit/s au lieu de 136,5. Un facteur
+ * 96. Les tests passaient parce qu'ils fournissent le nom ; la production ne
+ * le fournit pas.
+ *
+ * Pire, c'était visiblement incohérent : la fiche d'un équipement marquait
+ * bien le port « hors total » — elle lit les noms en base — pendant que le
+ * total de la même machine l'incluait.
+ *
+ * LA CORRECTION. Ce module RETIENT ce qu'il a appris. Dès qu'un relevé
+ * arrive avec des noms, il note quels index sont à écarter pour cet
+ * équipement, et s'en sert pour tous les relevés suivants, qui n'en ont pas.
+ *
+ * Deux façons d'apprendre, qui se complètent :
+ *   • l'agent distant fait un cycle avec inventaire sur douze : il apprend
+ *     tout seul, sans base de données — ce module doit rester utilisable
+ *     là où il n'y en a pas ;
+ *   • le serveur central sème depuis INTERFACE_RESEAU, où le scan a déjà
+ *     écrit les noms. Aucune colonne SNMP supplémentaire n'est interrogée.
+ *
+ * TANT QUE RIEN N'A ÉTÉ APPRIS, aucune interface n'est écartée — c'est le
+ * comportement d'avant, donc jamais pire. La correction s'installe au
+ * premier inventaire.
+ * ═══════════════════════════════════════════════════════════════════════
+ */
+const ignorees = new Map(); // `${identifiant}:${index}` -> true
+
+/**
+ * Plafond de la mémoire des interfaces.
+ *
+ * Deux à quatre entrées par équipement en pratique. Le plafond protège
+ * contre le cas où l'identifiant varie — l'agent indexe par adresse IP, et
+ * un bail DHCP court en crée de nouvelles. Sans lui, cette carte serait la
+ * fuite mémoire lente que rien ne signale.
+ */
+const MAX_INTERFACES_MEMORISEES = 20000;
+
+function noter(cle, estIgnoreeValeur) {
+  if (estIgnoreeValeur) {
+    if (ignorees.size >= MAX_INTERFACES_MEMORISEES) ignorees.clear();
+    ignorees.set(cle, true);
+  } else {
+    ignorees.delete(cle);
+  }
+}
+
+/**
+ * Sème la liste des interfaces à écarter depuis une source extérieure —
+ * en pratique les noms déjà enregistrés dans INTERFACE_RESEAU.
+ *
+ * @param {string|number} identifiant
+ * @param {Array<{index_snmp:number, nom:string}>} interfacesConnues
+ */
+function memoriserInterfaces(identifiant, interfacesConnues) {
+  for (const i of interfacesConnues || []) {
+    const index = i.index_snmp ?? i.index;
+    if (index === undefined || index === null) continue;
+    noter(`${identifiant}:${index}`, estIgnoree(i.nom));
+  }
+}
+
+/**
  * Interfaces à exclure du total d'un équipement.
  *
  * La boucle locale voit passer tout le trafic interne de la machine : la
@@ -119,8 +190,19 @@ function calculerDebitsEquipement(identifiant, interfaces, maintenant = Date.now
     const index = iface.index ?? iface.index_snmp;
     if (index === undefined || index === null) continue;
 
-    const debit = calculerDebit(`${identifiant}:${index}`, iface, maintenant);
-    const ignoree = estIgnoree(iface.nom);
+    const cle = `${identifiant}:${index}`;
+    const debit = calculerDebit(cle, iface, maintenant);
+
+    /* Le nom fait foi quand il est là — et il met à jour la mémoire au
+       passage. Quand il manque, on se rabat sur ce qu'on a appris ; à
+       défaut, on ne suppose rien. */
+    let ignoree;
+    if (iface.nom) {
+      ignoree = estIgnoree(iface.nom);
+      noter(cle, ignoree);
+    } else {
+      ignoree = ignorees.has(cle);
+    }
 
     parInterface.push({
       index_snmp: Number(index),
@@ -165,14 +247,24 @@ function oublier(identifiant) {
   for (const cle of compteurs.keys()) {
     if (cle.startsWith(`${identifiant}:`)) compteurs.delete(cle);
   }
+  /* La mémoire des interfaces N'EST PAS effacée ici : `oublier()` est
+     appelé à chaque échec de ping, pour qu'un retour en ligne ne produise
+     pas un delta calculé sur des heures d'écart. Les noms d'interface, eux,
+     n'ont pas changé pendant que la machine était éteinte — les réapprendre
+     demanderait un inventaire complet à chaque redémarrage de poste. */
 }
 
 module.exports = {
   calculerDebit,
   calculerDebitsEquipement,
+  memoriserInterfaces,
   tauxUtilisation,
   estIgnoree,
   oublier,
-  _vider: () => compteurs.clear(),
+  _vider: () => {
+    compteurs.clear();
+    ignorees.clear();
+  },
   _taille: () => compteurs.size,
+  _interfacesMemorisees: () => ignorees.size,
 };

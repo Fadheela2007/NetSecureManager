@@ -13,6 +13,7 @@ const { requireRole } = require("../middleware/requireRole");
 const { collecterDonnees, composerPdf } = require("../services/rapportService");
 const {
   envoyerRapportsPlanifies,
+  envoyerRapportAUtilisateur,
   estLeMoment,
 } = require("../services/rapportPlanifieService");
 
@@ -143,6 +144,77 @@ router.post("/rapport/envoyer-maintenant", requireRole("admin"), async (req, res
   } catch (err) {
     console.error("Envoi manuel du rapport impossible:", err);
     res.status(500).json({ error: "Envoi impossible", details: err.message });
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════════════════
+   UN FREIN, ET IL EST VOLONTAIREMENT SIMPLE
+
+   Générer un PDF et l'expédier coûte du temps de serveur. Un bouton
+   qu'on peut presser trente fois d'affilée — par impatience, ou parce
+   que rien ne semble se passer — fabrique trente PDF et trente messages.
+
+   Une minute entre deux envois pour une même personne suffit à écarter
+   ce cas, sans jamais gêner l'usage réel : on ne demande pas deux fois
+   son rapport dans la même minute.
+
+   En mémoire et non en base : perdre ce compteur au redémarrage n'a
+   aucune conséquence, et ça évite une table pour trois nombres.
+   ═══════════════════════════════════════════════════════════════════════ */
+const DELAI_ENTRE_ENVOIS_MS = 60000;
+const dernierEnvoiPersonnel = new Map();
+
+/**
+ * POST /api/rapport/m-envoyer
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * « À MOI », ET À PERSONNE D'AUTRE
+ *
+ * L'envoi existant — `/rapport/envoyer-maintenant` — écrit à tous les
+ * destinataires de tous les périmètres. C'est un geste d'administration,
+ * et il demande le niveau « administrer ».
+ *
+ * Celui-ci n'envoie qu'à la personne connectée, à l'adresse que porte
+ * son compte. Il demande donc seulement « modifier » : recevoir par
+ * courrier ce qu'on peut déjà télécharger d'un clic n'est pas un
+ * pouvoir supplémentaire.
+ *
+ * ── AUCUN CHAMP « DESTINATAIRE » ──
+ *
+ * Et ce n'est pas un oubli. La page d'inscription est ouverte : n'importe
+ * qui peut créer un compte. Si le destinataire était saisissable, chacun
+ * disposerait d'un serveur pour écrire aux autres sous l'identité de la
+ * plateforme. L'adresse est donc lue en base, à partir du jeton signé.
+ */
+router.post("/rapport/m-envoyer", requireRole("admin", "operateur"), async (req, res) => {
+  const id = req.user?.id;
+  if (!id) return res.status(401).json({ error: "Compte inconnu" });
+
+  const precedent = dernierEnvoiPersonnel.get(id) || 0;
+  const reste = DELAI_ENTRE_ENVOIS_MS - (Date.now() - precedent);
+  if (reste > 0) {
+    return res.status(429).json({
+      error: "Vous venez de demander ce rapport",
+      aide: `Réessayez dans ${Math.ceil(reste / 1000)} seconde(s).`,
+    });
+  }
+
+  try {
+    const bilan = await envoyerRapportAUtilisateur(id);
+
+    /* L'HORODATAGE N'EST POSÉ QU'EN CAS DE SUCCÈS. Un envoi qui n'a pas
+       abouti — SMTP absent, périmètre vide — ne doit pas bloquer la
+       minute suivante : la personne corrigerait le problème et se
+       heurterait à un refus qui ne parle pas de ce qu'elle vient de
+       réparer. */
+    if (bilan.envoye) dernierEnvoiPersonnel.set(id, Date.now());
+
+    res.json(bilan);
+  } catch (err) {
+    console.error("Envoi du rapport personnel impossible:", err);
+    // Pas de `err.message` dans la réponse : il peut contenir l'adresse
+    // du serveur SMTP ou le nom de la base.
+    res.status(500).json({ error: "Envoi impossible" });
   }
 });
 

@@ -53,6 +53,31 @@ const PORTS_REVELATEURS = new Map([
   [515, TYPES.IMPRIMANTE],  // LPD
   [631, TYPES.IMPRIMANTE],  // IPP
   [554, TYPES.CAMERA],      // RTSP — flux vidéo
+
+  /* ── Téléphonie ──
+     SIP ne sert qu'à ça. Ce qui l'expose est un téléphone ou un
+     autocommutateur, et rien d'autre ne l'ouvre par accident. */
+  [5060, TYPES.TELEPHONIE],
+  [5061, TYPES.TELEPHONIE],
+
+  /* ── Services de domaine ──
+     Kerberos et LDAP sont servis par un contrôleur de domaine. Un poste
+     de travail les CONSOMME, il ne les expose jamais : la distinction
+     tient, et elle désigne la machine la plus importante du réseau —
+     celle qui ne se présente nulle part comme telle.
+
+     ⚠ On en déduit « serveur », pas « contrôleur de domaine ». La
+     nomenclature n'a pas ce type, et en inventer un ici le rendrait
+     invisible partout ailleurs. */
+  [88, TYPES.SERVEUR],
+  [389, TYPES.SERVEUR],
+
+  /* ── Hyperviseurs ──
+     Une machine qui expose l'administration ESXi ou Proxmox porte des
+     dizaines d'autres machines. La classer en poste de travail serait
+     l'erreur la plus coûteuse de l'inventaire. */
+  [902, TYPES.SERVEUR],
+  [8006, TYPES.SERVEUR],
 ]);
 
 /**

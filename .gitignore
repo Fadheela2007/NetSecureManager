@@ -126,3 +126,24 @@ FICHE-TEST.md
 # Dossier créé par l'assistant pour déposer un fichier de travail. Rien
 # du produit n'y vit ; il peut être supprimé sans conséquence.
 Claude outputs/
+
+# ─────────────────────────────────────────────────────────────────────
+# CLÉ PRIVÉE DE SIGNATURE DES LICENCES — NE JAMAIS COMMITER
+#
+# Celui qui obtient ce fichier peut émettre autant de licences
+# Entreprise qu'il veut, et rien ne permettrait de les distinguer des
+# vraies. Le publier une seule fois, même dans un dépôt privé rendu
+# public plus tard, détruit le modèle commercial — et réécrire
+# l'historique git n'y changerait rien, la clé aurait été vue.
+#
+# La clé PUBLIQUE, elle, est faite pour être distribuée : elle vit dans
+# le .env de chaque client et ne permet que de VÉRIFIER une signature.
+# ─────────────────────────────────────────────────────────────────────
+licence-privee.pem
+*.pem
+!**/exemple*.pem
+
+# Sauvegardes locales : l archive contient backend/.env (mots de passe).
+# Ne jamais la publier. Ajout du 09/11/2026 (audit).
+_sauvegarde-avant-suppression-2026-09-30/
+*.tar.gz

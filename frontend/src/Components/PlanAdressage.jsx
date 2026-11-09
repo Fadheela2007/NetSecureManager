@@ -27,6 +27,11 @@ export default function PlanAdressage({ idSite, rafraichir }) {
   const [chargement, setChargement] = useState(true);
   const [erreur, setErreur] = useState(null);
   const [ouvertes, setOuvertes] = useState({});
+  /* Les réservations déclarées par l'entreprise. Rechargées avec le plan,
+     puisqu'elles le changent : une zone déclarée retire des adresses des
+     « libres », et l'écran doit montrer les deux ensemble ou aucun. */
+  const [reservations, setReservations] = useState([]);
+  const [versionReservations, setVersionReservations] = useState(0);
 
   useEffect(() => {
     let annule = false;
@@ -54,7 +59,17 @@ export default function PlanAdressage({ idSite, rafraichir }) {
     return () => {
       annule = true;
     };
-  }, [idSite, rafraichir]);
+  }, [idSite, rafraichir, versionReservations]);
+
+  useEffect(() => {
+    if (!idSite) return;
+    axios
+      .get(`${API_URL}/reservations`, { params: { id_site: idSite } })
+      .then(({ data }) => setReservations(data))
+      // Migration du 28/09 non passée : la section ne s'affiche pas, le
+      // plan reste juste — il ne connaît alors que la norme.
+      .catch(() => setReservations([]));
+  }, [idSite, versionReservations]);
 
   if (chargement) {
     return (
@@ -84,6 +99,205 @@ export default function PlanAdressage({ idSite, rafraichir }) {
           }
         />
       ))}
+
+      <Reservations
+        idSite={idSite}
+        reservations={reservations}
+        surChangement={() => setVersionReservations((v) => v + 1)}
+      />
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   CE QUE L'ENTREPRISE A DÉJÀ PROMIS
+
+   La norme réserve trois adresses ; l'entreprise en réserve des dizaines,
+   et pour des raisons que la norme ignore. La plus coûteuse est le pool
+   du serveur DHCP : une adresse prise dedans fonctionne quelques jours,
+   puis le DHCP l'attribue à son tour, et la panne qui suit se cherche du
+   côté du câble.
+
+   LE MOTIF EST OBLIGATOIRE, et ce n'est pas de la paperasse : une zone
+   réservée sans raison écrite devient, six mois plus tard, une zone que
+   personne n'ose toucher et que personne ne sait justifier.
+   ══════════════════════════════════════════════════════════════════════ */
+const CATEGORIES = [
+  { cle: "dhcp", libelle: "Pool DHCP" },
+  { cle: "reseau", libelle: "Équipements réseau" },
+  { cle: "serveurs", libelle: "Serveurs" },
+  { cle: "imprimantes", libelle: "Imprimantes" },
+  { cle: "autre", libelle: "Autre" },
+];
+
+function Reservations({ idSite, reservations, surChangement }) {
+  const [ouvert, setOuvert] = useState(false);
+  const [debut, setDebut] = useState("");
+  const [fin, setFin] = useState("");
+  const [motif, setMotif] = useState("");
+  const [categorie, setCategorie] = useState("dhcp");
+  const [exclure, setExclure] = useState(false);
+  const [erreur, setErreur] = useState(null);
+  const [envoi, setEnvoi] = useState(false);
+
+  async function ajouter(e) {
+    e.preventDefault();
+    setEnvoi(true);
+    setErreur(null);
+    try {
+      await axios.post(`${API_URL}/reservations`, {
+        id_site: idSite,
+        debut: debut.trim(),
+        fin: fin.trim(),
+        motif: motif.trim(),
+        categorie,
+        exclure_du_scan: exclure,
+      });
+      setDebut("");
+      setFin("");
+      setMotif("");
+      setExclure(false);
+      surChangement();
+      setOuvert(false);
+    } catch (err) {
+      setErreur(err.response?.data?.error || "Enregistrement refusé.");
+    } finally {
+      setEnvoi(false);
+    }
+  }
+
+  async function supprimer(id) {
+    setErreur(null);
+    try {
+      await axios.delete(`${API_URL}/reservations/${id}`);
+      surChangement();
+    } catch (err) {
+      setErreur(err.response?.data?.error || "Suppression impossible.");
+    }
+  }
+
+  const libelleCategorie = (cle) =>
+    CATEGORIES.find((c) => c.cle === cle)?.libelle || "Autre";
+
+  return (
+    <div className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl p-5 space-y-3">
+      <div className="flex items-baseline justify-between gap-2 flex-wrap">
+        <div>
+          <h3 className="text-sm font-semibold">Adresses réservées par l'entreprise</h3>
+          <p className="text-xs text-[var(--color-mute)] mt-0.5">
+            Déclarées ici, elles sortent des adresses « libres » : la plateforme
+            ne proposera plus une adresse du pool DHCP pour un serveur.
+          </p>
+        </div>
+        <button
+          onClick={() => setOuvert((o) => !o)}
+          className="text-xs px-3 py-1.5 rounded-lg border border-[var(--color-line)] text-[var(--color-mute)] hover:border-[var(--color-signal)] hover:text-[var(--color-signal)] transition cible-tactile"
+        >
+          {ouvert ? "Annuler" : "Déclarer une zone"}
+        </button>
+      </div>
+
+      {ouvert && (
+        <form onSubmit={ajouter} className="flex flex-wrap items-end gap-2">
+          <label className="text-[11px] text-[var(--color-mute)]">
+            De
+            <input
+              value={debut}
+              onChange={(e) => setDebut(e.target.value)}
+              placeholder="192.168.0.100"
+              required
+              className="block w-36 mt-0.5 px-2 py-1 rounded-md bg-[var(--color-surface-2)] border border-[var(--color-line)] text-[var(--color-ink)] font-[var(--font-mono)] text-[12px]"
+            />
+          </label>
+          <label className="text-[11px] text-[var(--color-mute)]">
+            à
+            <input
+              value={fin}
+              onChange={(e) => setFin(e.target.value)}
+              placeholder="192.168.0.200"
+              required
+              className="block w-36 mt-0.5 px-2 py-1 rounded-md bg-[var(--color-surface-2)] border border-[var(--color-line)] text-[var(--color-ink)] font-[var(--font-mono)] text-[12px]"
+            />
+          </label>
+          <label className="text-[11px] text-[var(--color-mute)]">
+            Usage
+            <select
+              value={categorie}
+              onChange={(e) => setCategorie(e.target.value)}
+              className="block mt-0.5 px-2 py-1 rounded-md bg-[var(--color-surface-2)] border border-[var(--color-line)] text-[var(--color-ink)] text-[12px]"
+            >
+              {CATEGORIES.map((c) => (
+                <option key={c.cle} value={c.cle}>
+                  {c.libelle}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-[11px] text-[var(--color-mute)] flex-1 min-w-[200px]">
+            Pourquoi
+            <input
+              value={motif}
+              onChange={(e) => setMotif(e.target.value)}
+              placeholder="Distribué par le serveur DHCP"
+              required
+              className="block w-full mt-0.5 px-2 py-1 rounded-md bg-[var(--color-surface-2)] border border-[var(--color-line)] text-[var(--color-ink)] text-[12px]"
+            />
+          </label>
+          {/* CE QUE CETTE CASE FAIT VRAIMENT : le balayage n'envoie plus
+              rien à ces adresses. nmap reçoit `--exclude`, et notre propre
+              balayage ne les énumère pas. Pour un automate ou un
+              équipement médical, filtrer les résultats après coup ne
+              suffirait pas — les paquets seraient déjà partis. */}
+          <label className="flex items-center gap-1.5 text-[11px] text-[var(--color-mute)]">
+            <input
+              type="checkbox"
+              checked={exclure}
+              onChange={(e) => setExclure(e.target.checked)}
+              className="accent-[var(--color-signal)]"
+            />
+            ne pas scanner ces adresses
+          </label>
+          <button
+            type="submit"
+            disabled={envoi}
+            className="text-xs px-3 py-1.5 rounded-lg bg-[var(--color-signal)] text-[var(--color-sur-accent)] font-medium disabled:opacity-60 cible-tactile"
+          >
+            {envoi ? "…" : "Enregistrer"}
+          </button>
+        </form>
+      )}
+
+      {erreur && <p className="text-xs text-[var(--color-crit)]">{erreur}</p>}
+
+      {reservations.length === 0 ? (
+        <p className="text-xs text-[var(--color-mute)]">
+          Aucune zone déclarée. Le plan ne connaît donc que les adresses que la
+          norme réserve — réseau, diffusion, et les .0/.255 internes.
+        </p>
+      ) : (
+        <ul className="divide-y divide-[var(--color-line)]">
+          {reservations.map((r) => (
+            <li key={r.id_reservation} className="py-2 flex items-baseline justify-between gap-3">
+              <div className="min-w-0">
+                <p className="font-[var(--font-mono)] text-[12px] text-[var(--color-ink)]">
+                  {r.debut} → {r.fin}
+                </p>
+                <p className="text-[11px] text-[var(--color-mute)]">
+                  {libelleCategorie(r.categorie)} — {r.motif}
+                  {r.exclure_du_scan && " · non scannée"}
+                  {r.cree_par_nom && ` · déclaré par ${r.cree_par_nom}`}
+                </p>
+              </div>
+              <button
+                onClick={() => supprimer(r.id_reservation)}
+                className="text-[11px] text-[var(--color-mute)] hover:text-[var(--color-crit)] underline shrink-0 cible-tactile"
+              >
+                Retirer
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -275,6 +489,45 @@ function PlanDUnePlage({ plan, ouverte, basculer }) {
                   </span>
                 )}
               </div>
+            </div>
+          )}
+
+          {/* CE QUI EST POSÉ SUR UNE ZONE RÉSERVÉE. Ce n'est pas encore
+              une panne, c'est une panne qui attend son tour : une adresse
+              fixe donnée à la main dans le pool DHCP fonctionne jusqu'au
+              jour où le DHCP la distribue à son tour. */}
+          {plan.occupants_de_zones_reservees?.length > 0 && (
+            <div>
+              <p className="text-xs mb-1.5" style={{ color: "var(--color-warn)" }}>
+                Machines posées sur une zone réservée
+              </p>
+              <ul className="text-xs text-[var(--color-mute)] space-y-1">
+                {plan.occupants_de_zones_reservees.map((o) => (
+                  <li key={o.adresse}>
+                    <span className="font-[var(--font-mono)] text-[12px]">{o.adresse}</span>
+                    {o.nom ? ` — ${o.nom}` : ""} — dans « {o.motif} »
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {plan.reservations_declarees?.length > 0 && (
+            <div>
+              <p className="text-xs text-[var(--color-mute)] mb-1.5">
+                Zones réservées par l'entreprise
+              </p>
+              <ul className="text-xs text-[var(--color-mute)] space-y-1">
+                {plan.reservations_declarees.map((r) => (
+                  <li key={r.id_reservation}>
+                    <span className="font-[var(--font-mono)] text-[12px]">
+                      {r.debut_effectif} → {r.fin_effectif}
+                    </span>{" "}
+                    — {r.motif} ({r.nb_adresses} adresses
+                    {r.occupees?.length > 0 ? `, dont ${r.occupees.length} déjà occupée(s)` : ""})
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
 

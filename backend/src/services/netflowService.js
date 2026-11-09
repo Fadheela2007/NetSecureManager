@@ -65,6 +65,7 @@
  */
 const dgram = require("node:dgram");
 const db = require("../db");
+const destinations = require("./destinationService");
 
 /** Fenêtre d'agrégation : on écrit un relevé par machine à chaque tour. */
 const PERIODE_MS = 5 * 60 * 1000;
@@ -87,6 +88,42 @@ let debutFenetre = Date.now();
 /** adresse IP → { entrant, sortant } en octets, depuis le dernier vidage. */
 const compteurs = new Map();
 
+/**
+ * Le même trafic, mais détaillé PAR CORRESPONDANT.
+ *
+ * `compteurs` répond « combien », cette carte répond « vers quoi ». Elles
+ * sont alimentées par la même boucle et vidées ensemble : ce sont deux
+ * lectures d'un seul flux, pas deux mesures.
+ *
+ * Clé : source|destination|portSource|portDestination|protocole.
+ * On garde les deux ports parce qu'on ignore encore, à ce stade, laquelle
+ * des deux adresses appartient au parc — donc lequel des deux ports nomme
+ * le service. La question est tranchée au vidage, quand la base peut dire
+ * quelles adresses sont des équipements connus.
+ */
+const conversations = new Map();
+
+/**
+ * Plafond de conversations suivies dans une fenêtre.
+ *
+ * Un parc bureautique en produit quelques milliers par tranche de cinq
+ * minutes. Ce plafond n'est pas un réglage de confort : sans lui, un
+ * routeur mal configuré qui exporterait le trafic d'un opérateur entier
+ * remplirait la mémoire du serveur en quelques minutes.
+ */
+const MAX_CONVERSATIONS = 40000;
+
+/**
+ * Correspondants gardés par machine au moment d'écrire.
+ *
+ * Un poste ordinaire parle à quelques dizaines de serveurs par tranche de
+ * cinq minutes, et la queue de cette distribution est faite d'échanges de
+ * quelques kilo-octets — une requête DNS, une vérification de mise à
+ * jour. Les écrire tous multiplierait la taille de la table par dix pour
+ * une information que personne ne lira jamais.
+ */
+const MAX_DESTINATIONS_PAR_MACHINE = 60;
+
 /** Modèles de champs NetFlow v9, par exportateur et par identifiant. */
 const modeles = new Map();
 
@@ -94,6 +131,8 @@ const modeles = new Map();
 let paquetsRecus = 0;
 let premierExportateurSignale = false;
 let versionInconnueSignalee = false;
+let tableDestinationsSignalee = false;
+let dernierePurge = 0;
 
 /* ═══════════════════════════════════════════════════════════════════════
    DÉCODAGE
@@ -125,10 +164,16 @@ function lireEntier(buf, offset, longueur) {
 /**
  * NetFlow v5 — format figé, le plus simple et encore très répandu.
  *
- * En-tête de 24 octets, puis des enregistrements de 48 octets dont on ne
- * retient que trois champs : l'adresse source, l'adresse destination et
- * le nombre d'octets. Le reste (ports, drapeaux TCP, numéros d'AS) ne
- * sert pas à répondre « qui consomme combien ».
+ * En-tête de 24 octets, puis des enregistrements de 48 octets à
+ * composition fixe.
+ *
+ * On en retient six champs : les deux adresses, les deux PORTS, le
+ * protocole et le nombre d'octets. Les ports étaient auparavant ignorés —
+ * « ne sert pas à répondre qui consomme combien », disait le commentaire,
+ * ce qui était vrai de la question d'alors. Ils sont ce qui permet
+ * aujourd'hui de répondre à la suivante : vers QUOI.
+ *
+ * Le reste (drapeaux TCP, numéros d'AS, masques) est toujours sauté.
  */
 function decoderV5(buf) {
   const flux = [];
@@ -141,6 +186,12 @@ function decoderV5(buf) {
       source: adresseDepuis(buf, debut),
       destination: adresseDepuis(buf, debut + 4),
       octets: buf.readUInt32BE(debut + 20),
+      // Décalages figés par la spécification v5 : srcport à 32, dstport à
+      // 34, protocole à 38. Ils ne varient pas d'un routeur à l'autre —
+      // c'est tout l'intérêt de ce format par rapport au v9.
+      portSource: buf.readUInt16BE(debut + 32),
+      portDestination: buf.readUInt16BE(debut + 34),
+      protocole: buf[debut + 38],
     });
   }
   return flux;
@@ -150,7 +201,10 @@ function decoderV5(buf) {
    sautés en sachant leur longueur, ce qui permet d'avancer dans
    l'enregistrement sans connaître leur signification. */
 const CHAMP_OCTETS_ENTREE = 1;
+const CHAMP_PROTOCOLE = 4;
+const CHAMP_PORT_SOURCE = 7;
 const CHAMP_ADRESSE_SOURCE = 8;
+const CHAMP_PORT_DESTINATION = 11;
 const CHAMP_ADRESSE_DESTINATION = 12;
 const CHAMP_OCTETS_SORTIE = 23;
 
@@ -211,6 +265,9 @@ function decoderV9(buf, cle) {
             let source = null;
             let destination = null;
             let octets = 0;
+            let portSource = null;
+            let portDestination = null;
+            let protocole = null;
             let decalage = p;
 
             for (const champ of champs) {
@@ -223,11 +280,24 @@ function decoderV9(buf, cle) {
                 champ.type === CHAMP_OCTETS_SORTIE
               ) {
                 octets += lireEntier(buf, decalage, champ.longueur);
+              } else if (champ.type === CHAMP_PORT_SOURCE) {
+                portSource = lireEntier(buf, decalage, champ.longueur);
+              } else if (champ.type === CHAMP_PORT_DESTINATION) {
+                portDestination = lireEntier(buf, decalage, champ.longueur);
+              } else if (champ.type === CHAMP_PROTOCOLE) {
+                protocole = lireEntier(buf, decalage, champ.longueur);
               }
               decalage += champ.longueur;
             }
 
-            if (source && destination) flux.push({ source, destination, octets });
+            /* Un exportateur n'est pas tenu d'inclure les ports dans son
+               modèle. Quand ils manquent, le flux reste compté dans le
+               total de la machine et sa destination est enregistrée sans
+               service nommé — une information partielle, jamais une
+               information inventée. */
+            if (source && destination) {
+              flux.push({ source, destination, octets, portSource, portDestination, protocole });
+            }
             p += taille;
           }
         }
@@ -294,7 +364,40 @@ function comptabiliser(flux) {
   for (const f of flux) {
     ajouter(f.source, "sortant", f.octets);
     ajouter(f.destination, "entrant", f.octets);
+    ajouterConversation(f);
   }
+}
+
+/**
+ * Additionne un flux dans la carte des conversations.
+ *
+ * On n'essaie PAS de deviner ici laquelle des deux adresses appartient au
+ * parc. La tentation serait de tester les plages privées (10.x, 192.168.x)
+ * et d'en conclure « celle-ci est interne » : ce serait juste dans la
+ * plupart des cas et faux dans ceux qui comptent — un site qui utilise des
+ * adresses publiques à l'intérieur, une machine du parc joignable depuis
+ * l'extérieur. Une supposition fausse imputerait le trafic à la mauvaise
+ * machine, sans que rien ne le signale.
+ *
+ * La base sait répondre avec certitude. On attend le vidage.
+ */
+function ajouterConversation(f) {
+  if (!f.octets || f.octets <= 0) return;
+  const cle = `${f.source}|${f.destination}|${f.portSource ?? ""}|${f.portDestination ?? ""}|${f.protocole ?? ""}`;
+  let ligne = conversations.get(cle);
+  if (!ligne) {
+    if (conversations.size >= MAX_CONVERSATIONS) return;
+    ligne = {
+      source: f.source,
+      destination: f.destination,
+      portSource: f.portSource ?? null,
+      portDestination: f.portDestination ?? null,
+      protocole: f.protocole ?? null,
+      octets: 0,
+    };
+    conversations.set(cle, ligne);
+  }
+  ligne.octets += f.octets;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -316,15 +419,142 @@ function comptabiliser(flux) {
  * par port de commutateur. NetFlow sert ce pour quoi il est irremplaçable
  * : les machines dont aucun compteur n'est lisible.
  */
+/**
+ * Impute chaque conversation à la machine du parc qui y a participé.
+ *
+ * ── QUEL PORT NOMME LE SERVICE ──
+ *
+ * Celui du CORRESPONDANT, jamais celui de la machine du parc. Un poste
+ * qui navigue ouvre un port local tiré au hasard — 52134, puis 52135 à la
+ * page suivante — vers le port 443 du serveur. Retenir le port local
+ * produirait une ligne différente par connexion et ne nommerait rien ;
+ * c'est le port distant qui dit « web sécurisé ».
+ *
+ * ── UNE CONVERSATION ENTRE DEUX MACHINES DU PARC COMPTE DEUX FOIS ──
+ *
+ * Et c'est volontaire : elle est sortante pour l'une, entrante pour
+ * l'autre, et chacune doit la voir sur sa propre fiche. Les deux lignes
+ * décrivent le même échange vu des deux bouts, pas deux échanges.
+ */
+async function ecrireDestinations(echanges, lignesEquipements, dateFenetre) {
+  if (!Array.isArray(echanges) || echanges.length === 0) return;
+
+  const idParIp = new Map(lignesEquipements.map((l) => [l.adresse_ip, l.id_equipement]));
+  if (idParIp.size === 0) return;
+
+  /* Clé : machine + correspondant + port distant + protocole. Plusieurs
+     conversations s'y fondent — c'est exactement ce qu'on veut : dix
+     onglets ouverts vers le même service font une ligne, pas dix. */
+  const parCle = new Map();
+
+  const imputer = (idEquipement, autreIp, portDistant, protocole, sens, octets) => {
+    const cle = `${idEquipement}|${autreIp}|${portDistant ?? ""}|${protocole ?? ""}`;
+    let l = parCle.get(cle);
+    if (!l) {
+      l = {
+        id: idEquipement,
+        destination: autreIp,
+        port: portDistant,
+        protocole,
+        sortants: 0,
+        entrants: 0,
+      };
+      parCle.set(cle, l);
+    }
+    l[sens] += octets;
+  };
+
+  for (const e of echanges) {
+    const idSource = idParIp.get(e.source);
+    const idDestination = idParIp.get(e.destination);
+
+    // Aucun des deux bouts n'est une machine connue : le flux n'a personne
+    // à qui être imputé. On le laisse tomber plutôt que d'inventer une
+    // ligne orpheline.
+    if (idSource === undefined && idDestination === undefined) continue;
+
+    if (idSource !== undefined) {
+      imputer(idSource, e.destination, e.portDestination, e.protocole, "sortants", e.octets);
+    }
+    if (idDestination !== undefined) {
+      imputer(idDestination, e.source, e.portSource, e.protocole, "entrants", e.octets);
+    }
+  }
+
+  if (parCle.size === 0) return;
+
+  /* On ne garde que les plus gros correspondants de chaque machine. Voir
+     MAX_DESTINATIONS_PAR_MACHINE : la queue est faite d'échanges de
+     quelques kilo-octets qui n'apprennent rien. */
+  const parMachine = new Map();
+  for (const l of parCle.values()) {
+    if (!parMachine.has(l.id)) parMachine.set(l.id, []);
+    parMachine.get(l.id).push(l);
+  }
+
+  const retenues = [];
+  for (const liste of parMachine.values()) {
+    liste.sort((a, b) => b.sortants + b.entrants - (a.sortants + a.entrants));
+    for (const l of liste.slice(0, MAX_DESTINATIONS_PAR_MACHINE)) {
+      if (l.sortants <= 0 && l.entrants <= 0) continue;
+      const port = Number.isInteger(l.port) && l.port > 0 ? l.port : null;
+      const proto = Number.isInteger(l.protocole) ? l.protocole : null;
+      retenues.push([l.id, l.destination, port, proto, l.sortants, l.entrants, dateFenetre]);
+    }
+  }
+
+  if (retenues.length === 0) return;
+
+  const TAILLE_LOT = 200;
+  for (let i = 0; i < retenues.length; i += TAILLE_LOT) {
+    const lot = retenues.slice(i, i + TAILLE_LOT);
+    try {
+      await db.query(
+        `INSERT INTO FLUX_DESTINATION
+           (id_equipement, destination, port_distant, protocole,
+            octets_sortants, octets_entrants, date_fenetre)
+         VALUES ${lot.map(() => "(?, ?, ?, ?, ?, ?, ?)").join(", ")}
+         ON DUPLICATE KEY UPDATE
+           octets_sortants = octets_sortants + VALUES(octets_sortants),
+           octets_entrants = octets_entrants + VALUES(octets_entrants)`,
+        lot.flat()
+      );
+    } catch (err) {
+      /* Table absente : la migration 2026-09-28 n'est pas appliquée. On le
+         dit UNE fois et le collecteur continue son travail d'origine — la
+         mesure du débit, elle, n'a pas besoin de cette table. */
+      if (!tableDestinationsSignalee) {
+        tableDestinationsSignalee = true;
+        console.warn(
+          "\n⚠  NetFlow — impossible d'enregistrer les destinations : " +
+            err.message +
+            "\n   Le débit par machine continue d'être mesuré.\n" +
+            "   Pour savoir VERS QUOI part ce débit :\n" +
+            "   backend/migrations/2026-09-28-flux-destinations.sql\n"
+        );
+      }
+      return;
+    }
+  }
+}
+
 async function vider() {
   const maintenant = Date.now();
   const secondes = Math.max(1, Math.round((maintenant - debutFenetre) / 1000));
+
+  /* La fenêtre est datée par son DÉBUT, arrondi à la minute. Deux
+     collecteurs, ou un redémarrage en cours de route, retombent ainsi sur
+     la même valeur et additionnent dans la même ligne au lieu d'en créer
+     deux qu'aucune requête ne saurait rapprocher. */
+  const debutDeLaFenetre = new Date(Math.floor(debutFenetre / 60000) * 60000);
   debutFenetre = maintenant;
 
-  if (compteurs.size === 0) return;
+  if (compteurs.size === 0 && conversations.size === 0) return;
 
   const parIp = new Map(compteurs);
   compteurs.clear();
+  const echanges = [...conversations.values()];
+  conversations.clear();
 
   try {
     const adresses = [...parIp.keys()];
@@ -357,6 +587,15 @@ async function vider() {
 
       aEcrire.push([ligne.id_equipement, entrant, sortant]);
     }
+
+    /* ── LES CORRESPONDANTS ──
+       Écrits pour TOUTES les machines connues, y compris celles déjà
+       mesurées en SNMP. Le doublon qu'on évite plus haut concerne le
+       DÉBIT — deux méthodes de mesure dans la même moyenne. Ici il n'y a
+       pas de concurrence : aucune autre source ne dit vers quoi une
+       machine parle, et une imprimante relevée en SNMP a autant besoin
+       qu'une autre qu'on sache à quel serveur elle s'adresse. */
+    await ecrireDestinations(echanges, lignes, debutDeLaFenetre);
 
     if (aEcrire.length === 0) return;
 
@@ -444,6 +683,13 @@ function demarrer() {
   debutFenetre = Date.now();
   minuterie = setInterval(() => {
     vider().catch(() => {});
+    /* La purge vit ici plutôt que dans un cron : cette table n'existe que
+       si ce collecteur tourne, et sa durée de conservation est une règle
+       du produit, pas un réglage. Une heure entre deux passages. */
+    if (Date.now() - dernierePurge > 60 * 60 * 1000) {
+      dernierePurge = Date.now();
+      destinations.purger().catch(() => {});
+    }
   }, PERIODE_MS);
   // Le collecteur ne doit pas, à lui seul, empêcher le processus de
   // s'arrêter proprement.
@@ -470,6 +716,7 @@ function etat() {
     actif: Boolean(socket),
     paquets: paquetsRecus,
     adresses_suivies: compteurs.size,
+    conversations_suivies: conversations.size,
     modeles_connus: modeles.size,
   };
 }
@@ -484,4 +731,5 @@ module.exports = {
   decoderV9,
   comptabiliser,
   _compteurs: compteurs,
+  _conversations: conversations,
 };

@@ -193,14 +193,564 @@ router.post("/sites", requireRole("admin"), async (req, res) => {
   if (!nom || !ville) {
     return res.status(400).json({ error: "nom et ville sont requis" });
   }
+
   const agent_token = crypto.randomBytes(24).toString("hex");
-  const [result] = await db.query(
-    "INSERT INTO SITE (nom, ville, agent_token) VALUES (?, ?, ?)",
-    [nom, ville, agent_token]
-  );
+
+  /* ── POURQUOI CE try/catch EXISTE MAINTENANT ──
+
+     C'était la seule route d'écriture de la plateforme qui n'en avait
+     pas. Une erreur de base y remontait donc au gestionnaire global :
+     l'écran affichait « Impossible de créer le site » — sa phrase par
+     défaut, celle qu'il dit quand le serveur n'a rien dit — et la vraie
+     raison restait dans la console du serveur, que personne ne regarde
+     quand un bouton ne marche pas.
+
+     Une colonne ajoutée par une migration et devenue obligatoire, une
+     contrainte de clé étrangère, un dépassement de longueur : trois
+     pannes qui se soignent en trois gestes différents, et qui se
+     présentaient toutes comme la même. */
+  let result;
+  try {
+    [result] = await db.query(
+      "INSERT INTO SITE (nom, ville, agent_token) VALUES (?, ?, ?)",
+      [nom, ville, agent_token]
+    );
+  } catch (err) {
+    console.error("Création de site refusée par la base:", err.code, err.message);
+
+    const colonne = err.message.match(/Field '(\w+)' doesn't have a default value/i);
+    if (colonne) {
+      return res.status(500).json({
+        error: "La base exige une colonne que la création ne renseigne pas",
+        aide:
+          `Colonne « ${colonne[1]} » de la table SITE. Elle a été ajoutée par ` +
+          "une migration et n'accepte pas de valeur vide. Rendez-la " +
+          "facultative, ou donnez-lui une valeur par défaut.",
+      });
+    }
+
+    if (err.code === "ER_NO_REFERENCED_ROW_2" || err.code === "ER_NO_REFERENCED_ROW") {
+      return res.status(500).json({
+        error: "La base refuse ce site à cause d'une référence manquante",
+        aide: "Une clé étrangère de la table SITE pointe vers une ligne inexistante.",
+      });
+    }
+
+    /* Le message brut de MySQL en dernier recours. Il n'est pas beau,
+       mais il NOMME le problème — et c'est tout ce qu'on lui demande
+       quand les cas connus n'ont pas répondu. */
+    return res.status(500).json({
+      error: "Création du site impossible",
+      aide: err.sqlMessage || err.message,
+    });
+  }
+
   await tracer(req, "site_cree", `Site « ${nom} » (${ville}) créé`);
 
   res.json({ id_site: result.insertId, nom, ville, agent_token });
+});
+
+/* ═══════════════════════════════════════════════════════════════════════
+   LA VUE D'UN SITE — ASSEMBLÉE TOUTE SEULE
+
+   ── CE QUE CET ÉCRAN FAIT, ET QUE LES AUTRES OUTILS NE FONT PAS ──
+
+   Chez eux, un tableau de bord se CONSTRUIT : on crée le tableau, on
+   ajoute une tuile, on choisit l'élément à surveiller, on règle l'unité,
+   on recommence pour chaque machine. Une demi-journée pour un site, et
+   tout est à refaire au suivant.
+
+   Ici il n'y a rien à configurer. Le scan a déjà appris ce qu'il y a sur
+   le réseau ; cette route le met en forme. Le contenu de l'écran découle
+   de ce qui a été TROUVÉ, pas de ce qu'un administrateur a pensé à
+   déclarer. Un site scanné ce matin a sa vue complète ce matin.
+
+   ── UNE SEULE REQUÊTE HTTP, HUIT LECTURES ──
+
+   L'assemblage a lieu ICI, pas dans le navigateur. Sept allers-retours
+   depuis l'écran auraient affiché un bloc à la fois, dans le désordre,
+   chacun avec son propre moment d'erreur. Une vue qui se compose par
+   morceaux donne l'impression d'un outil qui hésite.
+
+   ── CHAQUE BLOC TOMBE TOUT SEUL ──
+
+   Une migration non passée rend ce bloc `null`, jamais zéro, et les
+   autres continuent. `null` se lit « nous ne savons pas » ; zéro se lit
+   « il n'y en a pas ». Sur un outil de supervision, confondre les deux
+   est la faute qui coûte la confiance.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** Exécute une lecture, et rend `null` si la table ou la colonne manque. */
+async function lireOuRien(requete) {
+  try {
+    return await requete();
+  } catch (err) {
+    if (/doesn't exist|Unknown column/i.test(err.message)) return null;
+    throw err;
+  }
+}
+
+/**
+ * GET /api/sites/:id/vue
+ *
+ * Tout ce qu'on sait d'un site, en un seul appel. Ouverte à tout compte
+ * qui a le droit de voir l'écran Sites : elle ne fait que rassembler des
+ * chiffres déjà consultables ailleurs.
+ */
+router.get("/sites/:id/vue", async (req, res) => {
+  const [lignes] = await db.query(
+    `SELECT id_site, nom, ville, dernier_push, supervision_par_agent
+       FROM SITE WHERE id_site = ?`,
+    [req.params.id]
+  ).catch(async () => {
+    // Base d'avant la migration du 8 septembre.
+    return db.query("SELECT id_site, nom, ville, dernier_push FROM SITE WHERE id_site = ?", [
+      req.params.id,
+    ]);
+  });
+
+  const site = lignes[0];
+  if (!site || !siteAutorise(req, site.id_site)) {
+    return res.status(404).json({ error: "Site introuvable" });
+  }
+  const id = site.id_site;
+
+  try {
+    /* ── LE PARC, PAR ÉTAT ──
+       `inconnu` est compté à part, et c'est le cœur du sujet : une
+       machine dont on n'a aucune nouvelle n'est PAS une machine hors
+       ligne. Les additionner ferait annoncer des pannes imaginaires. */
+    const [[parc]] = await db.query(
+      `SELECT COUNT(*) AS total,
+              SUM(statut = 'up')   AS en_ligne,
+              SUM(statut = 'down') AS hors_ligne,
+              SUM(statut NOT IN ('up','down') OR statut IS NULL) AS inconnu
+         FROM EQUIPEMENT WHERE id_site = ?`,
+      [id]
+    );
+
+    /* ── CE QU'IL Y A SUR CE RÉSEAU ──
+       Découvert par le scan, jamais déclaré à la main. C'est exactement
+       ce qu'un autre outil demanderait de saisir machine par machine. */
+    const [types] = await db.query(
+      `SELECT COALESCE(t.libelle, 'indéterminé') AS libelle, COUNT(*) AS nombre
+         FROM EQUIPEMENT e
+         LEFT JOIN TYPE_EQUIPEMENT t ON t.id_type = e.id_type
+        WHERE e.id_site = ?
+        GROUP BY COALESCE(t.libelle, 'indéterminé')
+        ORDER BY nombre DESC`,
+      [id]
+    );
+
+    const [[alertes]] = await db.query(
+      `SELECT COUNT(*) AS actives,
+              SUM(a.niveau = 'critical') AS critiques
+         FROM ALERTE a
+         LEFT JOIN EQUIPEMENT e ON e.id_equipement = a.id_equipement
+        WHERE a.statut IN ('active','traitee')
+          AND (e.id_site = ? OR a.id_site = ?)`,
+      [id, id]
+    ).catch(async () =>
+      db.query(
+        `SELECT COUNT(*) AS actives, SUM(a.niveau = 'critical') AS critiques
+           FROM ALERTE a JOIN EQUIPEMENT e ON e.id_equipement = a.id_equipement
+          WHERE a.statut IN ('active','traitee') AND e.id_site = ?`,
+        [id]
+      )
+    );
+
+    const preuves = await lireOuRien(async () => {
+      const [rows] = await db.query(
+        `SELECT COALESCE(preuve_existence, 'inconnue') AS preuve,
+                COUNT(*) AS nombre, MIN(date_preuve) AS plus_ancienne
+           FROM EQUIPEMENT WHERE id_site = ?
+          GROUP BY COALESCE(preuve_existence, 'inconnue')
+          ORDER BY nombre DESC`,
+        [id]
+      );
+      return rows.map((r) => ({ ...r, nombre: Number(r.nombre) }));
+    });
+
+    const [consommateurs] = await db.query(
+      `SELECT e.id_equipement, e.adresse_ip,
+              COALESCE(e.nom_personnalise, e.nom) AS nom,
+              AVG(r.trafic_entrant_kbps) + AVG(r.trafic_sortant_kbps) AS kbps
+         FROM RELEVE r
+         JOIN EQUIPEMENT e ON e.id_equipement = r.id_equipement
+        WHERE e.id_site = ?
+          AND r.date_releve >= NOW() - INTERVAL 24 HOUR
+          AND (r.trafic_entrant_kbps IS NOT NULL OR r.trafic_sortant_kbps IS NOT NULL)
+        GROUP BY e.id_equipement, e.adresse_ip, e.nom_personnalise, e.nom
+        ORDER BY kbps DESC
+        LIMIT 5`,
+      [id]
+    );
+
+    const [plages] = await db.query(
+      "SELECT cidr, actif FROM PLAGE_SCAN WHERE id_site = ? ORDER BY cidr",
+      [id]
+    );
+
+    /* ── LES COURBES, SUR 24 HEURES ──
+
+       Un chiffre dit l'état à l'instant où on regarde ; une courbe dit
+       la tendance. C'est la différence entre « 2 machines hors ligne »
+       et « elles tombent toutes les nuits à 19 h ».
+
+       Un point par heure : le cycle en produit un par minute, mais
+       1 440 points sur un écran large donnent une ligne illisible et
+       pèsent pour rien. */
+    const [historique] = await db.query(
+      `SELECT DATE_FORMAT(r.date_releve, '%Y-%m-%d %H:00:00') AS instant,
+              COUNT(DISTINCT r.id_equipement) AS repondants,
+              AVG(r.latence_ms) AS latence,
+              AVG(r.trafic_entrant_kbps) + AVG(r.trafic_sortant_kbps) AS debit
+         FROM RELEVE r
+         JOIN EQUIPEMENT e ON e.id_equipement = r.id_equipement
+        WHERE e.id_site = ? AND r.date_releve >= NOW() - INTERVAL 24 HOUR
+        GROUP BY instant
+        ORDER BY instant ASC`,
+      [id]
+    );
+
+    /* ── LA CHARGE MOYENNE, POUR LES JAUGES ──
+       Sur la dernière heure, et UNIQUEMENT sur les machines qui ont
+       répondu. Moyenner sur tout le parc ferait baisser le chiffre à
+       proportion des machines muettes — un parc à 90 % de charge
+       paraîtrait tranquille parce que neuf machines sur dix ne disent
+       rien. */
+    const [[charge]] = await db.query(
+      `SELECT AVG(r.cpu_pourcent) AS cpu,
+              AVG(r.ram_pourcent) AS ram,
+              COUNT(DISTINCT CASE WHEN r.cpu_pourcent IS NOT NULL
+                                  THEN r.id_equipement END) AS machines
+         FROM RELEVE r
+         JOIN EQUIPEMENT e ON e.id_equipement = r.id_equipement
+        WHERE e.id_site = ? AND r.date_releve >= NOW() - INTERVAL 1 HOUR`,
+      [id]
+    );
+
+    /* ── LES PROBLÈMES, NOMMÉS ──
+       Un compteur d'alertes ne dit pas quoi faire. La liste, si. */
+    const [problemes] = await db.query(
+      `SELECT a.id_alerte, a.type_alerte, a.niveau, a.message,
+              a.date_creation, a.occurrences,
+              COALESCE(e.nom_personnalise, e.nom, e.adresse_ip) AS machine
+         FROM ALERTE a
+         LEFT JOIN EQUIPEMENT e ON e.id_equipement = a.id_equipement
+        WHERE a.statut IN ('active','traitee')
+          AND (e.id_site = ? OR a.id_site = ?)
+        ORDER BY FIELD(a.niveau,'critical','warning','info'), a.date_creation DESC
+        LIMIT 6`,
+      [id, id]
+    ).catch(async () =>
+      db.query(
+        `SELECT a.id_alerte, a.type_alerte, a.niveau, a.message,
+                a.date_creation, a.occurrences,
+                COALESCE(e.nom_personnalise, e.nom, e.adresse_ip) AS machine
+           FROM ALERTE a JOIN EQUIPEMENT e ON e.id_equipement = a.id_equipement
+          WHERE a.statut IN ('active','traitee') AND e.id_site = ?
+          ORDER BY FIELD(a.niveau,'critical','warning','info'), a.date_creation DESC
+          LIMIT 6`,
+        [id]
+      )
+    );
+
+    /* La dernière fois que ce réseau a été exploré. C'est la date qui
+       dit si tout le reste de l'écran est encore d'actualité. */
+    const dernierScan = await lireOuRien(async () => {
+      const [[r]] = await db.query(
+        "SELECT MAX(date_preuve) AS quand FROM EQUIPEMENT WHERE id_site = ?",
+        [id]
+      );
+      return r?.quand || null;
+    });
+
+    res.json({
+      site: {
+        id_site: id,
+        nom: site.nom,
+        ville: site.ville,
+        dernier_push: site.dernier_push,
+        supervision_par_agent: Boolean(site.supervision_par_agent),
+      },
+      parc: {
+        total: Number(parc.total || 0),
+        en_ligne: Number(parc.en_ligne || 0),
+        hors_ligne: Number(parc.hors_ligne || 0),
+        inconnu: Number(parc.inconnu || 0),
+      },
+      types: types.map((t) => ({ libelle: t.libelle, nombre: Number(t.nombre) })),
+      alertes: {
+        actives: Number(alertes?.actives || 0),
+        critiques: Number(alertes?.critiques || 0),
+      },
+      preuves,
+      consommateurs: consommateurs.map((c) => ({
+        id_equipement: c.id_equipement,
+        nom: c.nom,
+        adresse_ip: c.adresse_ip,
+        kbps: c.kbps === null ? null : Number(c.kbps),
+      })),
+      plages: plages.map((p) => ({ cidr: p.cidr, actif: Boolean(p.actif) })),
+      historique: historique.map((h) => ({
+        instant: h.instant,
+        repondants: Number(h.repondants || 0),
+        /* `null` et non 0 quand rien n'a été mesuré : une courbe qui
+           retombe à zéro se lit comme une panne. */
+        latence: h.latence === null ? null : Math.round(Number(h.latence) * 10) / 10,
+        debit: h.debit === null ? null : Math.round(Number(h.debit)),
+      })),
+      charge: {
+        cpu: charge?.cpu === null || charge?.cpu === undefined
+          ? null
+          : Math.round(Number(charge.cpu)),
+        ram: charge?.ram === null || charge?.ram === undefined
+          ? null
+          : Math.round(Number(charge.ram)),
+        machines: Number(charge?.machines || 0),
+      },
+      problemes: problemes.map((p) => ({
+        id_alerte: p.id_alerte,
+        machine: p.machine,
+        type: p.type_alerte,
+        niveau: p.niveau,
+        message: p.message,
+        depuis: p.date_creation,
+        occurrences: Number(p.occurrences || 1),
+      })),
+      dernier_scan: dernierScan,
+    });
+  } catch (err) {
+    console.error("Vue du site impossible:", err.message);
+    res.status(500).json({ error: "Lecture de la vue du site impossible" });
+  }
+});
+
+/**
+ * GET /api/sites/:id/machines-par-preuve?preuve=ping
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * UN CHIFFRE QU'ON PEUT OUVRIR
+ *
+ * « 47 machines vues par ping » est une affirmation. Tant qu'on ne peut
+ * pas l'ouvrir, c'est une affirmation qu'il faut croire sur parole — et
+ * c'est exactement ce que cette plateforme refuse de demander.
+ *
+ * Chaque preuve devient donc une porte : on clique, on voit les machines
+ * concernées, avec le DÉTAIL de ce qui a été constaté sur chacune et la
+ * DATE. Une preuve qu'on peut aller vérifier n'est plus une promesse.
+ *
+ * ── LA PREUVE VIENT DE L'URL, LE FILTRE VIENT DE LA BASE ──
+ *
+ * `preuve` est passée en paramètre lié, jamais concaténée. Et `inconnue`
+ * est traduite en `IS NULL` : c'est une absence, pas une valeur stockée.
+ */
+router.get("/sites/:id/machines-par-preuve", async (req, res) => {
+  const [lignes] = await db.query("SELECT id_site FROM SITE WHERE id_site = ?", [
+    req.params.id,
+  ]);
+  if (lignes.length === 0 || !siteAutorise(req, lignes[0].id_site)) {
+    return res.status(404).json({ error: "Site introuvable" });
+  }
+
+  const preuve = String(req.query.preuve || "").trim();
+  if (!preuve) return res.status(400).json({ error: "Preuve manquante" });
+
+  try {
+    const sansPreuve = preuve === "inconnue";
+    const [machines] = await db.query(
+      `SELECT e.id_equipement, e.adresse_ip, e.statut,
+              COALESCE(e.nom_personnalise, e.nom) AS nom,
+              e.preuve_detail, e.date_preuve,
+              COALESCE(t.libelle, 'indéterminé') AS type
+         FROM EQUIPEMENT e
+         LEFT JOIN TYPE_EQUIPEMENT t ON t.id_type = e.id_type
+        WHERE e.id_site = ?
+          AND ${sansPreuve ? "e.preuve_existence IS NULL" : "e.preuve_existence = ?"}
+        ORDER BY INET_ATON(e.adresse_ip)
+        LIMIT 200`,
+      sansPreuve ? [req.params.id] : [req.params.id, preuve]
+    );
+
+    res.json({
+      preuve,
+      machines: machines.map((m) => ({
+        id_equipement: m.id_equipement,
+        nom: m.nom,
+        adresse_ip: m.adresse_ip,
+        statut: m.statut,
+        type: m.type,
+        detail: m.preuve_detail,
+        date_preuve: m.date_preuve,
+      })),
+    });
+  } catch (err) {
+    if (/Unknown column|doesn't exist/i.test(err.message)) {
+      return res.status(503).json({
+        error: "Les preuves ne sont pas enregistrées sur cette base",
+        aide: "Appliquez backend/migrations/2026-09-09-preuve-existence.sql.",
+      });
+    }
+    console.error("Lecture des machines par preuve impossible:", err.message);
+    res.status(500).json({ error: "Lecture impossible" });
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════════════════
+   SUPPRIMER UN SITE
+
+   ── LE GESTE LE PLUS DESTRUCTEUR DE LA PLATEFORME ──
+
+   Les clés étrangères sont en CASCADE : effacer un site efface ses
+   équipements, et avec eux tout l'historique de relevés, les alertes,
+   les incidents, les plages, la politique d'accès web. Des mois de
+   mesures, en une requête, sans retour possible.
+
+   LA SUPPRESSION EST DIRECTE : un clic, et c'est fait. Rien à recopier,
+   aucun écran intermédiaire.
+
+   DEUX REFUS SUBSISTENT, ET CE N'EST PAS DE LA FRICTION. Ils ne
+   protègent pas du clic maladroit — ils empêchent la suppression de
+   laisser la plateforme dans un état FAUX :
+
+     1. LE DERNIER SITE. Sans aucun site, plus rien ne peut être
+        supervisé ni scanné. Ce n'est pas une suppression, c'est une
+        mise hors service.
+
+     2. LES COMPTES RATTACHÉS. La clé étrangère de UTILISATEUR est en
+        SET NULL, pas en CASCADE — et c'est un piège : un compte dont
+        `id_site` passe à NULL devient GLOBAL, donc voit TOUS les sites.
+        Supprimer un site promouvrait silencieusement ses utilisateurs.
+        Un clic délibéré ne rend pas cette conséquence acceptable : on
+        arrête net et on nomme les comptes.
+
+   LE BILAN EST RENDU APRÈS COUP, en chiffres — ce qui a réellement
+   disparu. Il ne sert plus à demander l'autorisation, il sert à ce
+   qu'on sache ce qu'on vient de faire.
+
+   ── POURQUOI PAS UNE CORBEILLE ──
+
+   Parce qu'elle mentirait. Les cascades ont déjà effacé les relevés
+   quand la ligne du site disparaît : restaurer le site ne rendrait
+   qu'une coquille vide, sans son historique. Mieux vaut un refus clair
+   qu'une annulation qui ne rend pas ce qu'elle promet.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** Ce qu'une suppression emporterait, en chiffres. */
+async function inventaireSuppression(idSite) {
+  const compter = async (sql, params = [idSite]) => {
+    try {
+      const [[ligne]] = await db.query(sql, params);
+      return Number(ligne?.n || 0);
+    } catch (err) {
+      // Table d'une migration non passée : ce n'est pas zéro, c'est
+      // « inconnu ». On rend null, et l'écran ne l'affiche pas.
+      if (/doesn't exist|Unknown column/i.test(err.message)) return null;
+      throw err;
+    }
+  };
+
+  const equipements = await compter(
+    "SELECT COUNT(*) AS n FROM EQUIPEMENT WHERE id_site = ?"
+  );
+
+  return {
+    equipements,
+    releves: await compter(
+      `SELECT COUNT(*) AS n FROM RELEVE r
+         JOIN EQUIPEMENT e ON e.id_equipement = r.id_equipement
+        WHERE e.id_site = ?`
+    ),
+    alertes: await compter(
+      `SELECT COUNT(*) AS n FROM ALERTE a
+         LEFT JOIN EQUIPEMENT e ON e.id_equipement = a.id_equipement
+        WHERE a.id_site = ? OR e.id_site = ?`,
+      [idSite, idSite]
+    ),
+    plages: await compter("SELECT COUNT(*) AS n FROM PLAGE_SCAN WHERE id_site = ?"),
+    politiques: await compter("SELECT COUNT(*) AS n FROM POLITIQUE_WEB WHERE id_site = ?"),
+  };
+}
+
+/** Les comptes rattachés à ce site — ceux qui empêchent la suppression. */
+async function comptesRattaches(idSite) {
+  const [lignes] = await db.query(
+    "SELECT id_utilisateur, nom, email, role FROM UTILISATEUR WHERE id_site = ?",
+    [idSite]
+  );
+  return lignes;
+}
+
+/**
+ * DELETE /api/sites/:id
+ *
+ * UN CLIC, ET C'EST FAIT. Pas de nom à recopier, pas d'écran
+ * intermédiaire : c'est le choix de l'exploitante, et il lui appartient.
+ *
+ * LES DEUX REFUS QUI RESTENT NE SONT PAS DE LA FRICTION. Ils ne
+ * protègent pas de l'étourderie — ils empêchent la suppression de
+ * produire un état FAUX : une plateforme sans aucun site, ou des
+ * comptes devenus globaux sans que personne l'ait demandé. Un clic
+ * délibéré ne rend pas ces deux conséquences acceptables.
+ */
+router.delete("/sites/:id", requireRole("admin"), async (req, res) => {
+  const [lignes] = await db.query(
+    "SELECT id_site, nom, ville FROM SITE WHERE id_site = ?",
+    [req.params.id]
+  );
+  const site = lignes[0];
+  if (!site || !siteAutorise(req, site.id_site)) {
+    return res.status(404).json({ error: "Site introuvable" });
+  }
+
+  /* ── BARRIÈRE 1 : LE DERNIER SITE ──
+     Une plateforme sans aucun site n'affiche plus rien et ne sait plus
+     où ranger un scan. Ce n'est pas une suppression, c'est une mise
+     hors service. */
+  const [[{ total }]] = await db.query("SELECT COUNT(*) AS total FROM SITE");
+  if (Number(total) <= 1) {
+    return res.status(409).json({
+      error: "C'est le dernier site de la plateforme",
+      aide:
+        "Sans aucun site, plus rien ne peut être supervisé ni scanné. " +
+        "Créez le site qui le remplace avant de supprimer celui-ci.",
+    });
+  }
+
+  /* ── BARRIÈRE 2 : LES COMPTES RATTACHÉS ──
+     `UTILISATEUR.id_site` est en ON DELETE SET NULL. Un compte dont le
+     site disparaît deviendrait donc GLOBAL, et verrait tous les autres
+     sites. Une suppression ne doit jamais élargir les droits de
+     quelqu'un — surtout pas en silence. */
+  const comptes = await comptesRattaches(site.id_site);
+  if (comptes.length > 0) {
+    return res.status(409).json({
+      error: `${comptes.length} compte(s) sont rattachés à ce site`,
+      aide:
+        "Leur suppression les rendrait globaux — ils verraient alors tous " +
+        "les sites. Rattachez-les ailleurs, ou supprimez-les, depuis la " +
+        "page Utilisateurs.",
+      comptes: comptes.map((c) => ({ nom: c.nom, email: c.email, role: c.role })),
+    });
+  }
+
+  /* L'inventaire est relevé AVANT la suppression : après, il n'y a plus
+     rien à compter, et le journal doit pouvoir dire ce qui a disparu. */
+  const perdu = await inventaireSuppression(site.id_site);
+
+  await db.query("DELETE FROM SITE WHERE id_site = ?", [site.id_site]);
+
+  await tracer(
+    req,
+    "site_supprime",
+    `Site « ${site.nom} » (${site.ville}) supprimé — ` +
+      `${perdu.equipements ?? "?"} équipement(s), ` +
+      `${perdu.releves ?? "?"} relevé(s), ` +
+      `${perdu.alertes ?? "?"} alerte(s) effacés avec lui`
+  );
+
+  res.json({ supprime: true, site: { nom: site.nom, ville: site.ville }, perdu });
 });
 
 /**

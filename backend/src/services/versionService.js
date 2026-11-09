@@ -180,12 +180,51 @@ function lireLigneAccueil(annonce) {
 /**
  * MySQL/MariaDB : la poignée de main initiale porte la version en clair,
  * juste après un octet de protocole. On ne lit que ça.
+ *
+ * ── LE DÉFAUT CORRIGÉ, CONSTATÉ EN CONDITIONS RÉELLES LE 17/09 ──
+ *
+ * Un serveur MySQL qui REFUSE la connexion n'envoie pas de poignée de
+ * main : il envoie un paquet d'erreur, du type « Host '192.168.0.191' is
+ * not allowed to connect to this MySQL server ». Le lecteur y trouvait
+ * une suite de chiffres pointés et l'enregistrait comme numéro de
+ * version.
+ *
+ * La fiche affichait donc « MySQL 192.168.0.191 » : l'adresse de la
+ * machine qui a fait le scan, présentée comme une version du logiciel. Ce
+ * faux numéro partait ensuite au NVD, où il ne pouvait correspondre à
+ * rien — l'erreur restait donc silencieuse, et visible seulement à
+ * l'écran.
+ *
+ * C'est exactement ce que ce projet refuse ailleurs : une information
+ * inventée, présentée avec le même aplomb qu'une information mesurée.
+ *
+ * DEUX GARDE-FOUS, INDÉPENDANTS À DESSEIN. Le premier reconnaît le refus
+ * de connexion. Le second écarte une valeur qui a la forme d'une adresse
+ * IPv4, quel que soit le message qui l'a apportée — un paquet d'erreur
+ * que nous ne connaissons pas encore serait couvert par celui-là.
+ *
+ * CE QU'ON PERD, ET POURQUOI C'EST LE BON CHOIX. Une vraie version en
+ * quatre groupes de chiffres (« 10.4.11.1 ») serait écartée elle aussi.
+ * Le coût est une colonne vide ; le coût inverse est une version fausse
+ * affichée comme vraie. Entre les deux, ce produit choisit toujours le
+ * vide.
  */
+const REFUS_MYSQL = /is not allowed to connect|host '|access denied|too many connections/i;
+const RESSEMBLE_A_UNE_IP = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+
 function lireMysql(annonce) {
   const propre = nettoyer(annonce);
+
+  /* Un refus parle de NOUS, pas du serveur : il ne dit rien de sa
+     version. On n'écrit donc rien. */
+  if (REFUS_MYSQL.test(propre)) return null;
+
   const m = propre.match(/(\d+\.\d+\.\d+[A-Za-z0-9.\-_+]*)/);
   if (!m) return null;
+
   const version = m[1].replace(/-$/, "");
+  if (RESSEMBLE_A_UNE_IP.test(version)) return null;
+
   return { produit: /maria/i.test(propre) ? "MariaDB" : "MySQL", version };
 }
 

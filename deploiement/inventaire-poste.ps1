@@ -28,7 +28,15 @@
 
     - les logiciels installes (registre, les DEUX ruches) ;
     - les programmes en cours, regroupes par nom ;
-    - le nom de la machine, son systeme, son adresse.
+    - le nom de la machine, son systeme, son adresse ;
+    - ses interfaces reseau, leur passerelle et leur type de media ;
+    - sa table de voisinage : quelles adresses il a reellement jointes ;
+    - le BSSID de la borne Wi-Fi a laquelle il est associe, s'il l'est.
+
+  Ces trois dernieres lignes servent a DESSINER LA CARTE DU RESEAU
+  sans que personne ne la dessine a la main. Elles ne disent rien de
+  l'utilisateur : ce sont des adresses d'equipements, pas des
+  usages.
 
   CE QU'IL NE COLLECTE PAS, ET C'EST DELIBERE
 
@@ -77,7 +85,7 @@ if ($Url)   { $CENTRAL_API_URL = $Url }
 if ($Jeton) { $AGENT_TOKEN = $Jeton }
 if ($Site)  { $ID_SITE = $Site }
 
-$VERSION = "1.0.0-ps"
+$VERSION = "1.1.0-ps"
 
 # Le journal vit dans ProgramData : lisible par l'administrateur, ecrit
 # par SYSTEM, et il survit au changement d'utilisateur. Sans journal, un
@@ -206,6 +214,342 @@ function Get-ProgrammesEnCours {
         }
 }
 
+# ══ SANTE DE LA MACHINE ═════════════════════════════════════════════
+#
+# CE QU'UN INVENTAIRE NE DIT PAS. Savoir quels logiciels sont installes
+# ne dit pas si la machine va bien. Quatre choses le disent : la memoire
+# qui reste, l'espace disque qui reste, depuis quand elle n'a pas
+# redemarre, et l'etat des trois services qui la protegent.
+#
+# AUCUN DROIT D'ADMINISTRATION N'EST NECESSAIRE. Un utilisateur ordinaire
+# lit tout ceci sur SA machine. C'est ce qui permet de garder ce script
+# en script d'ouverture de session, sans elevation.
+#
+# CHAQUE VOLET EST INDEPENDANT : un poste qui refuse la liste des
+# services rend quand meme sa memoire et ses disques. Un volet manquant
+# vaut $null — « je n'ai pas regarde » — et jamais zero, qui se lirait
+# « 0 Go libres » et declencherait une alarme fausse.
+# ---------------------------------------------------------------------
+# LA CHARGE DU PROCESSEUR
+#
+# Win32_Processor.LoadPercentage, et NON un compteur de performance.
+#
+# "\Processeur(_Total)\% temps processeur" fonctionne sur un Windows
+# francais et rend $null sur un Windows anglais : les noms de compteurs
+# sont TRADUITS. Le meme script donnerait donc des graphiques pleins chez
+# un client et vides chez le suivant, sans qu'aucune erreur ne s'affiche.
+#
+# LoadPercentage est un instantane, pas une moyenne sur la minute. C'est
+# moins precis qu'un compteur de performance, et c'est assume : une
+# mesure par minute sur une machine de bureau sert a voir une tendance et
+# les pics longs, pas a facturer du temps de calcul.
+# ---------------------------------------------------------------------
+function Get-ChargeProcesseur {
+    try {
+        $charges = @(Get-CimInstance Win32_Processor -ErrorAction Stop |
+                     Select-Object -ExpandProperty LoadPercentage |
+                     Where-Object { $null -ne $_ })
+        if ($charges.Count -eq 0) { return $null }
+        return [int][math]::Round(($charges | Measure-Object -Average).Average)
+    } catch {
+        return $null
+    }
+}
+
+# ---------------------------------------------------------------------
+# LES COMPTEURS DE LA CARTE RESEAU
+#
+# On envoie des COMPTEURS CUMULES, jamais un debit. Le serveur fait la
+# difference entre deux envois — c'est exactement ce qu'il fait deja pour
+# le SNMP, avec la meme fonction. Calculer le debit ici obligerait a
+# garder un etat entre deux executions d'une tache planifiee, et a le
+# refaire correctement (debordement de compteur, redemarrage) une
+# deuxieme fois.
+#
+# SEULES LES CARTES CONNECTEES sont envoyees. Une machine porte souvent
+# des cartes virtuelles (VPN, machines virtuelles, Bluetooth) a l'arret :
+# leurs compteurs sont figes et n'ajouteraient que du bruit.
+#
+# La boucle locale, elle, est ecartee PAR LE SERVEUR, sur son nom
+# ("Loopback Pseudo-Interface") — le meme filtre que pour le SNMP. Une
+# seule regle, un seul endroit.
+# ---------------------------------------------------------------------
+function Get-Reseau {
+    try {
+        $stats = @(Get-NetAdapterStatistics -ErrorAction Stop)
+    } catch {
+        # Windows 7 / 2008 R2 : le module NetAdapter n'existe pas. On rend
+        # $null — « je n'ai pas regarde » — et le serveur n'ecrit rien,
+        # plutot qu'un zero qui se lirait « cette machine ne consomme
+        # rien ».
+        return $null
+    }
+    if ($stats.Count -eq 0) { return $null }
+
+    $cartes = @{}
+    try {
+        foreach ($c in @(Get-NetAdapter -ErrorAction Stop)) { $cartes[$c.Name] = $c }
+    } catch { }
+
+    $sortie = New-Object System.Collections.ArrayList
+    $rang = 0
+
+    foreach ($st in $stats) {
+        $rang++
+        $carte = $cartes[$st.Name]
+
+        if ($carte -and $carte.Status -ne "Up") { continue }
+
+        # ifIndex quand Windows le donne : c'est le meme numero que celui
+        # que verrait un agent SNMP sur cette machine, donc le meme
+        # identifiant d'une execution a l'autre. Le rang n'est qu'un
+        # repli, et il suffit : ce qui compte est la STABILITE de la cle
+        # entre deux envois.
+        $index = $rang
+        if ($carte -and $carte.ifIndex) { $index = [int]$carte.ifIndex }
+
+        $vitesse = $null
+        if ($carte -and $carte.Speed -and $carte.Speed -gt 0) {
+            $vitesse = [int][math]::Round($carte.Speed / 1000000)
+        }
+
+        [void]$sortie.Add([ordered]@{
+            index        = $index
+            nom          = [string]$st.Name
+            in_octets    = [int64]$st.ReceivedBytes
+            out_octets   = [int64]$st.SentBytes
+            vitesse_mbps = $vitesse
+        })
+    }
+
+    if ($sortie.Count -eq 0) { return $null }
+    return @($sortie)
+}
+
+# == TOPOLOGIE : DE QUOI CETTE MACHINE EST VOISINE ===================
+#
+# Trois sources, et aucune n'est un dessin.
+#
+#   - LES INTERFACES, avec leur passerelle et leur type de media. Une
+#     machine en Wi-Fi n'est pas au bout d'un cable, et une carte
+#     virtuelle (VirtualBox, WSL, VPN) ne mene nulle part. Mais ce
+#     n'est PAS au script de trancher : il remonte les preuves — carte
+#     materielle ou non, passerelle presente ou non — et le serveur
+#     classe. Un seul endroit decide, et il est verifiable.
+#
+#   - LA TABLE DE VOISINAGE, avec l'etat de chaque entree. `Reachable`
+#     veut dire « joint a l'instant ». `Stale` veut dire « vu un jour,
+#     plus verifie depuis ». Confondre les deux ferait dessiner des
+#     liens morts. `Unreachable` et `Incomplete` sont ecartes ici :
+#     l'entree existe parce qu'on a ESSAYE de joindre l'adresse, pas
+#     parce que quelqu'un a repondu — ce n'est pas une preuve.
+#
+#   - LE BSSID DE LA BORNE WI-FI : l'adresse MAC de la radio a
+#     laquelle ce poste est associe. C'est le seul lien PHYSIQUE qu'un
+#     poste connait de lui-meme avec certitude, et aucun outil de
+#     supervision classique ne va le chercher.
+#
+# CE QUE CELA NE DONNE PAS : le numero de port d'un switch. Il faut
+# pour cela que le switch reponde en SNMP. Sans lui, on sait sur quel
+# SEGMENT se trouve une machine — pas au bout de quel cable. La carte
+# devra le dire, au lieu de laisser croire le contraire.
+#
+# `$null` partout ou la collecte a echoue, `@()` quand elle a abouti
+# sans rien trouver. Le serveur distingue les deux : « je ne sais pas »
+# n'est pas « il n'y en a pas ».
+# ---------------------------------------------------------------------
+function Get-Topologie {
+    $interfaces = $null
+    $voisins    = $null
+    $wifi       = $null
+
+    # -- Les interfaces, et ce qui prouve qu'elles menent quelque part --
+    try {
+        $cartes = @{}
+        try {
+            foreach ($c in @(Get-NetAdapter -ErrorAction Stop)) { $cartes[[int]$c.ifIndex] = $c }
+        } catch { }
+
+        # Les passerelles par defaut, par interface. Une interface sans
+        # passerelle ne sort pas de son segment : c'est la premiere
+        # preuve qu'une carte virtuelle ne mene nulle part.
+        $passerelles = @{}
+        try {
+            foreach ($r in @(Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction Stop)) {
+                $ix = [int]$r.ifIndex
+                if (-not $passerelles.ContainsKey($ix)) { $passerelles[$ix] = [string]$r.NextHop }
+            }
+        } catch { }
+
+        $liste = New-Object System.Collections.ArrayList
+        foreach ($a in @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop)) {
+            $index = [int]$a.ifIndex
+            $carte = $cartes[$index]
+
+            # `PhysicalMediaType` est une valeur d'enumeration, pas un
+            # libelle : « 802.11 » reste « 802.11 » sur un Windows
+            # francais. Un nom de carte, lui, serait traduit — et une
+            # regle qui depend de la langue du poste casse en clientele.
+            $media = $null
+            if ($carte -and $carte.PhysicalMediaType) { $media = [string]$carte.PhysicalMediaType }
+
+            [void]$liste.Add([ordered]@{
+                index       = $index
+                nom         = if ($carte) { [string]$carte.Name } else { $null }
+                adresse_ip  = [string]$a.IPAddress
+                masque      = [int]$a.PrefixLength
+                passerelle  = if ($passerelles.ContainsKey($index)) { $passerelles[$index] } else { $null }
+                adresse_mac = if ($carte -and $carte.MacAddress) { [string]$carte.MacAddress } else { $null }
+                media       = $media
+                materielle  = if ($carte -and $null -ne $carte.HardwareInterface) { [bool]$carte.HardwareInterface } else { $null }
+                etat        = if ($carte) { [string]$carte.Status } else { $null }
+            })
+        }
+        $interfaces = @($liste)
+    } catch {
+        # Windows 7 : le module NetTCPIP n'existe pas. $null, pas @().
+    }
+
+    # -- La table de voisinage --
+    try {
+        $v = New-Object System.Collections.ArrayList
+        foreach ($n in @(Get-NetNeighbor -AddressFamily IPv4 -ErrorAction Stop)) {
+            $etat = [string]$n.State
+            if ($etat -eq "Unreachable" -or $etat -eq "Incomplete") { continue }
+            $mac = [string]$n.LinkLayerAddress
+            if (-not $mac) { continue }
+            # Diffusion et multidiffusion ne sont pas des machines.
+            if ($mac -eq "ff-ff-ff-ff-ff-ff") { continue }
+            if ($mac -like "01-00-5e-*" -or $mac -like "33-33-*") { continue }
+            [void]$v.Add([ordered]@{
+                index       = [int]$n.ifIndex
+                adresse_ip  = [string]$n.IPAddress
+                adresse_mac = $mac
+                etat        = $etat
+            })
+        }
+        $voisins = @($v)
+    } catch { }
+
+    # -- La borne Wi-Fi, quand il y en a une --
+    #
+    # `netsh` est le seul chemin present sur tout Windows depuis 7. On ne
+    # se fie pas aux etiquettes traduites : on cherche une adresse MAC
+    # sur une ligne qui contient BSSID. Une sortie en japonais donnerait
+    # le meme resultat.
+    try {
+        $sortie = & netsh wlan show interfaces 2>$null
+        if ($sortie) {
+            $bssid = $null
+            $ssid  = $null
+            foreach ($ligne in @($sortie)) {
+                if ($ligne -match 'BSSID[^:]*:\s*([0-9a-fA-F]{2}([:-][0-9a-fA-F]{2}){5})') {
+                    $bssid = $Matches[1]
+                } elseif (-not $ssid -and $ligne -match '^\s*SSID[^:]*:\s*(\S.*?)\s*$') {
+                    $ssid = $Matches[1]
+                }
+            }
+            # Pas de BSSID : soit aucune radio, soit radio non associee.
+            # Dans les deux cas il n'y a AUCUN lien sans fil a dessiner,
+            # et c'est la seule chose que la carte a besoin de savoir.
+            if ($bssid) { $wifi = [ordered]@{ bssid = $bssid; ssid = $ssid } }
+        }
+    } catch { }
+
+    if ($null -eq $interfaces -and $null -eq $voisins -and $null -eq $wifi) { return $null }
+
+    return [ordered]@{
+        interfaces = $interfaces
+        voisins    = $voisins
+        wifi       = $wifi
+    }
+}
+
+function Get-Sante {
+    $sante = [ordered]@{
+        memoire_totale_mo = $null
+        memoire_libre_mo  = $null
+        dernier_demarrage = $null
+        disques           = $null
+        services          = $null
+        antivirus         = $null
+    }
+
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+        if ($os.TotalVisibleMemorySize) {
+            $sante.memoire_totale_mo = [int]([math]::Round($os.TotalVisibleMemorySize / 1024))
+        }
+        if ($os.FreePhysicalMemory) {
+            $sante.memoire_libre_mo = [int]([math]::Round($os.FreePhysicalMemory / 1024))
+        }
+        if ($os.LastBootUpTime) {
+            # Format ISO : le serveur le relit sans dependre de la langue
+            # du poste. « 25/09/2026 » et « 09/25/2026 » ne se distinguent
+            # pas, et une date lue a l'envers passerait inapercue.
+            $sante.dernier_demarrage = $os.LastBootUpTime.ToString("yyyy-MM-dd HH:mm:ss")
+        }
+    } catch { }
+
+    # DriveType = 3 : disques fixes seulement. Les cles USB et les
+    # lecteurs reseau vont et viennent ; les compter ferait varier
+    # l'espace libre du poste sans que rien n'ait change dessus.
+    try {
+        $volumes = Get-CimInstance Win32_LogicalDisk -Filter "DriveType = 3" -ErrorAction Stop
+        if ($volumes) {
+            $sante.disques = @(
+                $volumes | ForEach-Object {
+                    [ordered]@{
+                        lettre   = $_.DeviceID
+                        total_go = [math]::Round($_.Size / 1GB, 1)
+                        libre_go = [math]::Round($_.FreeSpace / 1GB, 1)
+                    }
+                }
+            )
+        }
+    } catch { }
+
+    # Les trois services qu'un logiciel malveillant arrete en premier, et
+    # que l'on desactive « juste pour installer un truc ». On ne lit QUE
+    # ceux-la : la liste entiere pese des centaines de lignes et
+    # n'apprend rien.
+    try {
+        $attendus = @{
+            "MpsSvc"    = "Pare-feu Windows"
+            "WinDefend" = "Antivirus Microsoft Defender"
+            "wuauserv"  = "Mises a jour Windows"
+        }
+        $svc = Get-Service -Name $attendus.Keys -ErrorAction SilentlyContinue
+        if ($svc) {
+            $sante.services = @(
+                $svc | ForEach-Object {
+                    [ordered]@{
+                        nom       = $_.Name
+                        libelle   = $attendus[$_.Name]
+                        # Meme vocabulaire que la voie WMI : le serveur
+                        # compare a « Running », et deux sources qui
+                        # ecrivent le meme etat de deux facons produiraient
+                        # deux affichages differents pour un meme fait.
+                        etat      = if ($_.Status -eq "Running") { "Running" } else { [string]$_.Status }
+                        demarrage = [string]$_.StartType
+                    }
+                }
+            )
+        }
+    } catch { }
+
+    # root\SecurityCenter2 est l'endroit ou tout antivirus installe se
+    # declare, y compris les produits tiers. On ne lit que le NOM : l'etat
+    # y est encode dans un entier non documente, et une plateforme qui
+    # annonce « protege » doit pouvoir le prouver.
+    try {
+        $av = Get-CimInstance -Namespace "root\SecurityCenter2" -ClassName AntiVirusProduct -ErrorAction Stop
+        if ($av) { $sante.antivirus = @($av | ForEach-Object { $_.displayName }) }
+    } catch { }
+
+    return $sante
+}
+
 # ══ IDENTITE DE LA MACHINE ══════════════════════════════════════════
 #
 # L'adresse par laquelle cette machine est connue du RESTE du reseau.
@@ -236,7 +580,11 @@ function Get-Identite {
 
 # ══ ENVOI ═══════════════════════════════════════════════════════════
 function Envoyer($corps) {
-    $json = $corps | ConvertTo-Json -Depth 4 -Compress
+    # Profondeur 6 : le volet `sante` ajoute un niveau (sante > disques >
+    # objet > proprietes). A 4, ConvertTo-Json aurait rendu la chaine
+    # « System.Collections.Hashtable » a la place des disques — et le
+    # serveur aurait enregistre du texte sans s'en apercevoir.
+    $json = $corps | ConvertTo-Json -Depth 6 -Compress
 
     # UTF-8 EXPLICITE. Sans cette conversion, un logiciel nomme
     # « Microsoft Office Édition Familiale » part en caracteres abimes et
@@ -281,6 +629,20 @@ try {
     try { $logiciels = @(Get-LogicielsInstalles) } catch { Ecrire "Logiciels non collectes : $($_.Exception.Message)" }
     try { $processus = @(Get-ProgrammesEnCours) } catch { Ecrire "Programmes non collectes : $($_.Exception.Message)" }
 
+    $sante = $null
+    try { $sante = Get-Sante } catch { Ecrire "Sante non collectee : $($_.Exception.Message)" }
+
+    # Les deux mesures qui alimentent les courbes : charge du processeur
+    # et compteurs reseau. `$null` en cas d'echec — jamais 0.
+    $processeur = $null
+    $reseau = $null
+    try { $processeur = Get-ChargeProcesseur } catch { Ecrire "Charge processeur non collectee : $($_.Exception.Message)" }
+    try { $reseau = Get-Reseau } catch { Ecrire "Compteurs reseau non collectes : $($_.Exception.Message)" }
+
+    # La topologie : des preuves de voisinage, pas un dessin.
+    $topologie = $null
+    try { $topologie = Get-Topologie } catch { Ecrire "Topologie non collectee : $($_.Exception.Message)" }
+
     $corps = [ordered]@{
         id_site       = $ID_SITE
         agent_version = $VERSION
@@ -295,6 +657,10 @@ try {
         # complet et rejete.
         logiciels     = if ($null -ne $logiciels) { @($logiciels | Select-Object -First 600) } else { $null }
         processus     = if ($null -ne $processus) { @($processus | Select-Object -First 400) } else { $null }
+        sante         = $sante
+        processeur_pourcent = $processeur
+        reseau        = $reseau
+        topologie     = $topologie
     }
 
     if ($Test) {
@@ -303,6 +669,55 @@ try {
         Ecrire "  Systeme  : $($corps.systeme)"
         Ecrire "  Logiciels: $(@($corps.logiciels).Count)"
         Ecrire "  Processus: $(@($corps.processus).Count)"
+        if ($corps.sante) {
+            $d = @($corps.sante.disques) | ForEach-Object { "$($_.lettre) $($_.libre_go)/$($_.total_go) Go" }
+            Ecrire "  Memoire  : $($corps.sante.memoire_libre_mo) Mo libres sur $($corps.sante.memoire_totale_mo)"
+            Ecrire "  Disques  : $($d -join '  ')"
+            Ecrire "  Demarrage: $($corps.sante.dernier_demarrage)"
+            $arretes = @($corps.sante.services) | Where-Object { $_.etat -ne "Running" }
+            if ($arretes) {
+                Ecrire "  ATTENTION: $(@($arretes | ForEach-Object { $_.libelle }) -join ', ') arrete(s)"
+            } else {
+                Ecrire "  Protection: pare-feu, antivirus et mises a jour actifs"
+            }
+        }
+        if ($corps.topologie) {
+            $t = $corps.topologie
+            $avecP = @(@($t.interfaces) | Where-Object { $_.passerelle })
+            Ecrire "  Interfaces: $(@($t.interfaces).Count) vues, $(@($avecP).Count) avec une passerelle"
+            foreach ($i in @($t.interfaces)) {
+                $p = if ($i.passerelle) { "vers $($i.passerelle)" } else { "sans passerelle" }
+                $m = if ($null -eq $i.materielle) { "indetermine" } elseif ($i.materielle) { "materielle" } else { "virtuelle" }
+                $e = if ($i.etat) { [string]$i.etat } else { "etat inconnu" }
+                Ecrire ("    {0}/{1}  {2}  [{3}/{4}]  {5}  {6}" -f $i.adresse_ip, $i.masque, $p, $m, $e, $i.media, $i.nom)
+            }
+            if ($null -eq $t.voisins) {
+                Ecrire "  Voisins  : non collectes sur ce Windows"
+            } else {
+                $joign = @(@($t.voisins) | Where-Object { $_.etat -eq "Reachable" })
+                Ecrire "  Voisins  : $(@($t.voisins).Count) entrees, dont $(@($joign).Count) joignables a l'instant"
+                # Reparti par interface : un total melange les voisins de
+                # la vraie carte avec ceux des cartes virtuelles.
+                $noms = @{}
+                foreach ($i in @($t.interfaces)) { $noms[[string]$i.index] = [string]$i.nom }
+                $parIndex = @{}
+                foreach ($v in @($t.voisins)) {
+                    $k = [string]$v.index
+                    if (-not $parIndex.ContainsKey($k)) { $parIndex[$k] = @(0, 0) }
+                    $parIndex[$k][0]++
+                    if ($v.etat -eq "Reachable") { $parIndex[$k][1]++ }
+                }
+                foreach ($k in (@($parIndex.Keys) | Sort-Object { [int]$_ })) {
+                    $libelle = if ($noms.ContainsKey($k)) { $noms[$k] } else { "interface $k" }
+                    Ecrire ("      {0} joignables sur {1}   {2}" -f $parIndex[$k][1], $parIndex[$k][0], $libelle)
+                }
+            }
+            if ($t.wifi) {
+                Ecrire "  Wi-Fi    : associe a la borne $($t.wifi.bssid)  ($($t.wifi.ssid))"
+            } else {
+                Ecrire "  Wi-Fi    : aucune association (filaire, ou radio eteinte)"
+            }
+        }
         Ecrire "  Destination : $CENTRAL_API_URL/agent/inventaire-poste"
         Write-Host ""
         Write-Host "Les dix premiers logiciels vus :" -ForegroundColor Cyan

@@ -73,13 +73,42 @@ function journaliserLimite(canal, message) {
  * N'échoue jamais : une erreur de traçage ne doit pas empêcher la notification.
  */
 async function tracerNotification({ idAlerte, idUtilisateur, canal, destinataire, statut, erreur }) {
-  try {
-    await db.query(
+  const ecrire = (alerte) =>
+    db.query(
       `INSERT INTO NOTIFICATION (id_alerte, id_utilisateur, canal, destinataire, statut, erreur)
        VALUES (?, ?, ?, ?, ?, ?)`,
-      [idAlerte || null, idUtilisateur || null, canal, destinataire || null, statut, erreur || null]
+      [alerte || null, idUtilisateur || null, canal, destinataire || null, statut, erreur || null]
     );
+
+  try {
+    await ecrire(idAlerte);
   } catch (err) {
+    /* ═══════════════════════════════════════════════════════════════════
+       L'ALERTE A PU DISPARAÎTRE ENTRE-TEMPS, ET C'EST NORMAL.
+
+       Les notifications partent GROUPÉES, quelques secondes après les
+       alertes qui les ont déclenchées. Dans cet intervalle, l'alerte peut
+       avoir été clôturée puis purgée : la machine est revenue en ligne.
+       La clé étrangère refuse alors la trace, et la console affichait un
+       message d'erreur de base de données pour un envoi qui, lui, s'était
+       parfaitement déroulé.
+
+       Une trace détachée de son alerte vaut mieux qu'aucune trace : on
+       sait toujours QUI a été prévenu, QUAND et par quel canal. On
+       réécrit donc la même ligne sans le lien, et on ne crie pas.
+       ═══════════════════════════════════════════════════════════════════ */
+    const lienImpossible = /foreign key constraint fails/i.test(err.message || "");
+
+    if (lienImpossible && idAlerte) {
+      try {
+        await ecrire(null);
+        return;
+      } catch (err2) {
+        console.error("Erreur de traçage de notification:", err2.message);
+        return;
+      }
+    }
+
     console.error("Erreur de traçage de notification:", err.message);
   }
 }
@@ -256,7 +285,43 @@ async function viderFile(idSite) {
  * idAlerte est optionnel mais recommandé : il relie la trace d'envoi à
  * l'alerte concernée dans la table NOTIFICATION.
  */
+/* ═══════════════════════════════════════════════════════════════════════
+   LES ALERTES NE PARTENT PLUS PAR COURRIEL, SAUF DEMANDE EXPLICITE.
+
+   POURQUOI CE DÉFAUT A CHANGÉ DE SENS. Une alerte par courriel a l'air
+   utile jusqu'au jour où le parc en produit trente : la boîte de
+   réception devient un flux qu'on filtre, puis qu'on ignore, et le jour
+   où le message compte il est lu trois jours plus tard. C'est le même
+   raisonnement que pour les rapports planifiés, désactivés le 17/09 :
+   ce qui arrive tout seul finit par ne plus être lu.
+
+   CE QUI REMPLACE. Les alertes restent créées, escaladées, affichées et
+   poussées en temps réel dans l'interface — rien n'est perdu. Et le
+   rapport, lui, part QUAND ON LE DEMANDE, par le bouton du tableau de
+   bord : il est attendu, donc il est lu.
+
+   POUR LES RÉTABLIR : ALERTES_EMAIL=1 dans backend/.env. Le réglage est
+   volontairement une action délibérée, pas un oubli de configuration.
+   ═══════════════════════════════════════════════════════════════════════ */
+function alertesParCourrielActivees() {
+  return process.env.ALERTES_EMAIL === "1";
+}
+
+let silenceCourrielSignale = false;
+
 async function notifierAlerte(equipement, message, idAlerte = null) {
+  if (!alertesParCourrielActivees()) {
+    if (!silenceCourrielSignale) {
+      silenceCourrielSignale = true;
+      console.log(
+        "Alertes par courriel : désactivées. Les alertes restent visibles dans " +
+          "l'interface et le rapport s'envoie à la demande. Pour les rétablir : " +
+          "ALERTES_EMAIL=1 dans backend/.env."
+      );
+    }
+    return;
+  }
+
   try {
     const idSite = equipement.id_site ?? 0;
 
@@ -286,6 +351,9 @@ async function notifierAlerte(equipement, message, idAlerte = null) {
 // Conservées pour compatibilité : elles lisent chacune les destinataires.
 // Préférer notifierAlerte().
 async function sendEmailAlert(equipement, message, idAlerte = null) {
+  // Même règle que notifierAlerte : une porte fermée ne doit pas laisser
+  // une seconde porte ouverte à côté.
+  if (!alertesParCourrielActivees()) return;
   const destinataires = await getDestinataires(equipement.id_site);
   await envoyerEmails(equipement, message, destinataires, idAlerte);
 }

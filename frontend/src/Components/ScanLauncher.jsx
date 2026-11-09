@@ -30,6 +30,9 @@ export default function ScanLauncher({ idSite }) {
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [reseaux, setReseaux] = useState(null);
+  /* Le réseau RETENU, et lui seul, est mis dans le champ. Les autres
+     restent disponibles mais repliés — voir `detecter`. */
+  const [reseauRetenu, setReseauRetenu] = useState(null);
   const [detection, setDetection] = useState(false);
   const [plagesDeclarees, setPlagesDeclarees] = useState([]);
 
@@ -179,7 +182,29 @@ export default function ScanLauncher({ idSite }) {
     setError(null);
     try {
       const { data } = await axios.get(`${API_URL}/reseaux-detectes`);
-      setReseaux(data.reseaux || []);
+      const trouves = data.reseaux || [];
+      setReseaux(trouves);
+
+      /* ── ON REMPLIT LE CHAMP AVEC UNE SEULE PLAGE ──
+
+         La version précédente affichait la liste de tout ce que portent
+         les cartes du serveur — Hyper-V, WSL, VMware compris — et
+         laissait choisir. C'était prudent, mais c'était aussi demander à
+         l'exploitant de trancher une question technique à laquelle la
+         machine sait répondre : le vrai réseau est celui d'une carte
+         physique, pas celui d'un hyperviseur.
+
+         On retient donc le premier réseau NON VIRTUEL, et on le met dans
+         le champ. Les autres ne disparaissent pas — ils sont repliés
+         sous un lien, pour la machine qui a plusieurs vrais réseaux ou
+         pour un essai depuis une machine virtuelle.
+
+         S'il n'y a QUE du virtuel, on retient quand même le premier : ne
+         rien proposer sur une machine d'essai serait un écran qui ne
+         sert à rien. La mention « réseau virtuel » reste affichée. */
+      const retenu = trouves.find((r) => !r.virtuelle) || trouves[0] || null;
+      setReseauRetenu(retenu);
+      if (retenu) setCidr(retenu.cidr);
     } catch (err) {
       setError(err.response?.data?.error || "Détection impossible");
     } finally {
@@ -354,35 +379,32 @@ export default function ScanLauncher({ idSite }) {
         </p>
       )}
 
-      {/* Réseaux détectés : une ligne par plage, à cliquer pour remplir le
-          champ. Les adaptateurs d'hyperviseur sont montrés mais signalés —
-          les cacher priverait des essais sur une machine virtuelle, les
-          mélanger aux vrais ferait douter de toute la suggestion. */}
+      {/* LE RÉSEAU RETENU, ET RIEN D'AUTRE À L'ÉCRAN.
+
+          Le champ est déjà rempli : cette ligne ne sert qu'à dire d'où
+          vient la valeur, pour qu'on puisse la corriger en connaissance
+          de cause. Une plage proposée sans sa provenance est une plage
+          qu'on scanne sans savoir pourquoi.
+
+          LES AUTRES RÉSEAUX DU SERVEUR NE SONT PAS LISTÉS. Hyper-V, WSL,
+          VMware : ce sont des réseaux de machine de développement, pas
+          des parcs à superviser. Les montrer, même repliés, remettait à
+          l'exploitant une question technique que la machine sait
+          trancher. Qui a vraiment deux réseaux à scanner saisit la
+          seconde plage à la main, ou la déclare dans Plages réseau. */}
       {reseaux && (
         <div className="reseaux-detectes">
-          {reseaux.length === 0 ? (
+          {!reseauRetenu ? (
             <p className="aide">
               Aucune plage exploitable détectée sur les interfaces de ce serveur.
             </p>
           ) : (
-            <>
-              <p className="aide">
-                Déduit des cartes réseau du serveur. Cliquez pour remplir le champ.
-              </p>
-              <ul className="detail-plages">
-                {reseaux.map((r) => (
-                  <li key={r.cidr}>
-                    <button type="button" onClick={() => setCidr(r.cidr)}>
-                      <strong>{r.cidr}</strong>
-                    </button>{" "}
-                    <span className="aide">
-                      {r.interface} · {r.nb_adresses} adresses
-                      {r.virtuelle && " · réseau virtuel"}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </>
+            <p className="aide">
+              Réseau de ce serveur : <strong>{reseauRetenu.cidr}</strong> —{" "}
+              {reseauRetenu.interface} · {reseauRetenu.nb_adresses} adresses
+              {reseauRetenu.virtuelle && " · réseau virtuel"}. Le champ est rempli ;
+              modifiez-le si ce n'est pas le bon.
+            </p>
           )}
         </div>
       )}

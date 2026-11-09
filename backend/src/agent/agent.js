@@ -581,8 +581,53 @@ async function runScanAndPush() {
 // intestable et pouvait surprendre au premier import.
 if (require.main === module) {
   runScanAndPush().catch(console.error);
-  cron.schedule(`*/${SCAN_INTERVAL_MINUTES} * * * *`, () => {
-    runScanAndPush().catch(console.error);
+  // UN CYCLE NE DOIT JAMAIS DÉMARRER PENDANT QU'UN AUTRE TOURNE.
+  //
+  // L'intervalle vaut cinq minutes par défaut. Un cycle sur un site de
+  // cent trente machines dépasse déjà cette durée ; à cinq cents, il
+  // approche le quart d'heure. Sans ce verrou, un deuxième balayage
+  // démarrait par-dessus le premier, puis un troisième, et l'agent
+  // finissait par faire tourner trois à quatre scans de front — chacun
+  // avec ses soixante-quatre sondes simultanées.
+  //
+  // Ce qu'on observait alors : la mémoire de l'agent montait par paliers
+  // jusqu'au plantage, le réseau du client était saturé de sondes, et
+  // quand l'agent tombait la plateforme levait une alerte « agent muet »
+  // SANS EN DIRE LA CAUSE. On cherchait une panne réseau là où c'était
+  // la supervision qui se marchait dessus.
+  //
+  // Le verrou existait déjà dans l'agent de poste ; il manquait ici.
+  //
+  // L'EXPRESSION CRON EST CONSTRUITE, PAS INTERPOLÉE. Un pas de 60
+  // n'existe pas dans un champ « minutes », et `*/90` est refusé par
+  // node-cron : l'exception au démarrage laissait l'agent envoyer UNE
+  // fois — le premier appel ci-dessus — puis se taire pour toujours.
+  //
+  // (Commentaire en lignes simples : une expression cron contient la
+  // séquence qui ferme un commentaire de bloc.)
+  const minutes = Math.max(1, Math.round(Number(SCAN_INTERVAL_MINUTES) || 5));
+  const planification =
+    minutes >= 60
+      ? `0 ${"*"}/${Math.max(1, Math.min(23, Math.round(minutes / 60)))} * * *`
+      : `${"*"}/${minutes} * * * *`;
+
+  let enCours = false;
+  cron.schedule(planification, async () => {
+    if (enCours) {
+      console.warn(
+        `Agent — cycle ignoré : le précédent tourne encore. ` +
+          `L'intervalle de ${minutes} min est trop court pour ce parc.`
+      );
+      return;
+    }
+    enCours = true;
+    try {
+      await runScanAndPush();
+    } catch (err) {
+      console.error(err);
+    } finally {
+      enCours = false;
+    }
   });
 }
 

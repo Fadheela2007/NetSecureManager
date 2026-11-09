@@ -271,6 +271,204 @@ function identite(interfaces = os.networkInterfaces()) {
   return { adresse_ip: null, adresse_mac: null };
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+   LA MESURE : PROCESSEUR, MÉMOIRE, COMPTEURS RÉSEAU
+
+   ── POURQUOI L'AGENT DOIT S'EN CHARGER ──
+
+   Le débit et la charge se lisent normalement en SNMP. Or les postes
+   Windows n'ont plus de service SNMP : la page Bande passante ne montrait
+   donc que les imprimantes et les commutateurs, seuls appareils d'un parc
+   à accepter de dire ce qu'ils consomment.
+
+   Cette machine, elle, se connaît. C'est la mesure la plus exacte qui
+   soit — et la seule qui couvre le WiFi.
+
+   ── ON ENVOIE DES COMPTEURS, PAS UN DÉBIT ──
+
+   Le serveur fait la différence entre deux envois, avec la fonction qui
+   traite déjà le SNMP. Calculer le débit ici aurait donné une deuxième
+   implémentation du même calcul — débordement de compteur, redémarrage,
+   boucle locale — qui aurait dérivé de la première au premier correctif
+   appliqué d'un seul côté.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** Somme des compteurs de temps d'un cœur. */
+function ticksTotal(cpu) {
+  const t = cpu.times || {};
+  return (t.user || 0) + (t.nice || 0) + (t.sys || 0) + (t.idle || 0) + (t.irq || 0);
+}
+
+/**
+ * Charge processeur, en pourcentage, à partir de DEUX échantillons.
+ *
+ * Fonction pure : elle ne lit rien elle-même. `os.cpus()` rend des
+ * compteurs de temps CUMULÉS depuis le démarrage — un seul échantillon
+ * donnerait la moyenne depuis l'allumage de la machine, c'est-à-dire un
+ * chiffre qui ne bouge plus au bout de quelques jours.
+ */
+function chargeDepuisEchantillons(avant, apres) {
+  if (!Array.isArray(avant) || !Array.isArray(apres)) return null;
+  if (avant.length === 0 || avant.length !== apres.length) return null;
+
+  let totalDelta = 0;
+  let inactifDelta = 0;
+
+  for (let i = 0; i < avant.length; i++) {
+    totalDelta += ticksTotal(apres[i]) - ticksTotal(avant[i]);
+    inactifDelta += (apres[i].times?.idle || 0) - (avant[i].times?.idle || 0);
+  }
+
+  // Aucun temps écoulé, ou compteurs remis à zéro : on ne sait pas.
+  if (totalDelta <= 0 || inactifDelta < 0) return null;
+
+  const pourcent = (1 - inactifDelta / totalDelta) * 100;
+  return Math.round(Math.min(100, Math.max(0, pourcent)) * 10) / 10;
+}
+
+/** Deux échantillons espacés d'une seconde, et la charge entre les deux. */
+async function chargeProcesseur(delaiMs = 1000) {
+  try {
+    const avant = os.cpus();
+    await new Promise((r) => setTimeout(r, delaiMs));
+    return chargeDepuisEchantillons(avant, os.cpus());
+  } catch {
+    return null;
+  }
+}
+
+/** Mémoire, telle que le système la rapporte. En Mo, comme le serveur l'attend. */
+function memoire() {
+  try {
+    const total = os.totalmem();
+    const libre = os.freemem();
+    if (!total || total <= 0) return null;
+    return {
+      memoire_totale_mo: Math.round(total / 1024 / 1024),
+      memoire_libre_mo: Math.round(libre / 1024 / 1024),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Analyse `/proc/net/dev` (Linux). Fonction pure, donc testable.
+ *
+ * Les colonnes ne sont pas alignées et leur nombre a changé selon les
+ * versions du noyau : on découpe sur le « : » qui suit le nom, puis sur
+ * les espaces. Les octets reçus sont la 1re valeur, les émis la 9e.
+ */
+function analyserProcNetDev(texte) {
+  const cartes = [];
+  let rang = 0;
+
+  for (const ligne of String(texte || "").split("\n")) {
+    const sep = ligne.indexOf(":");
+    if (sep === -1) continue;
+
+    const nom = ligne.slice(0, sep).trim();
+    if (!nom || /^inter-|^ face/i.test(nom)) continue;
+
+    const valeurs = ligne.slice(sep + 1).trim().split(/\s+/).map(Number);
+    if (valeurs.length < 9 || !Number.isFinite(valeurs[0]) || !Number.isFinite(valeurs[8])) {
+      continue;
+    }
+
+    rang++;
+    cartes.push({
+      index: rang,
+      nom,
+      in_octets: valeurs[0],
+      out_octets: valeurs[8],
+      vitesse_mbps: null,
+    });
+  }
+
+  return cartes.length > 0 ? cartes : null;
+}
+
+/**
+ * Analyse la sortie JSON de Get-NetAdapterStatistics (Windows).
+ *
+ * `ConvertTo-Json` rend un OBJET quand il n'y a qu'une carte, et un
+ * TABLEAU au-delà. Une machine à une seule carte réseau — le cas d'un
+ * portable — aurait donc planté un code qui suppose un tableau.
+ */
+function analyserCartesWindows(json) {
+  let brut;
+  try {
+    brut = JSON.parse(String(json || ""));
+  } catch {
+    return null;
+  }
+
+  const liste = Array.isArray(brut) ? brut : [brut];
+  const cartes = [];
+  let rang = 0;
+
+  for (const c of liste) {
+    if (!c || !c.Name) continue;
+
+    /* `Number(null)` vaut 0, et `Number.isFinite(0)` vaut true : une
+       carte dont PowerShell n'a pas su lire les compteurs serait entrée
+       dans la liste avec « 0 octet ». Au relevé suivant, la différence
+       aurait produit un pic énorme sorti de nulle part. On écarte donc
+       l'absence AVANT de convertir. */
+    if (c.ReceivedBytes === null || c.ReceivedBytes === undefined) continue;
+    if (c.SentBytes === null || c.SentBytes === undefined) continue;
+
+    const entrant = Number(c.ReceivedBytes);
+    const sortant = Number(c.SentBytes);
+    if (!Number.isFinite(entrant) || !Number.isFinite(sortant)) continue;
+
+    rang++;
+    cartes.push({
+      // ifIndex quand Windows le donne : c'est le même numéro d'un envoi
+      // à l'autre, ce qui est tout ce qu'on demande à cette clé.
+      index: Number.isFinite(Number(c.ifIndex)) && Number(c.ifIndex) > 0
+        ? Number(c.ifIndex)
+        : rang,
+      nom: String(c.Name),
+      in_octets: entrant,
+      out_octets: sortant,
+      vitesse_mbps: null,
+    });
+  }
+
+  return cartes.length > 0 ? cartes : null;
+}
+
+/**
+ * Les compteurs de toutes les cartes réseau de cette machine.
+ *
+ * `null` veut dire « je n'ai pas pu regarder » — jamais « zéro ». Sur un
+ * Windows trop ancien pour Get-NetAdapterStatistics, le serveur
+ * n'écrira simplement aucun débit, ce qui est la vérité.
+ *
+ * La boucle locale n'est PAS filtrée ici : le serveur l'écarte sur son
+ * nom, avec le même filtre que pour le SNMP. Une seule règle, un seul
+ * endroit — et la fiche de l'équipement peut malgré tout montrer cette
+ * interface en la marquant « hors total ».
+ */
+async function compteursReseau() {
+  if (process.platform === "win32") {
+    const sortie = await lancer(
+      "powershell -NoProfile -NonInteractive -Command " +
+        "\"Get-NetAdapterStatistics | Select-Object Name,ReceivedBytes,SentBytes | ConvertTo-Json -Compress\""
+    );
+    return sortie ? analyserCartesWindows(sortie) : null;
+  }
+
+  if (process.platform === "linux") {
+    const sortie = await lancer("cat /proc/net/dev");
+    return sortie ? analyserProcNetDev(sortie) : null;
+  }
+
+  // macOS et le reste : pas de source fiable et portable. On ne devine pas.
+  return null;
+}
+
 function systeme() {
   return {
     nom_machine: os.hostname(),
@@ -286,6 +484,13 @@ module.exports = {
   collecterLogiciels,
   identite,
   systeme,
+  chargeProcesseur,
+  memoire,
+  compteursReseau,
+  // Exportées pour les tests : l'analyse porte la logique, pas la commande.
+  chargeDepuisEchantillons,
+  analyserProcNetDev,
+  analyserCartesWindows,
   // Exportées pour les tests : ce sont elles qui portent la logique.
   decouperCsv,
   memoireEnKo,

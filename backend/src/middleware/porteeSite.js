@@ -42,12 +42,49 @@ function clauseSite(req, colonne = "e.id_site") {
   };
 }
 
+/**
+ * Le filtre complet : le PÉRIMÈTRE de l'utilisateur, ET le site qu'il a
+ * choisi à l'écran.
+ *
+ * ── LE DÉFAUT QUE ÇA CORRIGE ──
+ *
+ * `clauseSite` ne lit que le jeton. Les routes qui s'en contentaient
+ * ignoraient donc le `id_site` passé en paramètre : pour un administrateur
+ * global, le tableau de bord affichait « 44 équipements » pour le site
+ * choisi, et juste à côté les alertes et les courbes de TOUS les sites.
+ * Le trait de référence « parc : 180 » surplombait une carte annonçant 44
+ * équipements — deux chiffres contradictoires sur le même écran, sans un
+ * mot pour dire qu'ils ne comptaient pas la même chose.
+ *
+ * ── LES DEUX CONDITIONS SE CUMULENT, ELLES NE SE REMPLACENT PAS ──
+ *
+ * Le périmètre du jeton reste appliqué en plus du site demandé. Un
+ * utilisateur rattaché au site 2 qui réclame le site 1 obtient donc un
+ * résultat VIDE, jamais les données du site 1 : le choix d'écran peut
+ * seulement RESTREINDRE ce que le jeton autorise. C'est la règle qui
+ * empêche un paramètre d'URL de devenir une élévation de privilège.
+ *
+ * @param {string} colonne - colonne qualifiée, ex. "e.id_site"
+ */
+function filtreSite(req, colonne = "e.id_site") {
+  const portee = porteeDe(req);
+
+  const demande = Number(req.query?.id_site);
+  const choisi = Number.isInteger(demande) && demande > 0 ? demande : null;
+
+  return {
+    clause: `(? IS NULL OR ${colonne} = ?) AND (? IS NULL OR ${colonne} = ?)`,
+    params: [portee, portee, choisi, choisi],
+  };
+}
+
 /** L'utilisateur a-t-il le droit d'agir sur ce site ? */
 function siteAutorise(req, idSite) {
   const portee = porteeDe(req);
   if (portee === null) return true;
   return Number(idSite) === portee;
 }
+
 
 /**
  * Vérifie qu'un équipement appartient au périmètre de l'utilisateur.
@@ -117,6 +154,7 @@ async function verifierAccesIncident(req, idIncident) {
 module.exports = {
   porteeDe,
   clauseSite,
+  filtreSite,
   siteAutorise,
   verifierAccesEquipement,
   verifierAccesAlerte,

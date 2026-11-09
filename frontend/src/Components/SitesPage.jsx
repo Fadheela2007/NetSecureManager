@@ -6,12 +6,23 @@ import { decrireErreur } from "../utils/erreurReseau";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
-export default function SitesPage() {
+/**
+ * @param {Function} onSitesModifies  prévient l'en-tête qu'il doit relire
+ *   sa liste. La création comme la suppression l'appellent : le
+ *   sélecteur « Site supervisé » vit dans App.jsx et ne devine rien.
+ */
+export default function SitesPage({ onSitesModifies }) {
   const [sites, setSites] = useState([]);
   const [nom, setNom] = useState("");
   const [ville, setVille] = useState("");
   const [erreur, setErreur] = useState(null);
   const [miseEnService, setMiseEnService] = useState(null);
+  const [message, setMessage] = useState(null);
+  /* Le site en cours de suppression : le bouton se désactive pendant
+     l'aller-retour. Sans ça, un double clic envoie deux requêtes, et la
+     seconde échoue sur un site qui n'existe plus — un message d'erreur
+     pour une opération qui a parfaitement réussi. */
+  const [suppressionEnCours, setSuppressionEnCours] = useState(null);
   // Échec de LECTURE, distinct de `erreur` qui porte les échecs de
   // création. Sans lui, un serveur injoignable affichait « aucun site »,
   // et l'utilisateur en créait un second alors que le premier existait.
@@ -51,6 +62,50 @@ export default function SitesPage() {
     }
   }
 
+  /**
+   * Supprime un site, sans écran intermédiaire.
+   *
+   * ── CE QUI EST DIT, ET QUAND ──
+   *
+   * Plus rien n'est demandé AVANT. Le bilan arrive APRÈS, en chiffres :
+   * il ne sert plus à obtenir une autorisation, il sert à ce qu'on sache
+   * ce qu'on vient d'effacer.
+   *
+   * Et quand le serveur refuse — dernier site, comptes rattachés — on
+   * répète SA raison. Ces deux refus ne protègent pas du clic maladroit :
+   * ils empêchent la plateforme de se retrouver dans un état faux.
+   */
+  async function supprimerSite(site) {
+    setMessage(null);
+    setErreurChargement(null);
+    setSuppressionEnCours(site.id_site);
+    try {
+      const { data } = await axios.delete(`${API_URL}/sites/${site.id_site}`);
+      setMessage(
+        `Site « ${data.site.nom} » supprimé — ` +
+          `${data.perdu.equipements ?? 0} équipement(s) et ` +
+          `${(data.perdu.releves ?? 0).toLocaleString("fr-FR")} relevé(s) effacés avec lui.`
+      );
+      await charger();
+      /* L'EN-TÊTE EST PRÉVENU, et pas seulement cette page. Sans ça, le
+         nom du site effacé reste dans le sélecteur — et, plus grave,
+         `idSite` continue de le désigner : tous les écrans filtrent sur
+         un site qui n'existe plus et deviennent vides ensemble, sans
+         qu'une ligne dise pourquoi. */
+      onSitesModifies?.();
+    } catch (err) {
+      const corps = err.response?.data;
+      const comptes = corps?.comptes?.map((c) => c.email).join(", ");
+      setErreurChargement(
+        [corps?.error, corps?.aide, comptes && `Comptes : ${comptes}`]
+          .filter(Boolean)
+          .join(" ")
+      );
+    } finally {
+      setSuppressionEnCours(null);
+    }
+  }
+
   function rafraichir() {
     setErreurChargement(null);
     charger().catch((err) => setErreurChargement(decrireErreur(err, "Les sites")));
@@ -66,6 +121,9 @@ export default function SitesPage() {
       setMiseEnService(data.id_site);
       setNom(""); setVille("");
       await charger();
+      // Le site nouvellement créé doit apparaître dans le sélecteur
+      // immédiatement : sinon on ne peut pas s'y rendre sans recharger.
+      onSitesModifies?.();
     } catch (err) {
       setErreur(err.response?.data?.error || "Impossible de créer le site");
     }
@@ -94,6 +152,14 @@ export default function SitesPage() {
         </div>
       )}
 
+      {/* ── LA LIMITE SE DIT, ELLE NE SE CACHE PAS ──
+
+          Faire disparaître le formulaire sans explication laisserait
+          croire à un défaut. On le remplace par ce que la fonction
+          FERAIT, et par la raison pour laquelle elle est indisponible :
+          c'est plus honnête, et c'est la meilleure vitrine possible.
+
+          Les sites déjà créés ne sont pas touchés. */}
       <form onSubmit={ajouter} className="bg-[var(--color-surface)] border border-[var(--color-line)] rounded-xl p-5 flex flex-wrap items-end gap-3">
         <div>
           <label className="block text-[11px] text-[var(--color-mute)] mb-1.5">Nom du site</label>
@@ -111,6 +177,10 @@ export default function SitesPage() {
       </form>
 
       {erreur && <p className="text-sm text-[var(--color-crit)]">{erreur}</p>}
+
+      {message && (
+        <p className="text-sm text-[var(--color-mute)]">{message}</p>
+      )}
 
       {miseEnService && (
         <MiseEnServiceAgent
@@ -179,6 +249,17 @@ export default function SitesPage() {
                       className="text-xs px-3 py-1.5 rounded-lg border border-[var(--color-line)] text-[var(--color-mute)] hover:border-[var(--color-signal)] hover:text-[var(--color-signal)] transition"
                     >
                       {etat === "jamais_connecte" ? "Mettre en service" : "Agent"}
+                    </button>
+
+                    {/* Suppression directe, et en dernier dans la ligne :
+                        le bouton le plus destructeur ne se met pas là où
+                        le pouce arrive en premier. */}
+                    <button
+                      onClick={() => supprimerSite(s)}
+                      disabled={suppressionEnCours === s.id_site}
+                      className="ml-2 text-xs px-3 py-1.5 rounded-lg border border-[var(--color-line)] text-[var(--color-mute)] hover:border-[var(--color-crit)] hover:text-[var(--color-crit)] transition cible-tactile disabled:opacity-40"
+                    >
+                      {suppressionEnCours === s.id_site ? "Suppression…" : "Supprimer"}
                     </button>
                   </td>
                 </tr>

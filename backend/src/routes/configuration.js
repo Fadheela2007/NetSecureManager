@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const db = require("../db");
 const { requireRole } = require("../middleware/requireRole");
+const { porteeDe } = require("../middleware/porteeSite");
 const { tracer } = require("../services/journal");
 
 /**
@@ -39,6 +40,24 @@ router.get("/configuration", async (req, res) => {
 });
 
 router.patch("/configuration/:cle", requireRole("admin"), async (req, res) => {
+  /* ── UNE ÉCRITURE GLOBALE EXIGE UN ADMINISTRATEUR GLOBAL ──
+
+     `requireRole("admin")` ne suffit pas ici, et c'est le piège : rôle et
+     périmètre sont deux axes indépendants. Un administrateur rattaché au
+     site 2 est administrateur DU SITE 2 — il ne doit pas pouvoir toucher
+     un réglage qui n'a pas de site, donc qui s'applique à tout le monde.
+
+     Le cloisonnement était appliqué partout où le paramètre s'appelait
+     `id_site`, et nulle part ailleurs. Ici le paramètre s'appelle
+     autrement, et la table n'a pas de colonne de site : rien n'accrochait.
+     Le refus doit donc être explicite. */
+  if (porteeDe(req) !== null) {
+    return res.status(403).json({
+      error: "Réglage global",
+      aide: "Ce paramètre s'applique à tous les sites. Seul un administrateur de la plateforme peut le modifier.",
+    });
+  }
+
   const { valeur } = req.body;
   if (valeur === undefined || valeur === null || valeur === "") {
     return res.status(400).json({ error: "valeur requise" });

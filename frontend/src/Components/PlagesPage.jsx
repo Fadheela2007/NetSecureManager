@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
 import PlanAdressage from "./PlanAdressage";
+import ScanLauncher from "./ScanLauncher";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
@@ -339,7 +340,19 @@ export default function PlagesPage({ idSite }) {
         )}
       </div>
 
+      {/* ══ LANCER UN SCAN ══
+
+          Ici plutôt que sur le tableau de bord : c'est cet écran qui
+          déclare CE QUI sera parcouru. Le bouton « Scanner tout le
+          site » lit la liste juste au-dessus — on voit les plages, puis
+          on les lance, sans changer de page.
+
+          Après la liste et avant le plan d'adressage : on déclare, on
+          scanne, on regarde ce que ça donne. */}
+      <ScanLauncher idSite={idSite} />
+
       <PlanAdressage idSite={idSite} rafraichir={versionPlan} />
+
     </div>
   );
 }

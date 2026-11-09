@@ -66,19 +66,61 @@ foreach ($f in $sources) {
 Write-Host "  Fichiers copies dans $dossier" -ForegroundColor Green
 
 # --- Configuration ------------------------------------------------------
+# DEUX VALEURS AU LIEU DE TROIS, ET SURTOUT PLUS DE JETON DE SITE.
+#
+# Le jeton du site vaut pour TOUTES les machines du site. Le recopier sur
+# chaque poste, c'est le laisser dans autant de fichiers et de
+# presse-papiers ; le jour ou il fuit, il faut le changer partout.
+#
+# Desormais, l'administrateur demande un CODE pour CE poste, depuis sa
+# fiche dans la plateforme. Le code vaut 30 minutes, ne sert qu'une fois,
+# et cette machine l'echange contre un jeton qui n'appartient qu'a elle.
 Write-Host ""
-Write-Host "Trois valeurs, toutes lisibles dans la plateforme :" -ForegroundColor White
+Write-Host "Deux valeurs, lisibles dans la plateforme :" -ForegroundColor White
+Write-Host "Le code s'obtient sur la fiche de CE poste, bouton Rattacher ce poste." -ForegroundColor DarkGray
 $url = Read-Host "  Adresse de l'API (ex. http://192.168.0.10:5000/api)"
-$site = Read-Host "  Numero du site (page Sites)"
-$jeton = Read-Host "  Jeton du site (page Sites, Mise en service de l'agent)"
+$code = Read-Host "  Code de rattachement (ex. K7P4-2Q9M)"
 
-if ([string]::IsNullOrWhiteSpace($url) -or [string]::IsNullOrWhiteSpace($site) -or [string]::IsNullOrWhiteSpace($jeton)) {
-    Write-Host "`nLes trois valeurs sont obligatoires. Installation annulee." -ForegroundColor Red
+if ([string]::IsNullOrWhiteSpace($url) -or [string]::IsNullOrWhiteSpace($code)) {
+    Write-Host "`nLes deux valeurs sont obligatoires. Installation annulee." -ForegroundColor Red
     Write-Host "Un agent configure a moitie tournerait en silence, et on le" -ForegroundColor DarkGray
     Write-Host "croirait en place." -ForegroundColor DarkGray
     Read-Host "`nEntree pour fermer"
     exit 1
 }
+
+# --- Echange du code contre le jeton de ce poste ------------------------
+#
+# On le fait MAINTENANT, avant d'ecrire quoi que ce soit : un code refuse
+# doit arreter l'installation ici, pas produire un agent qui tournera en
+# silence sans jamais etre accepte.
+Write-Host ""
+Write-Host "Presentation du code a la plateforme..." -ForegroundColor DarkGray
+try {
+    $reponse = Invoke-RestMethod -Uri "$url/agent/rattacher" -Method Post -TimeoutSec 20 `
+                                 -ContentType "application/json" `
+                                 -Body (@{ code = $code; nom_machine = $env:COMPUTERNAME } | ConvertTo-Json)
+} catch {
+    $detail = $_.ErrorDetails.Message
+    Write-Host "`nRattachement refuse." -ForegroundColor Red
+    if ($detail) { Write-Host "  $detail" -ForegroundColor DarkGray }
+    Write-Host "  Causes habituelles : code expire (30 minutes), code deja utilise," -ForegroundColor DarkGray
+    Write-Host "  adresse de l'API incorrecte, ou plateforme injoignable depuis ce poste." -ForegroundColor DarkGray
+    Read-Host "`nEntree pour fermer"
+    exit 1
+}
+
+$jeton = $reponse.jeton
+$site = $reponse.id_site
+
+if ([string]::IsNullOrWhiteSpace($jeton)) {
+    Write-Host "`nLa plateforme n'a pas rendu de jeton. Installation annulee." -ForegroundColor Red
+    Read-Host "`nEntree pour fermer"
+    exit 1
+}
+
+Write-Host "  Poste rattache — jeton propre a cette machine recu." -ForegroundColor Green
+Write-Host "  Ce jeton ne permet d'ecrire QUE l'inventaire de ce poste." -ForegroundColor DarkGray
 
 Write-Host ""
 Write-Host "Le nom de l'utilisateur de chaque programme peut etre remonte." -ForegroundColor White

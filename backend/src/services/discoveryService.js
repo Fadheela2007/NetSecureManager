@@ -28,14 +28,78 @@ const OID_SYS_DESCR = "1.3.6.1.2.1.1.1.0";
 const OID_SYS_OBJECT_ID = "1.3.6.1.2.1.1.2.0";
 const OID_SYS_NAME = "1.3.6.1.2.1.1.5.0";
 const OID_SYS_UPTIME = "1.3.6.1.2.1.1.3.0";
+/* ═══════════════════════════════════════════════════════════════════════
+   LES SERVICES QUE LE SCAN SAIT NOMMER
+
+   Un port ouvert répond à deux questions à la fois : QU'EST-CE QUE CETTE
+   MACHINE (une imprimante expose 9100, un autocommutateur expose 5060),
+   et QU'EST-CE QU'ELLE EXPOSE (un Telnet ouvert en 2026 est un problème
+   en soi).
+
+   ── CE QUE COÛTE CHAQUE PORT AJOUTÉ ──
+
+   `scanPorts` teste tous les ports d'une machine EN PARALLÈLE, mais une
+   machine muette fait expirer chaque tentative. Le coût réel se compte
+   donc en sockets ouverts simultanément, pas en temps : sur un /24 de
+   soixante machines vivantes, passer de dix-neuf à trente-sept ports
+   double le nombre de connexions.
+
+   Chaque ligne ci-dessous doit donc gagner sa place : soit elle NOMME un
+   service qu'on trouve réellement dans une PME, soit elle permet de
+   classer une machine, soit elle signale un risque. Un port « au cas
+   où » n'a rien à faire ici.
+   ═══════════════════════════════════════════════════════════════════════ */
 const PORTS_COURANTS = {
+  /* ── Les classiques ── */
   21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS",
   80: "HTTP", 110: "POP3", 143: "IMAP", 161: "SNMP", 443: "HTTPS",
   445: "SMB", 3306: "MySQL", 3389: "RDP", 5432: "PostgreSQL", 8080: "HTTP-alt",
-  // Ports ajoutés pour la classification : ils sont quasi mono-usage et
-  // permettent de catégoriser un équipement muet en SNMP comme en nmap.
-  // Le coût est nul, scanPorts teste tous les ports en parallèle.
+
+  /* ── Impression et vidéo ──
+     Quasi mono-usage : ils classent un équipement muet en SNMP comme en
+     nmap, ce qu'aucune autre source ne sait faire. */
   515: "LPD", 554: "RTSP", 631: "IPP", 9100: "JetDirect",
+
+  /* ── Windows et domaine ──
+     88 et 389 ouverts ensemble, c'est un contrôleur de domaine : sur un
+     réseau d'entreprise, c'est la machine la plus importante à connaître
+     et elle ne se présente nulle part comme telle.
+     135 et 139 complètent 445 : un poste Windows dont le partage de
+     fichiers est fermé reste visible par eux. */
+  88: "Kerberos", 135: "RPC Windows", 139: "NetBIOS",
+  389: "LDAP", 636: "LDAPS",
+  5985: "WinRM", 5986: "WinRM (TLS)",
+
+  /* ── Bases de données ──
+     Une base exposée au réseau local est une information de sécurité
+     autant que d'inventaire. */
+  1433: "SQL Server", 1521: "Oracle", 6379: "Redis", 27017: "MongoDB",
+
+  /* ── Prise de contrôle à distance ──
+     VNC en clair sur un réseau de bureau mérite d'être vu. */
+  5900: "VNC",
+
+  /* ── Stockage et partage ── */
+  2049: "NFS", 548: "AFP", 5001: "Synology DSM",
+
+  /* ── Virtualisation ──
+     Un hyperviseur porte des dizaines de machines : le rater, c'est
+     rater tout ce qu'il héberge. */
+  902: "VMware ESXi", 8006: "Proxmox",
+
+  /* ── Téléphonie ──
+     SIP est mono-usage : ce qui l'expose est un téléphone ou un
+     autocommutateur, jamais autre chose. */
+  5060: "SIP", 5061: "SIP (TLS)",
+
+  /* ── Administration web ──
+     Beaucoup d'équipements réseau n'exposent leur interface que là. */
+  8443: "HTTPS-alt",
+
+  /* ── Objets connectés et industriel ──
+     Rares en PME de bureau, décisifs quand ils sont là : une machine qui
+     parle Modbus pilote quelque chose de physique. */
+  1883: "MQTT", 502: "Modbus",
 };
 
 /**
@@ -600,7 +664,7 @@ function lireBalayageNmap(sortie) {
  * qu'il n'y a personne » de « nmap n'a rien pu dire », et retomber sur
  * le balayage maison dans le second cas seulement.
  */
-function balayageNmap(cidr, nbAdresses) {
+function balayageNmap(cidr, nbAdresses, exclusions = []) {
   return new Promise((resolve) => {
     /* Le délai suit la taille du réseau. Mesure de référence : 239
        adresses en 2,9 s. On accorde très large — vingt fois la mesure —
@@ -608,8 +672,22 @@ function balayageNmap(cidr, nbAdresses) {
        transformerait un succès lent en repli inutile. */
     const delaiMs = Math.min(300_000, 20_000 + nbAdresses * 250);
 
+    /* ── LES ZONES EXCLUES NE SONT PAS SONDÉES, PAS « FILTRÉES APRÈS » ──
+
+       Écarter les résultats après coup aurait laissé nmap envoyer ses
+       paquets : pour un automate industriel ou un équipement médical,
+       c'est précisément ce qu'on nous demande d'éviter. `--exclude` le
+       dit à nmap AVANT qu'il ne touche à quoi que ce soit.
+
+       Le format accepté est « 192.168.0.100-200 » pour un intervalle
+       dans le même /24, sinon la liste des adresses. On borne la liste
+       pour ne pas fabriquer une ligne de commande interminable ; au-delà,
+       l'exclusion reste appliquée par notre propre filtrage, qui, lui,
+       n'envoie rien du tout. */
+    const arg = exclusions.length > 0 ? ` --exclude ${exclusions.join(",")}` : "";
+
     exec(
-      `nmap -sn -n ${cidr}`,
+      `nmap -sn -n${arg} ${cidr}`,
       { timeout: delaiMs, maxBuffer: 16 * 1024 * 1024 },
       (erreur, sortie) => {
         if (!sortie) return resolve(null);
@@ -649,10 +727,38 @@ async function scanRange({
   // pas changé, et fait passer un rescan de plusieurs minutes à
   // quelques dizaines de secondes.
   connus = null,
+  /* Intervalles d'adresses à ne PAS sonder, déclarés dans le plan
+     d'adressage : [{ debut, fin }]. Un automate, un équipement médical,
+     un pare-feu qui journalise chaque connexion — il existe des machines
+     qu'on n'interroge pas, et la plateforme doit pouvoir l'entendre. */
+  exclues = null,
 }) {
   const avancer = typeof onProgress === "function" ? onProgress : () => {};
 
-  const hosts = listHostsFromCidr(cidr);
+  const adressesDeLaPlage = listHostsFromCidr(cidr);
+
+  /* L'exclusion est appliquée AVANT tout envoi, et le nombre d'adresses
+     écartées est rendu à l'appelant : une adresse non sondée doit se
+     lire comme un choix, jamais comme un trou de mesure. */
+  const intervalles = Array.isArray(exclues) ? exclues : [];
+  const estExclue = (ip) => {
+    if (intervalles.length === 0) return false;
+    const v = ipLib.toLong(ip);
+    return intervalles.some((i) => v >= i.debut && v <= i.fin);
+  };
+
+  const hosts =
+    intervalles.length > 0 ? adressesDeLaPlage.filter((h) => !estExclue(h)) : adressesDeLaPlage;
+  const nbExclues = adressesDeLaPlage.length - hosts.length;
+  if (nbExclues > 0) {
+    // Dit, et non tu : une adresse non sondée est un choix de
+    // l'exploitant, jamais un trou de mesure.
+    console.log(
+      `Balayage de ${cidr} : ${nbExclues} adresse(s) écartée(s) — zones ` +
+        "réservées marquées « ne pas scanner » dans le plan d'adressage."
+    );
+  }
+
   avancer("balayage", 0, hosts.length);
 
   /* ── LE BALAYAGE : NMAP D'ABORD, LE NÔTRE ENSUITE ──
@@ -662,9 +768,21 @@ async function scanRange({
   let aliveHosts = null;
 
   if (process.env.SCAN_BALAYAGE_NMAP !== "0") {
-    const resultat = await balayageNmap(cidr, hosts.length).catch(() => null);
+    const argsExclusion = intervalles
+      .slice(0, 32)
+      .map((i) =>
+        i.debut === i.fin
+          ? ipLib.fromLong(i.debut)
+          : `${ipLib.fromLong(i.debut)}-${ipLib.fromLong(i.fin)}`
+      );
+
+    const resultat = await balayageNmap(cidr, hosts.length, argsExclusion).catch(() => null);
     if (resultat) {
-      aliveHosts = resultat.hotes.map((h) => ({ ip: h.ip, latency: h.latency }));
+      // Ceinture et bretelles : si nmap n'a pas compris une exclusion, on
+      // ne l'inscrit pas pour autant à l'inventaire.
+      aliveHosts = resultat.hotes
+        .filter((h) => !estExclue(h.ip))
+        .map((h) => ({ ip: h.ip, latency: h.latency }));
       for (const h of resultat.hotes) if (h.mac) macsNmap.set(h.ip, h.mac);
 
       if (!balayageNmapSignale) {
@@ -1345,7 +1463,15 @@ async function preuveVoisinage(ip) {
  *
  * 445 en tête : c'est le plus discriminant sur un réseau d'entreprise.
  */
-const PORTS_SIGNE_DE_VIE = [445, 139, 135, 80, 443, 3389, 22, 8080, 9100, 631];
+/* Ports interrogés pour décider qu'une machine MUETTE AU PING est
+   malgré tout vivante. Ordre voulu : les plus répandus d'abord, parce
+   que la première réponse suffit et arrête le reste.
+
+   5985 (WinRM) est ajouté pour les Windows récents, où le partage de
+   fichiers est désormais souvent fermé alors que l'administration
+   distante reste ouverte ; 53 pour les serveurs DNS, qui ne répondent
+   presque jamais sur les ports précédents. */
+const PORTS_SIGNE_DE_VIE = [445, 139, 135, 80, 443, 3389, 22, 8080, 5985, 53, 9100, 631];
 
 /**
  * L'équipement est-il réellement injoignable, ou seulement muet au ping ?

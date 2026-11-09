@@ -191,13 +191,27 @@ export default function EquipementsPage({ idSite }) {
   // erreur de rafraîchissement est ignorée : garder à l'écran la liste
   // d'il y a une minute vaut mieux que la remplacer par un message
   // d'erreur alors que rien n'est perdu.
+  /* ── LA DÉPENDANCE MANQUANTE FAISAIT REVENIR LE SITE PRÉCÉDENT ──
+
+     `charger` lit `idSite` par fermeture. Avec un tableau de dépendances
+     VIDE, la fermeture du tout premier rendu était figée pour toujours.
+
+     Le rafraîchissement silencieux tourne toutes les soixante secondes :
+     on passait de Douala à Yaoundé, la liste se chargeait correctement,
+     puis moins d'une minute plus tard elle était écrasée par les
+     équipements de DOUALA — sans indicateur de chargement, sous un titre
+     annonçant « N équipement(s) sur ce site » et un sélecteur affichant
+     Yaoundé.
+
+     `idSite` en dépendance réabonne le rafraîchissement à chaque
+     changement de site, avec la bonne fermeture. */
   useEffect(
     () =>
       brancherRafraichissement(
         () => charger().catch(() => {}),
         ["cycle", "scan", "equipement"]
       ),
-    []
+    [idSite]
   );
 
   useEffect(() => {

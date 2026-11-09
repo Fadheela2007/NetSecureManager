@@ -1,16 +1,21 @@
 import React from 'react';
 import NetworkMark from "./NetworkMark";
 
-/* Topologie et Accès web ont été retirés du menu le 16/09/2026 : la
-   carte des raccordements suppose un commutateur administrable, et le
-   suivi des accès web un agent déployé — deux prérequis que le parc de
-   test n'offre pas. Les composants restent sur le disque, sans être
-   appelés : les remettre demande deux lignes ici et deux dans App.jsx. */
+/* Accès web est retiré du menu depuis le 16/09/2026 : son suivi suppose
+   un agent déployé, que le parc de test n'offre pas. Le composant reste
+   sur le disque, sans être appelé.
+
+   Topologie était retirée pour une raison voisine — la carte supposait un
+   commutateur administrable interrogeable en SNMP. Elle revient le
+   02/10/2026 sur une base différente : la carte se construit à partir des
+   relevés des agents de poste, et n'a plus besoin d'aucun commutateur.
+   Ce qu'elle ne peut toujours pas montrer — le port physique — est écrit
+   sur l'écran lui-même. */
 const NAV = [
   { key: "dashboard", label: "Tableau de bord" },
   { key: "equipements", label: "Équipements" },
   { key: "plages", label: "Plages réseau" },
-  { key: "bande-passante", label: "Bande passante" },
+  { key: "topologie", label: "Topologie" },
   { key: "alertes", label: "Alertes" },
   { key: "incidents", label: "Incidents" },
   { key: "sites", label: "Sites" },

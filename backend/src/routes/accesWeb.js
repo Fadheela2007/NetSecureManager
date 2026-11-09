@@ -107,14 +107,96 @@ async function chargerContenu(idPolitique) {
     [idPolitique]
   );
 
+  /* ── LES RÈGLES ARRIVÉES À ÉCHÉANCE SONT RETIRÉES ICI ──
+
+     Une suppression dans une fonction de LECTURE demande à être
+     justifiée, parce que c'est normalement une mauvaise idée.
+
+     L'alternative était une tâche planifiée. Elle aurait un défaut
+     rédhibitoire : entre l'échéance et le passage de la tâche, la
+     politique servie aux agents contiendrait encore la règle. Un
+     blocage annoncé pour « 2 heures » durerait donc jusqu'à la
+     prochaine exécution — et un exploitant qui constate que son
+     déblocage ne prend pas effet à l'heure dite cesse de faire
+     confiance à la fonction, définitivement.
+
+     Ici, la politique est purgée au moment même où on la demande.
+     L'incrément de `version` qui suit est ce qui prévient les agents :
+     ils voient un numéro plus élevé et retéléchargent la configuration.
+     Sans lui, la règle disparaîtrait de l'écran en continuant de
+     bloquer sur le terrain — le pire des deux mondes. */
+  let nbExpirees = 0;
+  if (expirationDisponible !== false) {
+    try {
+      const [purge] = await db.query(
+        `DELETE FROM POLITIQUE_DOMAINE
+          WHERE id_politique = ? AND date_fin IS NOT NULL AND date_fin <= NOW()`,
+        [idPolitique]
+      );
+      nbExpirees = purge.affectedRows || 0;
+      expirationDisponible = true;
+      if (nbExpirees > 0) {
+        await db.query(
+          "UPDATE POLITIQUE_WEB SET version = version + 1 WHERE id_politique = ?",
+          [idPolitique]
+        );
+        console.log(
+          `Accès web — ${nbExpirees} règle(s) arrivée(s) à échéance, retirée(s) de la politique #${idPolitique}.`
+        );
+      }
+    } catch (err) {
+      if (colonneAbsente(err)) signalerExpirationIndisponible();
+      else throw err;
+    }
+  }
+
+  const champs = expirationDisponible
+    ? "id_regle, domaine, action, commentaire, date_creation, date_fin, origine, cree_par"
+    : "id_regle, domaine, action, commentaire, date_creation";
+
   const [manuelles] = await db.query(
-    `SELECT id_regle, domaine, action, commentaire, date_creation
+    `SELECT ${champs}
      FROM POLITIQUE_DOMAINE WHERE id_politique = ?
      ORDER BY action, domaine`,
     [idPolitique]
   );
 
-  return { categories, manuelles };
+  return {
+    categories,
+    manuelles,
+    expiration_disponible: expirationDisponible === true,
+    nb_expirees_retirees: nbExpirees,
+  };
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   DÉGRADATION GRACIEUSE QUAND LA MIGRATION N'EST PAS APPLIQUÉE
+
+   `null` = on n'a pas encore essayé, `true` = les colonnes existent,
+   `false` = elles manquent. Dans ce dernier cas tout continue de
+   fonctionner exactement comme avant : les règles sont permanentes, et
+   l'interface n'offre pas une échéance qu'elle ne saurait pas tenir.
+
+   Le contraire — proposer un champ « expire dans 2 heures » que la base
+   ne sait pas stocker — produirait un blocage permanent annoncé comme
+   temporaire. C'est la panne qu'on cherche précisément à empêcher.
+   ═══════════════════════════════════════════════════════════════════════ */
+let expirationDisponible = null;
+let expirationSignalee = false;
+
+function colonneAbsente(err) {
+  return err && (err.code === "ER_BAD_FIELD_ERROR" || err.errno === 1054);
+}
+
+function signalerExpirationIndisponible() {
+  expirationDisponible = false;
+  if (expirationSignalee) return;
+  expirationSignalee = true;
+  console.warn(
+    "\n⚠  Accès web — les blocages à durée limitée ne sont pas disponibles :\n" +
+      "   la migration backend/migrations/2026-09-28-blocage-temporaire.sql\n" +
+      "   n'est pas appliquée. Les règles restent permanentes.\n"
+  );
 }
 
 // LECTURE
@@ -371,7 +453,24 @@ router.put("/acces-web/politique", requireRole("admin"), async (req, res) => {
  * correspond à rien.
  */
 router.post("/acces-web/politique/:id/domaine", requireRole("admin"), async (req, res) => {
-  const { domaine, action = "bloquer", commentaire } = req.body || {};
+  const { domaine, action = "bloquer", commentaire, duree_heures, origine } = req.body || {};
+
+  /* La durée est reçue en HEURES et convertie en date par la base, pas
+     par le navigateur. Une date calculée côté client arriverait dans le
+     fuseau du poste : un blocage posé depuis un portable resté à l'heure
+     de Paris expirerait une heure trop tôt à Douala. */
+  let dureeHeures = null;
+  if (duree_heures !== undefined && duree_heures !== null && duree_heures !== "") {
+    dureeHeures = Number(duree_heures);
+    if (!Number.isFinite(dureeHeures) || dureeHeures <= 0 || dureeHeures > 24 * 365) {
+      return res.status(400).json({
+        error: "Durée invalide",
+        aide: "Attendu : un nombre d'heures entre 1 et 8760, ou rien pour un blocage permanent.",
+      });
+    }
+  }
+
+  const origineRetenue = origine === "bande_passante" ? "bande_passante" : "manuel";
 
   const normalise = normaliserDomaine(domaine);
   if (!normalise) {
@@ -388,12 +487,54 @@ router.post("/acces-web/politique/:id/domaine", requireRole("admin"), async (req
   if (!acces.ok) return res.status(acces.statut).json({ error: acces.erreur });
 
   try {
-    await db.query(
-      `INSERT INTO POLITIQUE_DOMAINE (id_politique, domaine, action, commentaire)
-       VALUES (?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE action = VALUES(action), commentaire = VALUES(commentaire)`,
-      [req.params.id, normalise, action, commentaire || null]
-    );
+    if (expirationDisponible === false) {
+      // Migration non appliquée : on pose la règle, mais on REFUSE de
+      // faire croire qu'elle expirera.
+      if (dureeHeures !== null) {
+        return res.status(503).json({
+          error: "Les blocages à durée limitée ne sont pas disponibles",
+          aide: "Appliquez backend/migrations/2026-09-28-blocage-temporaire.sql, puis redémarrez le serveur.",
+        });
+      }
+      await db.query(
+        `INSERT INTO POLITIQUE_DOMAINE (id_politique, domaine, action, commentaire)
+         VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE action = VALUES(action), commentaire = VALUES(commentaire)`,
+        [req.params.id, normalise, action, commentaire || null]
+      );
+    } else {
+      try {
+        await db.query(
+          `INSERT INTO POLITIQUE_DOMAINE
+             (id_politique, domaine, action, commentaire, cree_par, origine, date_fin)
+           VALUES (?, ?, ?, ?, ?, ?, ${dureeHeures === null ? "NULL" : "DATE_ADD(NOW(), INTERVAL ? HOUR)"})
+           ON DUPLICATE KEY UPDATE action = VALUES(action),
+                                   commentaire = VALUES(commentaire),
+                                   cree_par = VALUES(cree_par),
+                                   origine = VALUES(origine),
+                                   date_fin = VALUES(date_fin)`,
+          dureeHeures === null
+            ? [req.params.id, normalise, action, commentaire || null, req.user?.id || null, origineRetenue]
+            : [req.params.id, normalise, action, commentaire || null, req.user?.id || null, origineRetenue, dureeHeures]
+        );
+        expirationDisponible = true;
+      } catch (err) {
+        if (!colonneAbsente(err)) throw err;
+        signalerExpirationIndisponible();
+        if (dureeHeures !== null) {
+          return res.status(503).json({
+            error: "Les blocages à durée limitée ne sont pas disponibles",
+            aide: "Appliquez backend/migrations/2026-09-28-blocage-temporaire.sql, puis redémarrez le serveur.",
+          });
+        }
+        await db.query(
+          `INSERT INTO POLITIQUE_DOMAINE (id_politique, domaine, action, commentaire)
+           VALUES (?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE action = VALUES(action), commentaire = VALUES(commentaire)`,
+          [req.params.id, normalise, action, commentaire || null]
+        );
+      }
+    }
     await db.query(
       "UPDATE POLITIQUE_WEB SET version = version + 1 WHERE id_politique = ?",
       [req.params.id]
@@ -401,10 +542,17 @@ router.post("/acces-web/politique/:id/domaine", requireRole("admin"), async (req
     await tracer(
       req,
       "regle_web_ajoutee",
-      `Domaine ${normalise} : ${action} (politique #${req.params.id})`
+      `Domaine ${normalise} : ${action} (politique #${req.params.id})` +
+        (dureeHeures === null ? ", permanent" : `, pour ${dureeHeures} h`) +
+        (commentaire ? ` — ${commentaire}` : "")
     );
 
-    res.json({ domaine: normalise, action });
+    res.json({
+      domaine: normalise,
+      action,
+      duree_heures: dureeHeures,
+      origine: origineRetenue,
+    });
   } catch (err) {
     if (schemaAbsent(err)) {
       return res.status(503).json({ error: "Fonction non installée" });

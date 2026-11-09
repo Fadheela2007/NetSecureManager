@@ -156,7 +156,8 @@ function identifiants() {
  *
  * @param {string} ip
  * @returns {Promise<{ok:boolean, raison?:string, voie?:string, systeme?:string,
- *                    processus?:Array|null, logiciels?:Array|null}>}
+ *                    processus?:Array|null, logiciels?:Array|null,
+ * sante?:Object|null}>}
  */
 function lireMachine(ip) {
   return new Promise((resolve) => {
@@ -201,10 +202,26 @@ function lireMachine(ip) {
              on normalise ici. */
           const enTableau = (v) => (v === null || v === undefined ? null : [].concat(v));
 
+          /* La sante du poste — memoire, disques, services de protection —
+             suit la meme regle que le reste : chaque volet vaut `null`
+             quand la machine n'a pas repondu a CETTE question-la, et
+             jamais une liste vide, qui se lirait « ce poste n'a aucun
+             disque ». Les listes a un seul element arrivent de PowerShell
+             comme un objet seul : on normalise ici, une fois. */
+          const sante = objet.sante
+            ? {
+                ...objet.sante,
+                disques: enTableau(objet.sante.disques),
+                services: enTableau(objet.sante.services),
+                antivirus: enTableau(objet.sante.antivirus),
+              }
+            : null;
+
           return resolve({
             ...objet,
             processus: enTableau(objet.processus),
             logiciels: enTableau(objet.logiciels),
+            sante,
           });
         } catch {
           // Le script a écrit autre chose que du JSON : une erreur

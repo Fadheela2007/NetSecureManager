@@ -254,8 +254,134 @@ async function passagePlanificateur() {
   }
 }
 
+/**
+ * Le rapport, à UNE SEULE adresse : celle de la personne qui le demande.
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * POURQUOI UNE FONCTION SÉPARÉE, ET PAS UN PARAMÈTRE DE PLUS
+ *
+ * `envoyerRapportsPlanifies` écrit à TOUT LE MONDE, groupe par groupe.
+ * C'est son travail. Lui ajouter un mode « en fait, à une seule
+ * personne » aurait mis les deux comportements dans la même fonction, et
+ * un jour quelqu'un aurait inversé la condition — en écrivant à tout le
+ * monde ce qui ne devait aller qu'à un seul.
+ *
+ * Deux fonctions, deux routes, deux niveaux de droit. Envoyer à tout le
+ * monde et s'envoyer un PDF à soi-même ne sont pas le même geste et ne
+ * doivent pas partager de code de décision.
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * L'ADRESSE VIENT DE LA BASE, JAMAIS DE LA REQUÊTE
+ *
+ * L'appelant ne choisit PAS à qui le rapport est envoyé : la fonction lit
+ * l'adresse du compte connecté. C'est la seule façon de ne pas
+ * transformer la plateforme en relais : la page d'inscription est
+ * ouverte à tout le monde, donc n'importe qui peut obtenir un compte —
+ * et si le destinataire était un champ libre, il obtiendrait aussi un
+ * serveur pour écrire aux autres en son nom.
+ *
+ * « À moi » veut dire ce que la base sait de moi.
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * LE PÉRIMÈTRE AUSSI VIENT DE LA BASE
+ *
+ * On n'envoie que ce que cette personne a déjà le droit de consulter :
+ * son site si elle y est rattachée, tout si elle est globale. Recevoir
+ * par courrier ce qu'on ne peut pas voir à l'écran serait un trou dans
+ * le cloisonnement — et le plus discret qui soit, puisqu'il ne laisse
+ * aucune trace à l'écran.
+ *
+ * @param {number} idUtilisateur  l'identifiant lu dans le jeton signé.
+ */
+async function envoyerRapportAUtilisateur(idUtilisateur) {
+  const [lignes] = await db.query(
+    "SELECT nom, email, id_site FROM UTILISATEUR WHERE id_utilisateur = ?",
+    [idUtilisateur]
+  );
+  const moi = lignes[0];
+
+  if (!moi) return { envoye: false, raison: "compte introuvable" };
+  if (!moi.email) {
+    return { envoye: false, raison: "aucune adresse e-mail sur votre compte" };
+  }
+
+  const portee = moi.id_site === null || moi.id_site === undefined
+    ? null
+    : Number(moi.id_site);
+
+  const [sites] = await db.query("SELECT id_site, nom FROM SITE");
+  const nomSite = new Map(sites.map((s) => [Number(s.id_site), s.nom])).get(portee);
+  const etiquette = libellePerimetre(portee, nomSite);
+
+  const donnees = await collecterDonnees({ portee });
+
+  /* Même règle que l'envoi planifié : un rapport à zéro équipement
+     n'apprend rien, et on ne le déguise pas en envoi réussi. */
+  if (donnees.equipements.length === 0) {
+    return {
+      envoye: false,
+      raison: "aucun équipement dans votre périmètre — il n'y a rien à envoyer",
+      perimetre: etiquette,
+    };
+  }
+
+  const pdf = await genererPdfBuffer(donnees, { titreSuffixe: etiquette });
+  const tailleKo = Math.round(pdf.length / 1024);
+  const tropVolumineux = pdf.length > TAILLE_MAX_PJ;
+
+  const enLigne = donnees.equipements.filter((e) => e.statut === "up").length;
+  const horsLigne = donnees.equipements.filter((e) => e.statut === "down").length;
+  const actives = donnees.alertes.filter((a) => a.statut === "active").length;
+
+  let corps =
+    `Rapport de supervision NetSecureManager — ${etiquette}\n\n` +
+    `Vous avez demandé ce rapport depuis la plateforme. Il n'a été envoyé ` +
+    `qu'à vous.\n\n` +
+    `Équipements supervisés : ${donnees.equipements.length}\n` +
+    `En ligne : ${enLigne}   Hors ligne : ${horsLigne}\n` +
+    `Alertes des 30 derniers jours : ${donnees.alertes.length} ` +
+    `(dont ${actives} encore active(s))\n\n`;
+
+  corps += tropVolumineux
+    ? `Le rapport détaillé pèse ${tailleKo} Ko, au-delà de la limite d'envoi. ` +
+      `Il n'est pas joint : téléchargez-le depuis la plateforme (bouton ` +
+      `« Export PDF »).\n`
+    : `Le rapport complet est joint à ce message (PDF, ${tailleKo} Ko).\n`;
+
+  const resultat = await envoyerRapport({
+    destinataires: [{ nom: moi.nom, email: moi.email }],
+    sujet: `[NetSecureManager] Votre rapport de supervision — ${etiquette}`,
+    corps,
+    piecesJointe: tropVolumineux ? null : pdf,
+    nomFichier: `rapport_netsecuremanager_${portee === null ? "global" : `site${portee}`}.pdf`,
+  });
+
+  /* SMTP absent ou coupe-circuit ouvert : `envoyerRapport` n'échoue pas,
+     il ignore. Le dire franchement plutôt que d'annoncer un envoi qui
+     n'a pas eu lieu — quelqu'un attendrait un message qui ne viendra
+     jamais. */
+  if (resultat.envoyes === 0) {
+    return {
+      envoye: false,
+      raison: process.env.SMTP_HOST
+        ? "l'envoi n'a pas abouti — voir les journaux du serveur"
+        : "aucun serveur d'envoi n'est configuré (SMTP_HOST)",
+      perimetre: etiquette,
+    };
+  }
+
+  return {
+    envoye: true,
+    email: moi.email,
+    perimetre: etiquette,
+    piece_jointe: !tropVolumineux,
+    taille_ko: tailleKo,
+  };
+}
+
 module.exports = {
   envoyerRapportsPlanifies,
+  envoyerRapportAUtilisateur,
   passagePlanificateur,
   estLeMoment,
   destinatairesParPerimetre,

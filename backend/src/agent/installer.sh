@@ -16,6 +16,7 @@
 
 set -euo pipefail
 
+
 DEST="/opt/netsecuremanager-agent"
 SERVICE="netsecuremanager-agent"
 INTERVALLE=5
@@ -51,6 +52,7 @@ if [[ $EUID -ne 0 ]]; then
   rouge "Ce script doit être lancé avec sudo (il crée un service systemd)."
   exit 1
 fi
+
 
 etape "1/5  Vérification des prérequis"
 if ! command -v node >/dev/null 2>&1; then

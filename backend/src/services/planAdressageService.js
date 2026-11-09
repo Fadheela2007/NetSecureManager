@@ -197,6 +197,59 @@ function adressesDuServeur(sousReseau) {
   }
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+   LES RÉSERVATIONS DÉCLARÉES PAR L'ENTREPRISE.
+
+   La norme réserve trois choses : l'adresse du réseau, celle de
+   diffusion, et les .0/.255 internes d'un /23. L'entreprise, elle, en
+   réserve bien davantage — et pour des raisons que la norme ignore :
+
+     .1 à .20    les équipements réseau,
+     .100 à .200 le pool distribué par le serveur DHCP,
+     .21 à .50   les serveurs à adresse fixe.
+
+   L'ADRESSE DU POOL DHCP EST LE CAS QUI COÛTE CHER. Annoncée libre,
+   donnée à un serveur, elle fonctionne quelques jours — jusqu'à ce que
+   le DHCP l'attribue à son tour. La panne qui suit est intermittente, et
+   on la cherche du côté du câble, jamais du côté du plan.
+
+   RENDRE UN TABLEAU VIDE EN CAS D'ERREUR, et ne jamais lever : une base
+   sans la migration du 28/09 doit continuer à afficher le plan, avec les
+   seules réservations de norme. Un écran incomplet vaut mieux qu'un
+   écran en panne.
+   ═══════════════════════════════════════════════════════════════════════ */
+let tableReservationsSignalee = false;
+
+async function reservationsDuSite(idSite) {
+  try {
+    const [lignes] = await db.query(
+      `SELECT id_reservation, debut, fin, debut_num, fin_num, motif, categorie,
+              exclure_du_scan
+         FROM RESERVATION_ADRESSE
+        WHERE id_site = ?
+        ORDER BY debut_num`,
+      [idSite]
+    );
+    return lignes.map((l) => ({
+      ...l,
+      debut_num: Number(l.debut_num),
+      fin_num: Number(l.fin_num),
+      exclure_du_scan: Number(l.exclure_du_scan) === 1,
+    }));
+  } catch (err) {
+    if (!tableReservationsSignalee) {
+      tableReservationsSignalee = true;
+      console.warn(
+        "\n⚠  RESERVATION_ADRESSE est absente : le plan d'adressage ne connaît\n" +
+          "   que les réservations imposées par la norme. Pour déclarer le pool\n" +
+          "   DHCP et les zones de l'entreprise :\n" +
+          "   backend/migrations/2026-09-28-reservations-adresses.sql\n"
+      );
+    }
+    return [];
+  }
+}
+
 /**
  * @param {number} idSite
  * @param {string} cidr
@@ -227,6 +280,23 @@ async function planDUnePlage(idSite, cidr) {
     .sort((a, b) => toLong(a.adresse_ip) - toLong(b.adresse_ip));
 
   const prises = new Set(occupees.map((e) => e.adresse_ip));
+
+  /* ── LES RÉSERVATIONS DÉCLARÉES QUI TOUCHENT CETTE PLAGE ──
+     Une réservation peut déborder de la plage, ou vivre ailleurs : on ne
+     garde que l'intersection, et on la RECADRE sur les bornes de la
+     plage. Afficher « .0 à .300 » parce que quelqu'un a saisi large
+     ferait douter du reste du tableau. */
+  const debutPlage = toLong(sousReseau.firstAddress);
+  const finPlage = toLong(sousReseau.lastAddress);
+
+  const reservationsDeclarees = (await reservationsDuSite(idSite))
+    .filter((r) => r.fin_num >= debutPlage && r.debut_num <= finPlage)
+    .map((r) => {
+      const d = Math.max(r.debut_num, debutPlage);
+      const f = Math.min(r.fin_num, finPlage);
+      return { ...r, debut_effectif: fromLong(d >>> 0), fin_effectif: fromLong(f >>> 0), d, f };
+    });
+
 
   // ── LES RÉSERVÉES ──
   //
@@ -287,12 +357,61 @@ async function planDUnePlage(idSite, cidr) {
     }
   }
 
+  /* ── LES DÉCLARÉES SORTENT DES LIBRES ──
+
+     Elles rejoignent `prises`, l'ensemble qui sert À LA FOIS au compte
+     des libres, aux exemples et aux intervalles. Passer par un seul
+     ensemble est ce qui garantit que les trois vues ne peuvent pas se
+     contredire — elles se contredisaient, avant, et c'est ce qui rendait
+     le tableau inutilisable.
+
+     Une adresse réservée QUI PORTE DÉJÀ UN ÉQUIPEMENT n'est pas comptée
+     deux fois : elle est déjà dans `prises`. Elle est en revanche
+     signalée, parce qu'une machine posée dans le pool DHCP est
+     exactement le conflit qu'on cherche à éviter. */
+  const occupantsDeZonesReservees = [];
+  for (const r of reservationsDeclarees) {
+    r.nb_adresses = r.f - r.d + 1;
+    r.occupees = [];
+    for (let v = r.d; v <= r.f; v += 1) {
+      const a = fromLong(v >>> 0);
+      if (prises.has(a)) {
+        const machine = occupees.find((e) => e.adresse_ip === a);
+        if (machine) {
+          r.occupees.push(a);
+          occupantsDeZonesReservees.push({
+            adresse: a,
+            // Sans l'identifiant, on peut afficher le conflit mais pas
+            // créer l'alerte qui le suit : une alerte se rattache à une
+            // machine, jamais à une adresse.
+            id_equipement: machine.id_equipement,
+            nom: machine.nom,
+            motif: r.motif,
+            categorie: r.categorie,
+          });
+        }
+      } else {
+        prises.add(a);
+      }
+    }
+    delete r.d;
+    delete r.f;
+  }
+
+  const nbDeclareesReservees = reservationsDeclarees.reduce(
+    (total, r) => total + (r.nb_adresses - r.occupees.length),
+    0
+  );
+
   // ── LES LIBRES ──
   //
   // On ne construit JAMAIS la liste complète : un /16 en compte 65 534, et
   // c'est le genre de tableau qui a déjà fait tomber le serveur entier.
   // On compte par soustraction, et on ne cite que les premières — ce qu'on
   // vient chercher est « quelle adresse puis-je donner », pas la liste.
+  /* `prises` contient maintenant les occupées, les adresses du serveur
+     et les zones déclarées : le compte se fait donc par la même
+     soustraction qu'avant, sans terme supplémentaire. */
   const libresTotal = Math.max(0, total - prises.size - nbIntermediaires);
   const exemples = [];
   {
@@ -301,6 +420,8 @@ async function planDUnePlage(idSite, cidr) {
     for (let n = debut; n <= fin && exemples.length < EXEMPLES_LIBRES; n++) {
       const a = fromLong(n >>> 0);
       // Ne jamais proposer une adresse que le balayage n'ira pas voir.
+      // `prises` porte déjà les zones déclarées : une adresse du pool
+      // DHCP ne peut plus être proposée pour une imprimante.
       if (!prises.has(a) && !estOctetReserve(a)) exemples.push(a);
     }
   }
@@ -327,6 +448,19 @@ async function planDUnePlage(idSite, cidr) {
 
     occupees,
     reservees,
+
+    /* Ce que l'entreprise a réservé, avec son motif. Séparé des
+       réservations de norme, et c'est délibéré : les premières se
+       discutent, les secondes s'imposent. Les mélanger dans un seul
+       compteur empêcherait de savoir laquelle on peut récupérer quand la
+       plage devient trop petite. */
+    reservations_declarees: reservationsDeclarees,
+    nb_reservees_declarees: nbDeclareesReservees,
+
+    /* Une machine posée SUR une zone réservée. Le cas le plus fréquent :
+       une adresse fixe donnée à la main dans le pool DHCP. Ce n'est pas
+       encore une panne, c'est une panne qui attend son tour. */
+    occupants_de_zones_reservees: occupantsDeZonesReservees,
     libres_exemples: exemples,
     libres_tronquees: libresTotal > exemples.length,
 

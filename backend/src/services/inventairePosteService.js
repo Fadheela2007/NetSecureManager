@@ -30,6 +30,8 @@
  * mieux, jamais par du vide.
  */
 const db = require("../db");
+const { calculerDebitsEquipement } = require("./traficService");
+const { enregistrerTopologiePoste } = require("./topologieService");
 
 /**
  * Retrouve l'équipement correspondant à la machine qui s'annonce, ou le
@@ -181,6 +183,119 @@ async function remplacerProcessus(idEquipement, processus) {
  * Traite un envoi complet d'agent de poste.
  * @returns {Promise<{id_equipement:number, logiciels:number, processus:number}>}
  */
+/* ═══════════════════════════════════════════════════════════════════════
+   LE POSTE DEVIENT UNE SOURCE DE MESURE
+
+   ── LE PROBLÈME QUE ÇA RÈGLE ──
+
+   Le débit se lit dans des compteurs SNMP. Or les postes Windows n'ont
+   plus de service SNMP depuis des années : la page Bande passante
+   n'affichait donc que les imprimantes et les commutateurs — les seuls
+   appareils du parc qui acceptent de dire ce qu'ils consomment.
+
+   L'agent, lui, est DANS la machine. Sa carte réseau compte ses propres
+   octets, et le processeur donne sa charge sans que personne n'ait à
+   l'interroger de l'extérieur.
+
+   ── ON RÉUTILISE LE CALCUL DU SNMP, ON N'EN ÉCRIT PAS UN DEUXIÈME ──
+
+   `calculerDebitsEquipement` fait déjà la différence entre deux relevés,
+   écarte la boucle locale sur son nom, et refuse un delta négatif —
+   débordement de compteur ou redémarrage. Réécrire ça ici aurait produit
+   une deuxième version, qui aurait dérivé de la première au premier
+   correctif appliqué d'un seul côté.
+
+   L'agent envoie donc des COMPTEURS, comme SNMP. Le serveur calcule.
+
+   ── LE PREMIER ENVOI NE DONNE AUCUN DÉBIT, ET C'EST NORMAL ──
+
+   Une différence demande deux points. Le premier relevé d'une machine
+   écrit donc la charge processeur et la mémoire, mais laisse le débit à
+   `null` — jamais à zéro, qui se lirait « cette machine ne consomme
+   rien ».
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Pourcentage de mémoire UTILISÉE, à partir de ce que le poste a envoyé.
+ *
+ * Le script transmet le total et le libre, pas un pourcentage : deux
+ * nombres bruts se vérifient, un pourcentage déjà calculé ne se vérifie
+ * plus. La conversion a lieu ici, au même endroit que pour le SNMP.
+ */
+function ramPourcent(sante) {
+  /* `Number(null)` vaut 0, et `Number.isFinite(0)` vaut true.
+     Un champ absent serait donc devenu « 0 Mo libre », c'est-à-dire
+     « mémoire pleine à 100 % » — une alerte inventée à partir de rien.
+     On écarte donc null et undefined AVANT de convertir. */
+  if (sante?.memoire_totale_mo === null || sante?.memoire_totale_mo === undefined) return null;
+  if (sante?.memoire_libre_mo === null || sante?.memoire_libre_mo === undefined) return null;
+
+  const total = Number(sante.memoire_totale_mo);
+  const libre = Number(sante.memoire_libre_mo);
+  if (!Number.isFinite(total) || total <= 0) return null;
+  if (!Number.isFinite(libre) || libre < 0) return null;
+  const utilisee = Math.min(total, Math.max(0, total - libre));
+  return Math.round((utilisee / total) * 1000) / 10;
+}
+
+/**
+ * Écrit un relevé à partir de ce qu'un agent de poste vient d'envoyer.
+ *
+ * @returns {{ecrit: boolean, cpu: number|null, ram: number|null,
+ *            entrant: number|null, sortant: number|null}}
+ */
+async function enregistrerRelevePoste(idEquipement, corps, maintenant = Date.now()) {
+  /* Même piège que pour la mémoire : `Number(null)` vaut 0, et une
+     charge processeur non collectée serait devenue « 0 % », c'est-à-dire
+     une machine au repos. On écarte l'absence avant de convertir. */
+  const brutCpu = corps?.processeur_pourcent;
+  const cpu =
+    brutCpu === null || brutCpu === undefined || !Number.isFinite(Number(brutCpu))
+      ? null
+      : Number(brutCpu);
+
+  const ram = ramPourcent(corps?.sante);
+
+  let entrant = null;
+  let sortant = null;
+
+  if (Array.isArray(corps?.reseau) && corps.reseau.length > 0) {
+    /* La clé du cache de `traficService` est `${identifiant}:${index}`.
+       On passe l'identifiant d'équipement, comme le cycle central : deux
+       postes différents ne peuvent donc pas se mélanger les compteurs,
+       même s'ils ont tous les deux une carte d'index 12. */
+    const debits = calculerDebitsEquipement(
+      idEquipement,
+      corps.reseau.map((carte) => ({
+        index: carte.index,
+        nom: carte.nom,
+        inOctets: carte.in_octets,
+        outOctets: carte.out_octets,
+        vitesseMbps: carte.vitesse_mbps,
+      })),
+      maintenant
+    );
+    entrant = debits.total.entrant;
+    sortant = debits.total.sortant;
+  }
+
+  /* RIEN À ÉCRIRE, ON N'ÉCRIT PAS. Une ligne de relevé dont les quatre
+     colonnes sont nulles n'apprend rien et alourdit une table qui compte
+     déjà en millions de lignes. */
+  if (cpu === null && ram === null && entrant === null && sortant === null) {
+    return { ecrit: false, cpu, ram, entrant, sortant };
+  }
+
+  await db.query(
+    `INSERT INTO RELEVE (id_equipement, cpu_pourcent, ram_pourcent,
+                         trafic_entrant_kbps, trafic_sortant_kbps)
+     VALUES (?, ?, ?, ?, ?)`,
+    [idEquipement, cpu, ram, entrant, sortant]
+  );
+
+  return { ecrit: true, cpu, ram, entrant, sortant };
+}
+
 async function recevoirInventaire(idSite, corps) {
   const idEquipement = await trouverOuCreerEquipement(idSite, corps);
   if (!idEquipement) {
@@ -224,7 +339,48 @@ async function recevoirInventaire(idSite, corps) {
     ]
   );
 
-  return { id_equipement: idEquipement, logiciels: nbLogiciels, processus: nbProcessus };
+  /* LA SANTÉ ARRIVE PAR LE MÊME ENVOI, quand la source sait la lire.
+
+     Le script PowerShell la collecte sur la machine elle-même : il n'a
+     besoin d'aucun droit d'administration pour connaître la mémoire, les
+     disques, l'heure du dernier démarrage et l'état des services de
+     protection. Un envoi sans ce volet ne touche à rien — même règle que
+     partout : `null` veut dire « je n'ai pas regardé ». */
+  const santeEcrite = corps.sante
+    ? await enregistrerSantePoste(idEquipement, corps.sante, "agent").catch(() => false)
+    : false;
+
+  /* LE RELEVÉ NE DOIT JAMAIS FAIRE ÉCHOUER L'INVENTAIRE.
+
+     Ce sont deux choses différentes arrivées dans le même envoi. Une
+     base sans la colonne `cpu_pourcent`, un compteur illisible — rien de
+     tout ça ne justifie de perdre la liste des logiciels et des
+     processus, qui a coûté une collecte complète sur le poste. */
+  const releve = await enregistrerRelevePoste(idEquipement, corps).catch((err) => {
+    console.error("Relevé de poste non enregistré:", err.message);
+    return { ecrit: false };
+  });
+
+  /* LA TOPOLOGIE SUIT LA MÊME RÈGLE, POUR LA MÊME RAISON.
+
+     Les agents déjà déployés enverront ce volet dès leur mise à jour,
+     alors que le serveur peut encore tourner sur une base où les tables
+     du 2 octobre 2026 n'ont pas été créées. Si cet échec remontait,
+     une migration oubliée ferait perdre l'inventaire de tout le parc —
+     pour une carte qui n'est qu'un agrément. */
+  const topologie = await enregistrerTopologiePoste(idEquipement, corps.topologie).catch((err) => {
+    console.error("Topologie de poste non enregistrée:", err.message);
+    return { ecrit: false };
+  });
+
+  return {
+    id_equipement: idEquipement,
+    logiciels: nbLogiciels,
+    processus: nbProcessus,
+    sante: santeEcrite,
+    releve,
+    topologie,
+  };
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -381,13 +537,93 @@ async function enregistrerLogicielsSnmp(idEquipement, logiciels) {
  * @param {string} [source] `snmp` ou `wmi` — voir RANGS
  * @returns {Promise<{ecrit: boolean, raison?: string, processus?: number, logiciels?: number}>}
  */
+/* ═══════════════════════════════════════════════════════════════════════
+   LA SANTÉ DU POSTE — CE QU'UN INVENTAIRE NE DIT PAS.
+
+   Savoir quels logiciels sont installés ne dit pas si la machine va
+   bien. Quatre chiffres le disent : la mémoire qui reste, l'espace
+   disque qui reste, depuis quand la machine n'a pas redémarré, et l'état
+   des trois services qui la protègent.
+
+   LES CONCURRENTS OBTIENNENT ÇA EN INSTALLANT UN AGENT SUR CHAQUE POSTE.
+   Ici, la même voie WMI qui lit déjà les programmes en cours les rapporte
+   sans que rien ne soit installé ni ouvert sur les postes.
+
+   UNE SEULE LIGNE PAR ÉQUIPEMENT, remplacée à chaque relevé. Ce n'est pas
+   un historique : c'est un état, daté. L'historique de la charge existe
+   déjà, dans RELEVE, et pour les machines qui l'exposent.
+
+   TOUT VOLET ABSENT RESTE ABSENT. Un poste interrogé par DCOM peut donner
+   sa mémoire sans donner ses disques : on écrit ce qu'on a et on laisse
+   le reste à NULL, jamais à zéro — « 0 Go libres » serait une alerte, et
+   une fausse.
+   ═══════════════════════════════════════════════════════════════════════ */
+async function enregistrerSantePoste(idEquipement, sante, source) {
+  if (!sante) return false;
+
+  const entier = (v) => (Number.isFinite(Number(v)) ? Math.round(Number(v)) : null);
+  const liste = (v) => (Array.isArray(v) && v.length > 0 ? JSON.stringify(v) : null);
+
+  try {
+    await db.query(
+      `INSERT INTO SANTE_POSTE
+         (id_equipement, date_releve, source, memoire_totale_mo, memoire_libre_mo,
+          dernier_demarrage, disques, services, antivirus)
+       VALUES (?, NOW(), ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         date_releve       = VALUES(date_releve),
+         source            = VALUES(source),
+         memoire_totale_mo = COALESCE(VALUES(memoire_totale_mo), memoire_totale_mo),
+         memoire_libre_mo  = COALESCE(VALUES(memoire_libre_mo),  memoire_libre_mo),
+         dernier_demarrage = COALESCE(VALUES(dernier_demarrage), dernier_demarrage),
+         disques           = COALESCE(VALUES(disques),   disques),
+         services          = COALESCE(VALUES(services),  services),
+         antivirus         = COALESCE(VALUES(antivirus), antivirus)`,
+      [
+        idEquipement,
+        source,
+        entier(sante.memoire_totale_mo),
+        entier(sante.memoire_libre_mo),
+        sante.dernier_demarrage || null,
+        liste(sante.disques),
+        liste(sante.services),
+        liste(sante.antivirus),
+      ]
+    );
+    return true;
+  } catch (err) {
+    /* LA TABLE PEUT NE PAS EXISTER, et ce n'est pas une panne : une base
+       qui n'a pas encore reçu la migration du 25/09 doit continuer à
+       scanner et à inventorier normalement. On le dit une fois, au lieu
+       de faire échouer la lecture du poste. */
+    if (!santeAbsenteSignalee) {
+      santeAbsenteSignalee = true;
+      console.warn(
+        "Santé des postes non enregistrée : " +
+          err.message +
+          "\n   Si la table SANTE_POSTE manque, appliquez la migration " +
+          "2026-09-25-sante-poste.sql (node tools/appliquer-migrations.js)."
+      );
+    }
+    return false;
+  }
+}
+
+/** L'avertissement ci-dessus ne part qu'une fois par démarrage. */
+let santeAbsenteSignalee = false;
+
 async function enregistrerInventaireSnmp(idEquipement, releve, source = SOURCE_SNMP) {
   const { processus, logiciels } = releve || {};
 
   // Ni l'un ni l'autre : cette machine n'a rien dit. Rien à écrire, et
   // surtout rien à effacer — voir la note sur `null` dans
   // snmpInventaireLogiciel.
-  if (!processus && !logiciels) return { ecrit: false, raison: "aucune_reponse" };
+  const { sante } = releve || {};
+
+  // Ni l'un ni l'autre : cette machine n'a rien dit. La santé compte
+  // désormais comme une réponse à part entière — un poste peut donner sa
+  // mémoire et ses disques sans qu'on ait pu lire ses logiciels.
+  if (!processus && !logiciels && !sante) return { ecrit: false, raison: "aucune_reponse" };
 
   const [[etat]] = await db.query(
     "SELECT agent_poste_version FROM EQUIPEMENT WHERE id_equipement = ?",
@@ -413,6 +649,8 @@ async function enregistrerInventaireSnmp(idEquipement, releve, source = SOURCE_S
      sur les machines lues en SNMP. */
   const nbLogiciels = logiciels ? await enregistrerLogicielsSnmp(idEquipement, logiciels) : 0;
 
+  const santeEcrite = sante ? await enregistrerSantePoste(idEquipement, sante, source) : false;
+
   await db.query(
     `UPDATE EQUIPEMENT
         SET dernier_inventaire_poste = NOW(),
@@ -432,7 +670,7 @@ async function enregistrerInventaireSnmp(idEquipement, releve, source = SOURCE_S
      La réécrire ici ne ferait que la dupliquer, et prétendre qu'un agent
      est installé là où il n'y en a pas. */
 
-  return { ecrit: true, processus: nbProcessus, logiciels: nbLogiciels };
+  return { ecrit: true, processus: nbProcessus, logiciels: nbLogiciels, sante: santeEcrite };
 }
 
 /** Ce qu'on sait de l'intérieur d'une machine, et depuis quand. */
@@ -480,6 +718,40 @@ async function inventaireDeLEquipement(idEquipement) {
     [idEquipement]
   );
 
+  /* Lue à part, et sans jamais faire échouer la fiche : une base sans la
+     table rend simplement `null`, que l'interface traite comme « pas
+     encore relevé ». */
+  let sante = null;
+  try {
+    const [[ligne]] = await db.query(
+      `SELECT date_releve, source, memoire_totale_mo, memoire_libre_mo,
+              dernier_demarrage, disques, services, antivirus
+         FROM SANTE_POSTE WHERE id_equipement = ?`,
+      [idEquipement]
+    );
+    if (ligne) {
+      /* Selon la version de MySQL et du pilote, une colonne JSON revient
+         déjà analysée ou sous forme de texte. On accepte les deux. */
+      const lire = (v) => {
+        if (!v) return null;
+        if (typeof v !== "string") return v;
+        try {
+          return JSON.parse(v);
+        } catch {
+          return null;
+        }
+      };
+      sante = {
+        ...ligne,
+        disques: lire(ligne.disques),
+        services: lire(ligne.services),
+        antivirus: lire(ligne.antivirus),
+      };
+    }
+  } catch {
+    sante = null; // table absente : voir enregistrerSantePoste
+  }
+
   const collecteur = equipement.agent_poste_version;
   const source =
     collecteur === SOURCE_SNMP ? "snmp" : collecteur === SOURCE_WMI ? "wmi" : "agent";
@@ -517,12 +789,14 @@ async function inventaireDeLEquipement(idEquipement) {
     dernier_inventaire: equipement.dernier_inventaire_poste,
     agent_version: source === "agent" ? collecteur : null,
     limites: LIMITES[source],
+    sante,
     logiciels,
     processus,
   };
 }
 
 module.exports = {
+  enregistrerRelevePoste,
   recevoirInventaire,
   inventaireDeLEquipement,
   trouverOuCreerEquipement,
@@ -531,6 +805,7 @@ module.exports = {
   // Relevés à distance — sans agent. Voir l'en-tête du bloc correspondant.
   enregistrerInventaireSnmp,
   enregistrerLogicielsSnmp,
+  enregistrerSantePoste,
   SOURCE_SNMP,
   SOURCE_WMI,
   rangSource,

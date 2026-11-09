@@ -9,11 +9,17 @@
 const cron = require("node-cron");
 const ping = require("ping");
 const db = require("../db");
+const reglesAlerte = require("./reglesAlerteService");
+const { planDuSite } = require("./planAdressageService");
 const { notifierAlerte } = require("./notificationService");
 const { snmpProbe, diagnosePanne, snmpMetrics } = require("./discoveryService");
 const { passagePlanificateur } = require("./rapportPlanifieService");
 const { diffuser } = require("./tempsReelService");
-const { calculerDebitsEquipement, oublier: oublierTrafic } = require("./traficService");
+const {
+  calculerDebitsEquipement,
+  oublier: oublierTrafic,
+  memoriserInterfaces,
+} = require("./traficService");
 const { purgerAdressesSansPreuve } = require("./inventaireService");
 const { SEUIL_ALERTE_JOURS } = require("./certificatService");
 const { purgerObservations } = require("./observationDnsDepot");
@@ -104,6 +110,9 @@ const METRIQUES_CHARGE = [
     colonne: "cpu_pourcent",
     type: "cpu_eleve",
     libelle: "processeur",
+    // Le code lu dans REGLE_ALERTE. Distinct de `type`, qui nomme
+    // l'alerte produite : l'un règle, l'autre raconte.
+    codeRegle: "cpu",
     seuilDe: (cfg) => cfg.seuilCpu,
   },
   {
@@ -112,6 +121,7 @@ const METRIQUES_CHARGE = [
     colonne: "ram_pourcent",
     type: "ram_elevee",
     libelle: "mémoire vive",
+    codeRegle: "memoire",
     seuilDe: (cfg) => cfg.seuilRam,
   },
 ];
@@ -200,12 +210,28 @@ async function evaluerSeuilsCharge(equipement, metrics, cfg) {
     }
 
     const v = Number(valeur);
-    const seuil = m.seuilDe(cfg);
+
+    /* ── LE RÉGLAGE DE L'ÉCRAN PASSE AVANT LA CONFIGURATION ──
+       `seuil_cpu_pourcent` et consorts restent le repli : une base sans
+       la table de règles se comporte exactement comme avant. */
+    const regle = await reglesAlerte.regle(m.codeRegle, "tous");
+    if (!regle.active) {
+      depassements.delete(`${equipement.id_equipement}:${m.cle}`);
+      continue;
+    }
+
+    const seuil = Number.isFinite(regle.seuil) && regle.seuil !== null
+      ? regle.seuil
+      : m.seuilDe(cfg);
+    const relevesRequis =
+      Number.isFinite(regle.releves_requis) && regle.releves_requis
+        ? regle.releves_requis
+        : cfg.relevesAvantAlerte;
     const seuilResolution = Math.max(0, seuil - cfg.margeHysteresis);
 
     if (v >= seuil) {
       const n = compteurDepassement(equipement.id_equipement, m.cle, true);
-      if (n === cfg.relevesAvantAlerte) {
+      if (n === relevesRequis) {
         // Strictement égal : on n'alerte qu'au relevé qui franchit le compte,
         // pas à chaque relevé suivant.
         if (await estLePointNormal(equipement.id_equipement, m.colonne, seuil)) {
@@ -214,7 +240,7 @@ async function evaluerSeuilsCharge(equipement, metrics, cfg) {
               `n'est jamais descendue sous ${seuil} % ; état normal de la machine, pas d'alerte.`
           );
         } else {
-          await creerAlerteCharge(equipement, m, v, seuil, n);
+          await creerAlerteCharge(equipement, m, v, seuil, n, regle.niveau);
         }
       }
     } else if (v < seuilResolution) {
@@ -226,7 +252,7 @@ async function evaluerSeuilsCharge(equipement, metrics, cfg) {
   }
 }
 
-async function creerAlerteCharge(equipement, metrique, valeur, seuil, nbReleves) {
+async function creerAlerteCharge(equipement, metrique, valeur, seuil, nbReleves, niveau = "warning") {
   // Le dédoublonnage est assuré par creerAlerte() : on ne fait plus de
   // contrôle d'existence ici, sinon le compteur d'occurrences ne
   // s'incrémenterait jamais pour les alertes de charge.
@@ -234,11 +260,12 @@ async function creerAlerteCharge(equipement, metrique, valeur, seuil, nbReleves)
   await creerAlerte(
     equipement,
     metrique.type,
-    // NIVEAU 'warning' et non 'critical' : une charge élevée n'est pas une
-    // panne. L'équipement répond, le service rendu est peut-être dégradé mais
-    // pas interrompu. Réserver 'critical' à l'indisponibilité garde au niveau
-    // sa valeur de signal — si tout est critique, plus rien ne l'est.
-    "warning",
+    /* 'warning' reste le DÉFAUT, et pour une bonne raison : une charge
+       élevée n'est pas une panne, l'équipement répond. Réserver
+       'critical' à l'indisponibilité garde au niveau sa valeur de signal
+       — si tout est critique, plus rien ne l'est. L'exploitant peut en
+       décider autrement depuis l'écran des règles ; c'est son parc. */
+    niveau,
     `Charge ${metrique.libelle} élevée sur ${nom} : ${valeur.toFixed(0)} % ` +
       `(seuil ${seuil} %) sur ${nbReleves} relevés consécutifs.`,
     metrique.type
@@ -279,6 +306,147 @@ const PREUVES_DE_VIE = ["pare_feu_probable", "refus_tcp", "voisinage_arp"];
  *  et résumé en une ligne à la fin de chaque cycle — voir cycleSupervision. */
 const compteurPreuves = { pare_feu_probable: 0, refus_tcp: 0, voisinage_arp: 0 };
 
+/* ═══════════════════════════════════════════════════════════════════════
+   QUI A LE DROIT DE DÉCLENCHER UNE ALERTE EN DISPARAISSANT.
+
+   Ces types-là doivent rester allumés : leur silence est un incident.
+   Un poste de travail, non — il s'éteint le soir, pendant les congés, et
+   quand son utilisateur part en réunion.
+
+   « inconnu » ne figure pas dans la liste, et c'est cohérent avec le
+   reste de la plateforme : on n'affirme pas une panne sur une machine
+   dont on ne sait même pas ce qu'elle est. Elle reste visible hors
+   ligne, et la case de sa fiche permet de trancher à la main.
+   ═══════════════════════════════════════════════════════════════════════ */
+const TYPES_TOUJOURS_ALLUMES = new Set([
+  "serveur",
+  "imprimante",
+  "routeur",
+  "routeur/switch",
+  "pare-feu",
+  "camera",
+  "telephonie",
+]);
+
+/** L'avertissement de colonne absente ne part qu'une fois. */
+let colonneSurveillanceSignalee = false;
+
+/**
+ * Vrai si la disparition de cette machine mérite une alerte.
+ *
+ * LE CHOIX EXPLICITE PRIME SUR LE TYPE. `surveillance_permanente` vaut
+ * NULL tant que personne n'a rien dit — on suit alors le type. Mise à 1
+ * ou à 0, elle tranche, y compris contre le type : un poste qui pilote
+ * une machine de production doit alerter, un vieux serveur d'essai non.
+ *
+ * NE LÈVE JAMAIS. Une base sans la colonne du 25/09 retombe sur le type
+ * seul, et le dit une fois. Le pire serait qu'une question de confort
+ * d'affichage casse la supervision elle-même.
+ */
+async function doitAlerterSiHorsLigne(equipement) {
+  const parLeType = (libelle) =>
+    TYPES_TOUJOURS_ALLUMES.has(String(libelle || "inconnu").toLowerCase());
+
+  try {
+    const [[ligne]] = await db.query(
+      `SELECT e.surveillance_permanente AS choix,
+              COALESCE(t.libelle, 'inconnu') AS type_libelle
+         FROM EQUIPEMENT e
+         LEFT JOIN TYPE_EQUIPEMENT t ON t.id_type = e.id_type
+        WHERE e.id_equipement = ?`,
+      [equipement.id_equipement]
+    );
+    if (!ligne) return false;
+
+    /* LA RÈGLE DE L'ÉCRAN « ALERTES » DÉCIDE, et l'exception portée par
+       la machine la surcharge. Le service de règles retombe de lui-même
+       sur le comportement d'origine si la table manque : rien ici n'a
+       besoin de le savoir. */
+    const decision = await reglesAlerte.alerteHorsLigne(ligne.type_libelle, ligne.choix);
+    return decision.active;
+  } catch (err) {
+    if (!colonneManquante(err)) throw err;
+
+    if (!colonneSurveillanceSignalee) {
+      colonneSurveillanceSignalee = true;
+      console.warn(
+        "\n⚠  EQUIPEMENT.surveillance_permanente est absente de la base.\n" +
+          "   Les alertes hors ligne suivent le type seul ; le réglage par\n" +
+          "   machine est sans effet. Pour l'activer :\n" +
+          "   backend/migrations/2026-09-25-surveillance-permanente.sql\n"
+      );
+    }
+
+    const [[ligne]] = await db.query(
+      `SELECT COALESCE(t.libelle, 'inconnu') AS type_libelle
+         FROM EQUIPEMENT e
+         LEFT JOIN TYPE_EQUIPEMENT t ON t.id_type = e.id_type
+        WHERE e.id_equipement = ?`,
+      [equipement.id_equipement]
+    );
+    return parLeType(ligne?.type_libelle);
+  }
+}
+
+/** La gravité à donner à « ne répond plus », selon la règle de son type. */
+async function niveauHorsLigne(equipement) {
+  try {
+    const [[ligne]] = await db.query(
+      `SELECT COALESCE(t.libelle, 'inconnu') AS type_libelle
+         FROM EQUIPEMENT e
+         LEFT JOIN TYPE_EQUIPEMENT t ON t.id_type = e.id_type
+        WHERE e.id_equipement = ?`,
+      [equipement.id_equipement]
+    );
+    const r = await reglesAlerte.regle(
+      "equipement_down",
+      String(ligne?.type_libelle || "inconnu").toLowerCase()
+    );
+    return r.niveau || "critical";
+  } catch {
+    // Une gravité par défaut vaut mieux qu'une alerte qui n'existe pas.
+    return "critical";
+  }
+}
+
+/**
+ * Sème dans traficService les interfaces à écarter du total, lues dans
+ * INTERFACE_RESEAU.
+ *
+ * Mémorisé une heure par équipement : un nom d'interface ne change qu'à
+ * une mise à jour de micrologiciel. Sans ce cache, on ajouterait une
+ * requête par équipement et par minute — exactement le genre de coût
+ * qu'on vient de retirer ailleurs.
+ *
+ * NE LÈVE JAMAIS. Si la lecture échoue, on repart sur ce que traficService
+ * sait déjà : au pire le comportement d'avant la correction, jamais une
+ * supervision interrompue.
+ */
+const SEMIS_TTL_MS = 60 * 60 * 1000;
+const MAX_SEMIS_SUIVIS = 10000;
+const dernierSemis = new Map(); // id_equipement -> horodatage
+
+async function semerInterfacesIgnorees(idEquipement) {
+  const maintenant = Date.now();
+  const precedent = dernierSemis.get(idEquipement);
+  if (precedent && maintenant - precedent < SEMIS_TTL_MS) return;
+
+  // Plafond : un parc ne dépasse pas ce nombre, mais une carte sans borne
+  // sur un processus qui tourne des mois finit toujours par coûter.
+  if (dernierSemis.size >= MAX_SEMIS_SUIVIS) dernierSemis.clear();
+  dernierSemis.set(idEquipement, maintenant);
+
+  try {
+    const [rows] = await db.query(
+      "SELECT index_snmp, nom FROM INTERFACE_RESEAU WHERE id_equipement = ? AND nom IS NOT NULL",
+      [idEquipement]
+    );
+    if (rows.length > 0) memoriserInterfaces(idEquipement, rows);
+  } catch {
+    /* Table ou colonne absente : rien à semer, la supervision continue. */
+  }
+}
+
 async function checkEquipement(equipement, cfg) {
   const res = await ping.promise.probe(equipement.adresse_ip, { timeout: 2 });
 
@@ -314,6 +482,20 @@ async function checkEquipement(equipement, cfg) {
     const snmpData = await snmpProbe(equipement.adresse_ip);
     if (snmpData) {
       const metrics = await snmpMetrics(equipement.adresse_ip);
+
+      /* ── LES NOMS D'INTERFACE VIENNENT DE LA BASE, PAS DU RÉSEAU ──
+
+         `snmpMetrics` sans inventaire ne lit pas `ifDescr` : ses interfaces
+         n'ont pas de nom, et la boucle locale entrait donc dans le total —
+         jusqu'à quatre-vingt-seize fois le débit réel sur une imprimante.
+
+         Demander l'inventaire à chaque cycle corrigerait le chiffre au prix
+         de cinq colonnes SNMP de plus par équipement et par minute. Inutile :
+         le scan a déjà écrit ces noms dans INTERFACE_RESEAU, et ils ne
+         changent pas. On les sème depuis la base, une fois par heure et par
+         équipement, et `traficService` s'en souvient pour tous les cycles
+         suivants. Aucun paquet SNMP supplémentaire. */
+      await semerInterfacesIgnorees(equipement.id_equipement);
 
       // Débit calculé sur TOUTES les interfaces, plus le total de
       // l'équipement. Auparavant seule `interfaces[0]` était mesurée : la
@@ -472,12 +654,22 @@ async function checkEquipement(equipement, cfg) {
        alerte. Le silence n'est ignoré que tant qu'il est TOTAL depuis
        l'origine.
        ═══════════════════════════════════════════════════════════════ */
+    /* `SELECT 1 … LIMIT 1` et non `COUNT(*)` : la question est binaire —
+       « existe-t-il au moins un relevé ? ». Un COUNT parcourt TOUTES les
+       entrées d'index de la machine, soit environ 43 000 après trente
+       jours de rétention, et il tourne à chaque cycle pour chaque machine
+       hors ligne. Sur un parc où deux cents postes sont éteints la nuit,
+       cela faisait plusieurs millions d'entrées parcourues par minute
+       pour répondre oui ou non. */
     const [[preuve]] = await db.query(
-      "SELECT COUNT(*) AS n FROM RELEVE WHERE id_equipement = ?",
+      "SELECT 1 AS n FROM RELEVE WHERE id_equipement = ? LIMIT 1",
       [equipement.id_equipement]
     );
 
-    if (Number(preuve.n) === 0) {
+    /* `LIMIT 1` ne renvoie AUCUNE ligne quand il n'y a pas de relevé —
+       là où `COUNT(*)` en renvoyait toujours une, avec zéro. Le test porte
+       donc sur l'absence de ligne, pas sur la valeur. */
+    if (!preuve) {
       if (equipement.statut !== "inconnu") {
         console.log(
           `Supervision — ${equipement.adresse_ip} n'a jamais répondu depuis sa ` +
@@ -498,12 +690,44 @@ async function checkEquipement(equipement, cfg) {
       return;
     }
 
+    /* ── UN POSTE ÉTEINT N'EST PAS UNE PANNE ──
+
+       Le changement d'état est enregistré dans tous les cas : la fiche et
+       les listes montrent bien la machine hors ligne. Ce qui dépend du
+       rôle, c'est l'ALERTE — c'est-à-dire le fait de réveiller quelqu'un.
+
+       Un employé qui éteint son poste le soir produisait jusqu'ici une
+       alerte critique. Multiplié par le parc, cela apprenait à
+       l'exploitant que le rouge ne veut rien dire, et noyait la seule
+       alerte qui comptait. */
+    const alerter = await doitAlerterSiHorsLigne(equipement);
+
     if (equipement.statut !== "down") {
-      await creerAlerte(
-        equipement, "equipement_down", "critical",
-        `L'équipement ${equipement.nom || equipement.adresse_ip} ne répond plus. ${diagnostic.detail}`,
-        diagnostic.code
-      );
+      if (alerter) {
+        /* LA GRAVITÉ VIENT DE LA RÈGLE. Une imprimante éteinte et un
+           serveur tombé n'ont pas la même urgence, et c'est l'exploitant
+           qui doit pouvoir le dire — pas le code. */
+        const niveau = await niveauHorsLigne(equipement);
+        await creerAlerte(
+          equipement, "equipement_down", niveau,
+          `L'équipement ${equipement.nom || equipement.adresse_ip} ne répond plus. ${diagnostic.detail}`,
+          diagnostic.code
+        );
+      } else {
+        console.log(
+          `Supervision — ${equipement.adresse_ip} est hors ligne : poste de ` +
+            "travail, aucune alerte (« surveiller en permanence » sur sa fiche " +
+            "pour en créer une)."
+        );
+      }
+    }
+
+    /* Une alerte ouverte AVANT ce changement de règle, ou avant qu'on
+       décoche « surveiller en permanence », affirme une panne que la
+       plateforme ne considère plus comme telle. On la clôture au lieu de
+       la laisser vivre sa vie. */
+    if (!alerter) {
+      await resoudreAlertes(equipement.id_equipement, "equipement_down");
     }
     await db.query("UPDATE EQUIPEMENT SET statut = 'down', echecs_consecutifs = ? WHERE id_equipement = ?", [echecs, equipement.id_equipement]);
     diffuser(equipement.id_site ?? null, "equipement", {
@@ -674,7 +898,7 @@ async function enregistrerDebitsInterfaces(idEquipement, parInterface) {
 async function resoudreAlertes(idEquipement, type) {
   await db.query(
     `UPDATE ALERTE SET statut = 'resolue', date_resolution = NOW()
-     WHERE id_equipement = ? AND type_alerte = ? AND statut = 'active'`,
+     WHERE id_equipement = ? AND type_alerte = ? AND statut IN ('active', 'traitee')`,
     [idEquipement, type]
   );
 }
@@ -725,7 +949,18 @@ async function creerAlerteSite(site, type, niveau, message, causeCode = null) {
  * le premier push d'un agent suffit à l'inscrire à la surveillance.
  */
 async function verifierAgents() {
-  const seuilMinutes = await getConfig("seuil_agent_muet_minutes", 30);
+  /* Le seuil et la gravité viennent de la règle « agent muet » de l'écran
+     Alertes ; `seuil_agent_muet_minutes` reste le repli pour une base qui
+     n'a pas encore la table des règles. */
+  const regleAgent = await reglesAlerte.regle("agent_muet", "tous");
+  const seuilMinutes =
+    regleAgent.seuil && Number.isFinite(regleAgent.seuil)
+      ? regleAgent.seuil
+      : await getConfig("seuil_agent_muet_minutes", 30);
+
+  // Règle éteinte : on ne surveille plus le silence des agents. C'est un
+  // choix discutable, donc il appartient à l'exploitant, pas au code.
+  if (!regleAgent.active) return;
 
   // Même colonne, même repli : sans elle, aucun agent muet ne peut être
   // détecté — mais ce n'est pas une raison pour faire échouer le cycle.
@@ -759,7 +994,7 @@ async function verifierAgents() {
     await creerAlerteSite(
       site,
       "agent_muet",
-      "critical",
+      regleAgent.niveau || "critical",
       `L'agent du site « ${site.nom} » (${site.ville}) n'a rien transmis depuis ${duree}. ` +
         `L'état des équipements de ce site n'est plus observable : ils sont passés en « inconnu ».`,
       "agent_muet"
@@ -786,7 +1021,7 @@ async function verifierAgents() {
        JOIN EQUIPEMENT e ON e.id_equipement = a.id_equipement
        SET a.statut = 'resolue', a.date_resolution = NOW()
        WHERE a.type_alerte = 'equipement_down'
-         AND a.statut = 'active'
+         AND a.statut IN ('active', 'traitee')
          AND e.id_site = ?`,
       [site.id_site]
     );
@@ -864,7 +1099,7 @@ async function verifierAgents() {
      JOIN SITE s ON s.id_site = a.id_site
      SET a.statut = 'resolue', a.date_resolution = NOW()
      WHERE a.type_alerte = 'agent_muet'
-       AND a.statut = 'active'
+       AND a.statut IN ('active', 'traitee')
        AND s.dernier_push IS NOT NULL
        AND TIMESTAMPDIFF(MINUTE, s.dernier_push, NOW()) < ?`,
     [seuilMinutes]
@@ -881,7 +1116,7 @@ async function verifierAgents() {
        JOIN SITE s ON s.id_site = a.id_site
        SET a.statut = 'resolue', a.date_resolution = NOW()
        WHERE a.type_alerte = 'agent_muet'
-         AND a.statut = 'active'
+         AND a.statut IN ('active', 'traitee')
          AND s.supervision_par_agent = FALSE`
     )
     .catch((err) => {
@@ -1000,6 +1235,247 @@ async function verifierCertificats() {
       // finit par ne plus être lu du tout.
       await resoudreAlertes(c.id_equipement, "certificat_expire");
       await resoudreAlertes(c.id_equipement, "certificat_expire_bientot");
+    }
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   DEUX ALERTES QUE LE PLAN D'ADRESSAGE EST SEUL À POUVOIR LEVER.
+
+   1. UNE PLAGE PRESQUE PLEINE. Un responsable réseau découvre d'habitude
+      qu'il n'a plus d'adresses le jour où une machine ne peut plus se
+      connecter — c'est-à-dire trop tard, et au pire moment. Le compte est
+      là, dans le plan ; il suffisait de le regarder.
+
+   2. UNE MACHINE POSÉE SUR UNE ZONE RÉSERVÉE. Typiquement une adresse
+      fixe donnée à la main dans le pool DHCP. Ça marche, jusqu'au jour où
+      le DHCP attribue la même adresse à quelqu'un d'autre. La panne qui
+      suit est intermittente, et on la cherche du côté du câble.
+
+   LES DEUX SONT RÉGLABLES depuis l'écran Alertes, comme les autres :
+   niveau, seuil, et interrupteur. Une règle éteinte n'est pas évaluée du
+   tout — pas « évaluée en silence ».
+
+   NE LÈVE JAMAIS : ni une plage illisible, ni une base sans les tables du
+   28/09 ne doivent interrompre les autres tâches planifiées.
+   ═══════════════════════════════════════════════════════════════════════ */
+async function evaluerPlansDAdressage() {
+  const reglePlage = await reglesAlerte.regle("plage_presque_pleine", "tous");
+  const regleZone = await reglesAlerte.regle("adresse_sur_zone_reservee", "tous");
+  if (!reglePlage.active && !regleZone.active) return;
+
+  const seuilPourcent =
+    Number.isFinite(reglePlage.seuil) && reglePlage.seuil !== null ? reglePlage.seuil : 10;
+
+  const [sites] = await db.query("SELECT id_site, nom FROM SITE");
+
+  for (const site of sites) {
+    let plans = [];
+    try {
+      plans = await planDuSite(site.id_site);
+    } catch (err) {
+      console.error(`Plan d'adressage du site ${site.id_site} illisible:`, err.message);
+      continue;
+    }
+
+    for (const plan of plans) {
+      if (plan.erreur) continue;
+
+      // ── 1. La place qui reste ──
+      if (reglePlage.active && plan.total_attribuables > 0) {
+        const partLibre = (plan.nb_libres / plan.total_attribuables) * 100;
+
+        if (partLibre <= seuilPourcent) {
+          await creerAlerteSite(
+            site,
+            `plage_pleine_${plan.cidr}`,
+            reglePlage.niveau || "warning",
+            `La plage ${plan.cidr} n'a plus que ${plan.nb_libres} adresse(s) libre(s) ` +
+              `sur ${plan.total_attribuables} (${partLibre.toFixed(0)} %). ` +
+              `Le plus grand bloc d'un seul tenant fait ${plan.plus_grand_bloc_libre ?? "?"} adresse(s).`,
+            "plage_presque_pleine"
+          );
+        } else {
+          /* LA RÉSOLUTION EST AUSSI IMPORTANTE QUE L'ALERTE. Une plage
+             qu'on a désencombrée — machines retirées, zone réservée
+             supprimée — doit voir son alerte se refermer, sinon l'écran
+             garde un problème réglé. */
+          await db.query(
+            `UPDATE ALERTE SET statut = 'resolue', date_resolution = NOW()
+              WHERE id_site = ? AND type_alerte = ? AND statut IN ('active', 'traitee')`,
+            [site.id_site, `plage_pleine_${plan.cidr}`]
+          );
+        }
+      }
+
+      // ── 2. Les machines posées sur une zone réservée ──
+      if (regleZone.active) {
+        const occupants = plan.occupants_de_zones_reservees || [];
+
+        for (const o of occupants) {
+          if (!o.id_equipement) continue;
+          await creerAlerte(
+            { id_equipement: o.id_equipement, id_site: site.id_site, nom: o.nom, adresse_ip: o.adresse },
+            "adresse_sur_zone_reservee",
+            regleZone.niveau || "warning",
+            `${o.nom || o.adresse} occupe ${o.adresse}, dans une zone réservée : ` +
+              `« ${o.motif} ». Tant que la zone est distribuée par un autre mécanisme — ` +
+              "un serveur DHCP, par exemple — cette adresse peut être attribuée deux fois.",
+            "adresse_sur_zone_reservee"
+          );
+        }
+
+        /* Les machines qui ONT ÉTÉ déplacées hors d'une zone réservée
+           voient leur alerte se refermer. On compare sur la liste du
+           passage courant : ce qui n'y est plus n'est plus en conflit. */
+        const encoreEnConflit = new Set(occupants.map((o) => o.id_equipement).filter(Boolean));
+        const [ouvertes] = await db.query(
+          `SELECT a.id_alerte, a.id_equipement FROM ALERTE a
+             JOIN EQUIPEMENT e ON e.id_equipement = a.id_equipement
+            WHERE a.type_alerte = 'adresse_sur_zone_reservee'
+              AND a.statut = 'active' AND e.id_site = ?`,
+          [site.id_site]
+        );
+        for (const a of ouvertes) {
+          if (!encoreEnConflit.has(a.id_equipement)) {
+            await resoudreAlertes(a.id_equipement, "adresse_sur_zone_reservee");
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Supprime par lots, sans jamais tenir la table longtemps.
+ *
+ * Un `DELETE` d'un seul bloc sur plusieurs centaines de milliers de lignes
+ * pose un verrou InnoDB de plusieurs secondes — pendant lesquelles le
+ * cycle de supervision n'écrit plus ses relevés. La purge des relevés
+ * était déjà écrite ainsi ; les nouvelles suivent la même règle.
+ */
+async function supprimerParLots(sql, params, libelle) {
+  let total = 0;
+  for (let lot = 0; lot < MAX_LOTS_PAR_PASSAGE; lot++) {
+    const [r] = await db.query(sql, [...params, TAILLE_LOT_PURGE]);
+    total += r.affectedRows;
+    if (r.affectedRows < TAILLE_LOT_PURGE) break;
+  }
+  if (total > 0) {
+    console.log(
+      `Purge — ${libelle} : ${total} ligne(s) supprimée(s).` +
+        (total >= TAILLE_LOT_PURGE * MAX_LOTS_PAR_PASSAGE
+          ? " Plafond du passage atteint, la purge reprendra à la prochaine heure."
+          : "")
+    );
+  }
+  return total;
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════
+ * REFERMER LES INCIDENTS, PUIS EFFACER CE QUI A ASSEZ VÉCU
+ *
+ * ── D'ABORD LES INCIDENTS, ET C'EST LE PLUS IMPORTANT ──
+ *
+ * `escaladeIncidents()` ouvre un incident pour toute alerte critique de
+ * plus de quinze minutes. RIEN ne le refermait quand l'alerte se
+ * résolvait : les seules écritures sur `INCIDENT.statut` étaient une
+ * action manuelle et la réinitialisation générale.
+ *
+ * Un serveur qui redémarre chaque nuit produisait donc un incident ouvert
+ * par nuit, pour un problème disparu à trois heures du matin. En quelques
+ * semaines, l'écran Incidents devenait une liste de dossiers morts — et
+ * le seul incident réel s'y perdait. Un outil qui crie tout le temps
+ * n'est plus écouté, c'est le raisonnement que la plateforme applique
+ * partout ailleurs.
+ *
+ * La fermeture se fait ICI, par une seule requête qui rattrape tous les
+ * chemins de résolution, plutôt qu'en quatre appels dispersés qu'un
+ * cinquième chemin futur oublierait.
+ *
+ * ── CE QUI EST GARDÉ, ET COMBIEN DE TEMPS ──
+ *
+ * Les durées sont dans CONFIGURATION, modifiables depuis l'écran. Voir la
+ * migration 2026-09-28-retentions.sql pour le raisonnement derrière
+ * chacune.
+ *
+ * Les incidents n'ont pas de durée propre : ils partent avec leur alerte,
+ * par la cascade déjà déclarée. Un incident sans son alerte n'aurait
+ * aucun sens.
+ *
+ * NE LÈVE JAMAIS. Chaque étape est indépendante : une table absente —
+ * migration non passée — ne doit pas empêcher les autres purges. C'est la
+ * même leçon que la vérification des certificats, qui mourait en silence
+ * parce qu'elle partageait un `try` avec autre chose.
+ */
+async function purgerHistoriques() {
+  // 1. Refermer les incidents dont l'alerte est résolue.
+  try {
+    const [r] = await db.query(
+      `UPDATE INCIDENT i
+         JOIN ALERTE a ON a.id_alerte = i.id_alerte
+          SET i.statut = 'ferme', i.date_fermeture = COALESCE(a.date_resolution, NOW())
+        WHERE i.statut <> 'ferme'
+          AND a.statut = 'resolue'`
+    );
+    if (r.affectedRows > 0) {
+      console.log(
+        `Incidents — ${r.affectedRows} dossier(s) refermé(s) : leur alerte est résolue.`
+      );
+    }
+  } catch (err) {
+    console.error("Fermeture automatique des incidents ignorée:", err.message);
+  }
+
+  // 2. Alertes résolues trop anciennes. Les incidents suivent par cascade.
+  try {
+    const jours = await getConfig("retention_alertes_resolues_jours", 90);
+    if (Number.isFinite(jours) && jours > 0) {
+      await supprimerParLots(
+        `DELETE FROM ALERTE
+          WHERE statut = 'resolue'
+            AND date_resolution IS NOT NULL
+            AND date_resolution < NOW() - INTERVAL ? DAY
+          LIMIT ?`,
+        [jours],
+        `alertes résolues de plus de ${jours} jours`
+      );
+    }
+  } catch (err) {
+    console.error("Purge des alertes ignorée:", err.message);
+  }
+
+  // 3. Journal d'activité. Durée longue : il sert de preuve.
+  try {
+    const jours = await getConfig("retention_journal_jours", 365);
+    if (Number.isFinite(jours) && jours > 0) {
+      await supprimerParLots(
+        "DELETE FROM LOG_ACTIVITE WHERE date_log < NOW() - INTERVAL ? DAY LIMIT ?",
+        [jours],
+        `journal de plus de ${jours} jours`
+      );
+    }
+  } catch (err) {
+    console.error("Purge du journal ignorée:", err.message);
+  }
+
+  /* 4. Logiciels qu'aucun inventaire n'a revus depuis longtemps.
+        Ici la purge ne libère pas que de la place : elle rétablit la
+        justesse de la fiche, qui affichait trois versions d'un même
+        navigateur dont deux désinstallées depuis des mois. */
+  try {
+    const jours = await getConfig("retention_logiciels_jours", 60);
+    if (Number.isFinite(jours) && jours > 0) {
+      await supprimerParLots(
+        "DELETE FROM LOGICIEL_INSTALLE WHERE derniere_vue < NOW() - INTERVAL ? DAY LIMIT ?",
+        [jours],
+        `logiciels non revus depuis ${jours} jours`
+      );
+    }
+  } catch (err) {
+    if (!/doesn't exist|Unknown column/i.test(err.message)) {
+      console.error("Purge de l'inventaire logiciel ignorée:", err.message);
     }
   }
 }
@@ -1383,14 +1859,50 @@ function start() {
     if (agentsEnCours) return;
     try {
       agentsEnCours = true;
-      await verifierAgents();
-      // Même passage que les agents : les deux sont de simples lectures,
-      // et un certificat ne change pas d'état en moins de cinq minutes.
-      await verifierCertificats();
+
+      /* ── DEUX `try` ET NON UN SEUL ──
+
+         Les deux vérifications partagent le même passage parce qu'elles
+         ont la même cadence, PAS parce qu'elles dépendent l'une de
+         l'autre.
+
+         Dans un `try` commun, une exception de `verifierAgents` — par
+         exemple `creerAlerteSite` sur une base à laquelle il manque une
+         colonne — empêchait `verifierCertificats` d'être seulement
+         atteinte. La seule fonction de la plateforme qui prévienne AVANT
+         la panne mourait donc en silence, et un certificat expirait sans
+         que rien ne soit dit, alors que l'information était connue des
+         mois à l'avance.
+
+         Une vérification qui échoue ne doit jamais en éteindre une
+         autre. */
+      try {
+        await verifierAgents();
+      } catch (err) {
+        console.error("Erreur de vérification des agents:", err.message);
+      }
+
+      try {
+        await verifierCertificats();
+      } catch (err) {
+        console.error("Erreur de vérification des certificats:", err.message);
+      }
     } catch (err) {
-      console.error("Erreur de vérification des agents:", err.message);
+      console.error("Erreur du passage agents/certificats:", err.message);
     } finally {
       agentsEnCours = false;
+    }
+  });
+
+  /* ── LE PLAN D'ADRESSAGE, UNE FOIS PAR HEURE ──
+     À la 35e minute, pour ne croiser ni la supervision, ni les rapports,
+     ni la purge. Un plan ne change pas en cinq minutes : le calculer plus
+     souvent coûterait sans rien apprendre. */
+  cron.schedule("35 * * * *", async () => {
+    try {
+      await evaluerPlansDAdressage();
+    } catch (err) {
+      console.error("Évaluation du plan d'adressage échouée:", err.message);
     }
   });
 
@@ -1450,6 +1962,12 @@ function start() {
             `${obs.signaux} signal(aux) effacé(s) (rétention ${obs.jours} jour(s)).`
         );
       }
+
+      /* Alertes, journal, inventaire logiciel — et la fermeture des
+         incidents dont l'alerte est résolue. Même passage horaire, même
+         verrou : c'est du ménage, il n'a aucune raison d'avoir son propre
+         planificateur. */
+      await purgerHistoriques();
     } catch (err) {
       console.error("Erreur de purge des relevés:", err.message);
     } finally {

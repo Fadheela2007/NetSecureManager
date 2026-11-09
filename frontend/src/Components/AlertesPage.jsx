@@ -3,6 +3,7 @@ import { ecouter } from "../utils/tempsReel";
 import axios from "axios";
 import EtatVide from "./EtatVide";
 import { decrireErreur } from "../utils/erreurReseau";
+import ReglesAlerte from "./ReglesAlerte";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
@@ -36,6 +37,12 @@ function dateComplete(dateIso) {
 }
 
 export default function AlertesPage() {
+  /* Deux vues dans le même écran : ce qui s'est passé, et ce qui décide
+     que ça se passe. Les séparer en deux entrées de menu éloignerait la
+     règle de son effet — or c'est en lisant une alerte inutile qu'on a
+     envie de la régler. */
+  const [vue, setVue] = useState("alertes");
+
   const [statut, setStatut] = useState("active");
   const [alertes, setAlertes] = useState([]);
   const [chargement, setChargement] = useState(true);
@@ -56,6 +63,18 @@ export default function AlertesPage() {
   const [deplies, setDeplies] = useState(new Set());
   const [niveauChoisi, setNiveauChoisi] = useState("tous");
   const [recherche, setRecherche] = useState("");
+
+  /* Le rôle ne sert qu'à griser des boutons ; la vraie protection est
+     côté serveur — requireRole("admin") sur la modification des règles. */
+  const [role, setRole] = useState(null);
+  useEffect(() => {
+    try {
+      const brut = localStorage.getItem("utilisateur");
+      if (brut) setRole(JSON.parse(brut).role);
+    } catch {
+      setRole(null);
+    }
+  }, []);
 
   async function charger() {
     setChargement(true);
@@ -233,6 +252,30 @@ export default function AlertesPage() {
         </p>
       </div>
 
+      {/* Bascule entre les deux vues. Posée au-dessus des onglets de
+          statut, qui ne concernent que la liste. */}
+      <div className="flex items-center gap-2 flex-wrap">
+        {[
+          { cle: "alertes", label: "Alertes" },
+          { cle: "regles", label: "Règles de déclenchement" },
+        ].map((v) => (
+          <button
+            key={v.cle}
+            onClick={() => setVue(v.cle)}
+            className={`px-3 py-1.5 rounded-lg text-sm transition cible-tactile ${
+              vue === v.cle
+                ? "bg-[var(--color-signal)] text-[var(--color-sur-accent)] font-medium"
+                : "text-[var(--color-mute)] hover:bg-[var(--color-surface-2)]"
+            }`}
+          >
+            {v.label}
+          </button>
+        ))}
+      </div>
+
+      {vue === "regles" && <ReglesAlerte estAdmin={role === "admin"} />}
+
+      {vue === "alertes" && (
       <div className="flex items-center gap-2 flex-wrap">
         {ONGLETS.map((o) => (
           <button
@@ -248,6 +291,10 @@ export default function AlertesPage() {
           </button>
         ))}
       </div>
+      )}
+
+      {vue === "alertes" && (
+      <>
 
       {/* ── FILTRES ──
           Sur un incident réseau, une seule panne produit des dizaines
@@ -576,6 +623,8 @@ export default function AlertesPage() {
             })}
           </div>
         </>
+      )}
+      </>
       )}
     </div>
   );

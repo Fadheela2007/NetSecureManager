@@ -1,4 +1,4 @@
-import { useState, useEffect, lazy, Suspense } from "react";
+import { useCallback, useState, useEffect, lazy, Suspense } from "react";
 import axios from "axios";
 import Login from "./Components/Login";
 import Accueil from "./Components/Accueil";
@@ -32,11 +32,11 @@ import "./App.css";
 const Dashboard = lazy(() => import("./Components/Dashboard"));
 const EquipementsPage = lazy(() => import("./Components/EquipementsPage"));
 const PlagesPage = lazy(() => import("./Components/PlagesPage"));
+const TopologiePage = lazy(() => import("./Components/TopologiePage"));
 const UtilisateursPage = lazy(() => import("./Components/UtilisateursPage"));
 const AlertesPage = lazy(() => import("./Components/AlertesPage"));
 const IncidentsPage = lazy(() => import("./Components/IncidentsPage"));
 const SitesPage = lazy(() => import("./Components/SitesPage"));
-const BandePassantePage = lazy(() => import("./Components/BandePassantePage"));
 const ConfigurationPage = lazy(() => import("./Components/ConfigurationPage"));
 const JournalPage = lazy(() => import("./Components/JournalPage"));
 const EquipementDetail = lazy(() => import("./Components/EquipementDetail"));
@@ -96,14 +96,52 @@ function App() {
     return () => axios.interceptors.response.eject(id);
   }, []);
 
+  /**
+   * Recharge la liste des sites, et vérifie que celui qui est choisi
+   * existe encore.
+   *
+   * ═════════════════════════════════════════════════════════════════
+   * LE DÉFAUT QUE LA SECONDE MOITIÉ CORRIGE
+   *
+   * La liste ne se chargeait qu'une fois, à l'ouverture. Supprimer un
+   * site depuis la page Sites laissait donc son nom dans le sélecteur
+   * de l'en-tête — et c'était le moindre mal.
+   *
+   * Le vrai dégât était en dessous : `idSite` continuait de désigner un
+   * site effacé. Tous les écrans filtrent dessus. Équipements, alertes,
+   * bande passante devenaient vides, ensemble, sans qu'une seule ligne
+   * dise pourquoi. On cherche une panne de supervision pendant une
+   * heure avant de penser au menu déroulant.
+   *
+   * ── POURQUOI LE CONTRÔLE VIT ICI, ET PAS DANS LA PAGE SITES ──
+   *
+   * Un site peut disparaître autrement que par ce bouton : un autre
+   * administrateur, un second onglet, une suppression en base. Corriger
+   * la sélection à l'endroit où l'on clique n'aurait réparé qu'un
+   * chemin sur trois. Ici, toute relecture de la liste remet la
+   * sélection d'aplomb, quelle qu'en soit la cause.
+   */
+  const chargerSites = useCallback(async () => {
+    try {
+      const { data } = await axios.get(`${API_URL}/sites`);
+      setSites(data);
+
+      setIdSite((actuel) => {
+        if (data.length === 0) return null;
+        /* On GARDE le site choisi s'il existe toujours : sans ce test,
+           chaque rechargement de la liste ramènerait au premier site et
+           défferait le choix de l'utilisateur sous ses yeux. */
+        const existeEncore = data.some((s) => s.id_site === actuel);
+        return existeEncore ? actuel : data[0].id_site;
+      });
+    } catch {
+      handleLogout();
+    }
+  }, []);
+
   useEffect(() => {
     if (!user) return;
-    axios.get(`${API_URL}/sites`).then(({ data }) => {
-      setSites(data);
-      if (data.length > 0) setIdSite(data[0].id_site);
-    }).catch(() => {
-      handleLogout();
-    });
+    chargerSites();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
@@ -220,13 +258,21 @@ function App() {
               blanche. Une seule frontière suffit ici, une seule page
               étant montée à la fois. */}
           <Suspense fallback={<Attente />}>
-            {page === "dashboard" && <Dashboard idSite={idSite} />}
+            {page === "dashboard" && (
+              <Dashboard
+                idSite={idSite}
+                /* Le nom est DÉJÀ ici : le sélecteur le connaît. Le
+                   refaire chercher par le tableau de bord aurait ajouté
+                   une requête pour une chaîne déjà en mémoire. */
+                nomSite={sites.find((s) => s.id_site === idSite)?.nom || null}
+              />
+            )}
             {page === "equipements" && <EquipementsPage idSite={idSite} />}
             {page === "plages" && <PlagesPage idSite={idSite} />}
+            {page === "topologie" && <TopologiePage idSite={idSite} />}
             {page === "alertes" && <AlertesPage />}
             {page === "incidents" && <IncidentsPage />}
-            {page === "sites" && <SitesPage />}
-            {page === "bande-passante" && <BandePassantePage idSite={idSite} />}
+            {page === "sites" && <SitesPage onSitesModifies={chargerSites} />}
             {page === "utilisateurs" && <UtilisateursPage />}
             {page === "configuration" && <ConfigurationPage />}
             {page === "journal" && <JournalPage />}
